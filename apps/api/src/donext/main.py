@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from donext.config import get_settings
 from donext.errors import install_error_handlers
-from donext.routers import auth, availability, courses, events, goals, semesters, tasks
+from donext.routers import auth, availability, courses, events, goals, preferences, semesters, tasks
 
 settings = get_settings()
 
@@ -30,6 +30,7 @@ app.include_router(tasks.router, prefix=api_prefix)
 app.include_router(events.router, prefix=api_prefix)
 app.include_router(goals.router, prefix=api_prefix)
 app.include_router(availability.router, prefix=api_prefix)
+app.include_router(preferences.router, prefix=api_prefix)
 
 
 @app.get("/health", tags=["system"])

@@ -43,6 +43,44 @@ class UserRead(ApiModel):
     created_at: datetime
 
 
+class UserPreferenceBase(ApiModel):
+    minimum_sleep_minutes: int = Field(default=420, ge=240, le=720)
+    preferred_sleep_minutes: int = Field(default=480, ge=240, le=720)
+    default_wake_time: time = time(7, 0)
+    default_sleep_time: time = time(23, 0)
+    maximum_daily_focus_minutes: int = Field(default=480, ge=30, le=960)
+    preferred_session_minutes: int = Field(default=50, ge=10, le=240)
+    minimum_break_minutes: int = Field(default=10, ge=5, le=120)
+    freeze_window_minutes: int = Field(default=240, ge=0, le=1440)
+    preserve_free_time_percent: int = Field(default=15, ge=0, le=100)
+    auto_apply_low_impact_changes: bool = False
+
+    @model_validator(mode="after")
+    def validate_sleep(self) -> "UserPreferenceBase":
+        if self.preferred_sleep_minutes < self.minimum_sleep_minutes:
+            raise ValueError("preferred sleep must be at least the minimum sleep")
+        return self
+
+
+class UserPreferenceUpdate(ApiModel):
+    minimum_sleep_minutes: int | None = Field(default=None, ge=240, le=720)
+    preferred_sleep_minutes: int | None = Field(default=None, ge=240, le=720)
+    default_wake_time: time | None = None
+    default_sleep_time: time | None = None
+    maximum_daily_focus_minutes: int | None = Field(default=None, ge=30, le=960)
+    preferred_session_minutes: int | None = Field(default=None, ge=10, le=240)
+    minimum_break_minutes: int | None = Field(default=None, ge=5, le=120)
+    freeze_window_minutes: int | None = Field(default=None, ge=0, le=1440)
+    preserve_free_time_percent: int | None = Field(default=None, ge=0, le=100)
+    auto_apply_low_impact_changes: bool | None = None
+
+
+class UserPreferenceRead(UserPreferenceBase):
+    id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+
 class SemesterBase(ApiModel):
     name: str = Field(min_length=1, max_length=120)
     start_date: date

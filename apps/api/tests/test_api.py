@@ -175,3 +175,33 @@ def test_validation_errors_are_structured(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_planning_preferences_can_be_read_and_updated(client: TestClient) -> None:
+    register(client)
+
+    defaults = client.get("/api/v1/preferences")
+    assert defaults.status_code == 200
+    assert defaults.json()["preferred_sleep_minutes"] == 480
+    assert defaults.json()["preserve_free_time_percent"] == 15
+
+    updated = client.patch(
+        "/api/v1/preferences",
+        json={
+            "minimum_sleep_minutes": 450,
+            "preferred_sleep_minutes": 510,
+            "preferred_session_minutes": 45,
+            "freeze_window_minutes": 180,
+            "preserve_free_time_percent": 20,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["preferred_sleep_minutes"] == 510
+    assert updated.json()["freeze_window_minutes"] == 180
+
+    invalid = client.patch(
+        "/api/v1/preferences",
+        json={"minimum_sleep_minutes": 540, "preferred_sleep_minutes": 480},
+    )
+    assert invalid.status_code == 422
+    assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
