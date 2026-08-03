@@ -1,65 +1,36 @@
-import Image from "next/image";
+import { ArrowRight, BrainCircuit, CalendarCheck2, Check, ShieldCheck, Sparkles } from "lucide-react";
+import Link from "next/link";
 
-export default function Home() {
+import { Brand } from "@/components/brand";
+
+export default function HomePage() {
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <main className="landing-page">
+      <nav className="landing-nav"><Brand /><div><a href="#how-it-works">How it works</a><a href="#principles">Principles</a></div><div><Link className="nav-login" href="/login">Sign in</Link><Link className="nav-cta" href="/register">Start planning <ArrowRight size={16} /></Link></div></nav>
+      <section className="hero-section">
+        <div className="hero-copy">
+          <span className="hero-kicker"><Sparkles size={15} /> Adaptive planning for student life</span>
+          <h1>Know what to do next—<em>and what can wait.</em></h1>
+          <p>DoNext creates a realistic plan across courses, work, goals, and rest. When life changes, your future adjusts without turning today upside down.</p>
+          <div className="hero-actions"><Link className="primary-button" href="/register">Build my plan <ArrowRight size={17} /></Link><Link className="secondary-button" href="/today">Preview the workspace</Link></div>
+          <div className="hero-trust"><span><Check size={14} /> Local-first Phase 1</span><span><Check size={14} /> No calendar required</span></div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+        <div className="hero-visual" aria-label="Example DoNext daily plan">
+          <div className="visual-toolbar"><div><span /><span /><span /></div><small>Monday, August 3</small><span className="visual-status">Sustainable</span></div>
+          <div className="visual-greeting"><div><small>GOOD MORNING</small><strong>Your day has room to breathe.</strong></div><span>68%<small>allocated</small></span></div>
+          <div className="visual-capacity"><span className="focus" /><span className="life" /><span className="buffer" /></div>
+          <div className="visual-next"><span><Sparkles size={17} /></span><div><small>DO NEXT</small><strong>Algorithms lecture</strong><p>Starts in 35 minutes · ECS 125</p></div><ArrowRight size={18} /></div>
+          <div className="visual-plan">
+            <div className="visual-plan-title"><strong>Today’s plan</strong><small>4 commitments</small></div>
+            {[{ time: "9:00", title: "Algorithms lecture", kind: "violet" }, { time: "11:00", title: "Problem set 3", kind: "mint" }, { time: "1:30", title: "Research methods lab", kind: "blue" }, { time: "4:15", title: "French practice", kind: "coral" }].map((item) => <div className="visual-plan-row" key={item.title}><time>{item.time}</time><i className={item.kind} /><span><strong>{item.title}</strong><small>50 min planned</small></span></div>)}
+          </div>
         </div>
-      </main>
-    </div>
+      </section>
+      <section className="landing-principles" id="principles">
+        <article><span><CalendarCheck2 size={22} /></span><h2>Realistic by default</h2><p>Capacity, sleep, transitions, and buffer are part of the plan—not afterthoughts.</p></article>
+        <article><span><BrainCircuit size={22} /></span><h2>Deterministic decisions</h2><p>A constraint solver will place time. AI will interpret and explain, never guess your calendar.</p></article>
+        <article><span><ShieldCheck size={22} /></span><h2>Change without chaos</h2><p>Replanning protects accepted work and makes every important trade-off reviewable.</p></article>
+      </section>
+    </main>
   );
 }
