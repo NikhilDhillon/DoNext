@@ -14,6 +14,7 @@ The current milestone establishes a polished local foundation:
 - Responsive Today, Week, Semester, Courses, and Goals experiences
 
 Automatic scheduling and AI-assisted input are intentionally reserved for later phases.
+Today, Week, and Semester currently use representative planning data so the product experience can be evaluated before the deterministic scheduling engine is introduced.
 
 ## Repository layout
 
@@ -43,6 +44,18 @@ source .venv/bin/activate
 python -m pip install -e 'apps/api[dev]'
 ```
 
+If Docker is installed, start PostgreSQL and Redis:
+
+```bash
+docker compose --env-file .env -f infrastructure/docker-compose.yml up -d
+```
+
+Apply the database migration:
+
+```bash
+pnpm migrate:api
+```
+
 Start the web application:
 
 ```bash
@@ -52,11 +65,24 @@ pnpm dev:web
 Start the API in another terminal:
 
 ```bash
-source .venv/bin/activate
-uvicorn donext.main:app --app-dir apps/api/src --reload
+pnpm dev:api
 ```
 
 API documentation is available at `http://localhost:8000/api/docs`.
+
+## Validation
+
+Run the complete local quality gate:
+
+```bash
+pnpm check
+```
+
+The API test suite uses an isolated in-memory SQLite database. PostgreSQL remains the production source of truth and Alembic migrations are also checked independently.
+
+## Architecture
+
+Phase 1 architecture and security decisions are documented in [`docs/architecture/phase-1.md`](docs/architecture/phase-1.md).
 
 ## Author
 
