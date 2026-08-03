@@ -33,5 +33,9 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     );
   }
 
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return response.json() as Promise<T>;
 }

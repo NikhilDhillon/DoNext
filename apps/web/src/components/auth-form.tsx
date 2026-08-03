@@ -37,7 +37,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
         method: "POST",
         body: JSON.stringify(body),
       });
-      router.push("/today");
+      router.push(mode === "register" ? "/courses" : "/today");
       router.refresh();
     } catch (requestError) {
       setError(

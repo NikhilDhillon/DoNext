@@ -17,6 +17,8 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 
 import { Brand } from "@/components/brand";
+import { useApiResource } from "@/hooks/use-api-resource";
+import type { Semester, User } from "@/lib/types";
 
 const primaryNavigation = [
   { href: "/today", label: "Today", icon: LayoutDashboard },
@@ -28,6 +30,14 @@ const primaryNavigation = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const user = useApiResource<User>("/auth/me");
+  const semesters = useApiResource<Semester[]>("/semesters");
+  const currentSemester = semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null;
+  const displayName = user.data?.name || "Your workspace";
+  const firstName = displayName.split(" ")[0];
+  const initials = displayName === "Your workspace"
+    ? "—"
+    : displayName.split(" ").slice(0, 2).map((part) => part[0]).join("").toUpperCase();
 
   return (
     <div className="app-frame">
@@ -37,10 +47,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
 
         <Link className="semester-switcher" href="/semester">
-          <span className="semester-icon">F26</span>
+          <span className="semester-icon">{currentSemester ? semesterCode(currentSemester) : "NEW"}</span>
           <span>
-            <small>Current semester</small>
-            Fall 2026
+            <small>{currentSemester ? "Current semester" : "First step"}</small>
+            {currentSemester?.name ?? "Set up semester"}
           </span>
           <ChevronDown size={16} aria-hidden="true" />
         </Link>
@@ -78,9 +88,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           Settings
         </Link>
         <div className="profile-chip">
-          <span>ND</span>
+          <span>{initials}</span>
           <div>
-            <strong>Nikhil</strong>
+            <strong>{firstName}</strong>
             <small>Local workspace</small>
           </div>
           <CircleUserRound size={18} aria-hidden="true" />
@@ -116,4 +126,10 @@ export function AppShell({ children }: { children: ReactNode }) {
       </nav>
     </div>
   );
+}
+
+function semesterCode(semester: Semester) {
+  const start = new Date(`${semester.start_date}T12:00:00`);
+  const season = start.getMonth() < 4 ? "W" : start.getMonth() < 8 ? "S" : "F";
+  return `${season}${String(start.getFullYear()).slice(-2)}`;
 }
