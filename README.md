@@ -8,10 +8,11 @@ The current milestone establishes a polished local foundation:
 
 - Next.js and TypeScript web application
 - FastAPI backend
-- PostgreSQL and Redis development services
+- PostgreSQL persistence, with Redis reserved for later background work
 - Email and password authentication
 - Core planning data model and CRUD APIs
-- Responsive Today, Week, Semester, Courses, and Goals experiences
+- Responsive Today, Week, Semester, Courses, Goals, and Settings experiences
+- Data-backed semester, course, goal, and planning-preference setup
 
 Automatic scheduling and AI-assisted input are intentionally reserved for later phases.
 Today, Week, and Semester currently use representative planning data so the product experience can be evaluated before the deterministic scheduling engine is introduced.
@@ -33,7 +34,9 @@ Requirements:
 - Node.js 22 or later
 - pnpm 11 or later
 - Python 3.13 or later
-- PostgreSQL 17 and Redis 8, either locally or through Docker
+- PostgreSQL 14 or later, installed locally or through Docker
+
+Redis is not required for the current Phase 1 application. It will be introduced when schedule generation moves into background jobs.
 
 Copy `.env.example` to `.env`, then install dependencies:
 
@@ -49,6 +52,22 @@ If Docker is installed, start PostgreSQL and Redis:
 ```bash
 docker compose --env-file .env -f infrastructure/docker-compose.yml up -d
 ```
+
+If PostgreSQL is already running locally, Docker is unnecessary. Create the local application role and database from an administrator account:
+
+```bash
+psql -U "$USER" -d postgres
+```
+
+Then run:
+
+```sql
+CREATE ROLE donext WITH LOGIN PASSWORD 'donext_local';
+CREATE DATABASE donext OWNER donext;
+\q
+```
+
+The password above is only a local development credential and matches `.env.example`. Do not reuse a personal or production password.
 
 Apply the database migration:
 

@@ -23,7 +23,7 @@ The web application and API are separate deployable applications. The scheduling
 
 - Next.js App Router and strict TypeScript
 - Server Components by default
-- Client Components limited to navigation state and authentication forms
+- Client Components limited to interactive navigation, authentication, and data-entry surfaces
 - Responsive navigation for desktop and mobile
 - WCAG-oriented focus styles, semantic headings, labels, and reduced-motion support
 - A small typed API client with credentialed requests and structured error handling
@@ -39,7 +39,7 @@ Today, Week, and Semester use representative data in Phase 1. They define the in
 - SQLAlchemy 2 models and explicit Alembic migrations
 - UTC-capable timestamps with a separate user timezone
 
-Phase 1 exposes authentication and user-scoped CRUD for semesters, courses, tasks, fixed events, goals, and availability.
+Phase 1 exposes authentication, persistent planning preferences, and user-scoped CRUD for semesters, courses, tasks, fixed events, goals, and availability.
 
 ## Authentication and authorization
 
@@ -67,7 +67,7 @@ Schedule versions and scheduled blocks exist in the schema now, but automatic sc
 
 ## Local services
 
-Docker Compose defines PostgreSQL and Redis. The API and web application run directly on the host for fast local reloads. No paid or hosted resources are required for Phase 1.
+PostgreSQL can run natively or through Docker Compose. Redis is defined in Docker Compose but remains optional until background-job phases. The API and web application run directly on the host for fast local reloads. No paid or hosted resources are required for Phase 1.
 
 ## Quality gate
 
