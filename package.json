@@ -1,0 +1,13 @@
+{
+  "name": "donext",
+  "version": "0.1.0",
+  "private": true,
+  "author": "Nikhil Dhillon",
+  "packageManager": "pnpm@11.9.0",
+  "scripts": {
+    "dev:web": "pnpm --filter @donext/web dev",
+    "build:web": "pnpm --filter @donext/web build",
+    "lint:web": "pnpm --filter @donext/web lint",
+    "typecheck:web": "pnpm --filter @donext/web typecheck"
+  }
+}
