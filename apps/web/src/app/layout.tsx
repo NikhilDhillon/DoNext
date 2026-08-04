@@ -1,5 +1,8 @@
 import type { Metadata } from "next";
 import { Geist } from "next/font/google";
+
+import { CustomCursor } from "@/components/custom-cursor";
+
 import "./globals.css";
 
 const geistSans = Geist({
@@ -27,7 +30,10 @@ export default function RootLayout({
       data-scroll-behavior="smooth"
       className={`${geistSans.variable} h-full antialiased`}
     >
-      <body className="min-h-full">{children}</body>
+      <body className="min-h-full">
+        {children}
+        <CustomCursor />
+      </body>
     </html>
   );
 }
