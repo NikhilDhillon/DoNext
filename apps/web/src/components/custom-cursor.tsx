@@ -93,7 +93,6 @@ export function CustomCursor() {
           className="cursor-arrow-body"
           d="M2 2v25.2l6.3-5.8 4.8 10 4.5-2.2-4.8-9.8h10.1L2 2Z"
         />
-        <path className="cursor-arrow-check" d="m6.1 9.2 2.2 2.2 4.4-4.5" />
       </svg>
     </div>
   );
