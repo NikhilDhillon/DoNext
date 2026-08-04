@@ -13,7 +13,8 @@ import {
   Target,
 } from "lucide-react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect } from "react";
 import type { ReactNode } from "react";
 
 import { Brand } from "@/components/brand";
@@ -30,6 +31,7 @@ const primaryNavigation = [
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
+  const router = useRouter();
   const user = useApiResource<User>("/auth/me");
   const semesters = useApiResource<Semester[]>("/semesters");
   const currentSemester = semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null;
@@ -38,6 +40,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   const initials = displayName === "Your workspace"
     ? "—"
     : displayName.split(" ").slice(0, 2).map((part) => part[0]).join("").toUpperCase();
+
+  useEffect(() => {
+    if (user.data && !user.data.onboarding_completed_at) {
+      router.replace("/onboarding");
+    }
+  }, [router, user.data]);
 
   return (
     <div className="app-frame">

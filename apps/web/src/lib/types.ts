@@ -3,6 +3,7 @@ export type User = {
   email: string;
   name: string;
   timezone: string;
+  onboarding_completed_at: string | null;
   created_at: string;
 };
 
@@ -70,6 +71,56 @@ export type Preferences = {
   freeze_window_minutes: number;
   preserve_free_time_percent: number;
   auto_apply_low_impact_changes: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlanningTask = {
+  id: string;
+  name: string;
+  description: string | null;
+  course_id: string | null;
+  goal_id: string | null;
+  parent_task_id: string | null;
+  status: "pending" | "in_progress" | "completed" | "skipped";
+  priority: "critical" | "high" | "medium" | "low" | "optional";
+  flexibility: "fixed" | "low" | "medium" | "high";
+  intensity: "deep" | "moderate" | "light" | "administrative" | "passive";
+  estimated_minutes: number;
+  remaining_minutes: number;
+  minimum_session_minutes: number;
+  preferred_session_minutes: number;
+  maximum_session_minutes: number;
+  earliest_start_at: string | null;
+  deadline_at: string | null;
+  required: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type FixedEvent = {
+  id: string;
+  title: string;
+  semester_id: string | null;
+  category: string;
+  start_at: string;
+  end_at: string;
+  recurrence_rule: string | null;
+  location: string | null;
+  commute_before_minutes: number;
+  commute_after_minutes: number;
+  locked: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AvailabilityWindow = {
+  id: string;
+  day_of_week: number;
+  start_time: string;
+  end_time: string;
+  type: "available" | "unavailable" | "preferred";
+  energy_level: "high" | "medium" | "low";
   created_at: string;
   updated_at: string;
 };

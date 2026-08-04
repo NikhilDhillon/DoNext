@@ -13,9 +13,12 @@ The current milestone establishes a polished local foundation:
 - Core planning data model and CRUD APIs
 - Responsive Today, Week, Semester, Courses, Goals, and Settings experiences
 - Data-backed semester, course, goal, and planning-preference setup
+- Required, resumable onboarding for semester dates, courses, syllabus deadlines, fixed commitments, goals, sleep, and availability
 
 Automatic scheduling and AI-assisted input are intentionally reserved for later phases.
 Today, Week, and Semester currently use representative planning data so the product experience can be evaluated before the deterministic scheduling engine is introduced.
+
+New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Course-outline deadlines are entered manually in Phase 1; document import is reserved for the evaluated AI-assisted input phase.
 
 ## Repository layout
 

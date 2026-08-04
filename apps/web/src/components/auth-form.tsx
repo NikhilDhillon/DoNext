@@ -7,6 +7,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 
 import { apiRequest, ApiRequestError } from "@/lib/api";
+import type { User } from "@/lib/types";
 
 type AuthMode = "login" | "register";
 
@@ -33,11 +34,11 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
         : { email: form.get("email"), password: form.get("password") };
 
     try {
-      await apiRequest(mode === "register" ? "/auth/register" : "/auth/login", {
+      const user = await apiRequest<User>(mode === "register" ? "/auth/register" : "/auth/login", {
         method: "POST",
         body: JSON.stringify(body),
       });
-      router.push(mode === "register" ? "/courses" : "/today");
+      router.push(user.onboarding_completed_at ? "/today" : "/onboarding");
       router.refresh();
     } catch (requestError) {
       setError(

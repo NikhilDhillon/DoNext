@@ -30,6 +30,20 @@ The web application and API are separate deployable applications. The scheduling
 
 Today, Week, and Semester use representative data in Phase 1. They define the intended information hierarchy while the manual planner and deterministic scheduler are built in later phases.
 
+## Onboarding
+
+New accounts must complete a resumable seven-step setup before entering planner routes:
+
+1. Semester dates
+2. Courses and weekly study targets
+3. Major course-outline deadlines
+4. Recurring or fixed commitments, including class, work, gym, travel, and custom activities
+5. Personal goals
+6. Sleep and scheduling boundaries
+7. Review and explicit completion
+
+Each resource is saved through its normal authenticated API as it is entered. The user record stores only the final completion timestamp; it does not duplicate onboarding data. This lets users refresh, sign out, or return later without losing completed setup work.
+
 ## API
 
 - FastAPI with Pydantic request and response validation
