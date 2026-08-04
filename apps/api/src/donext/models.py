@@ -104,6 +104,7 @@ class User(UuidTimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(120))
     timezone: Mapped[str] = mapped_column(String(64), default="America/Vancouver")
     password_hash: Mapped[str] = mapped_column(String(255))
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     sessions: Mapped[list["AuthSession"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

@@ -34,7 +34,12 @@ def create_semester(client: TestClient) -> dict[str, str]:
 def test_authentication_lifecycle(client: TestClient) -> None:
     user = register(client)
     assert user["name"] == "Nikhil Dhillon"
+    assert user["onboarding_completed_at"] is None
     assert client.get("/api/v1/auth/me").json()["email"] == "nikhil@example.com"
+
+    completed = client.post("/api/v1/auth/onboarding/complete")
+    assert completed.status_code == 200
+    assert completed.json()["onboarding_completed_at"] is not None
 
     duplicate = client.post(
         "/api/v1/auth/register",

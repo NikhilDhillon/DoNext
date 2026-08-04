@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from fastapi import APIRouter, Response
 from sqlalchemy import delete, select
 
@@ -75,4 +77,12 @@ def logout(
 
 @router.get("/me", response_model=UserRead)
 def me(current_user: CurrentUser) -> User:
+    return current_user
+
+
+@router.post("/onboarding/complete", response_model=UserRead)
+def complete_onboarding(db: DbSession, current_user: CurrentUser) -> User:
+    current_user.onboarding_completed_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(current_user)
     return current_user

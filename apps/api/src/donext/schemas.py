@@ -40,6 +40,7 @@ class UserRead(ApiModel):
     email: EmailStr
     name: str
     timezone: str
+    onboarding_completed_at: datetime | None
     created_at: datetime
 
 
