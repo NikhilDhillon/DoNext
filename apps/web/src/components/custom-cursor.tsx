@@ -82,5 +82,19 @@ export function CustomCursor() {
     };
   }, []);
 
-  return <div aria-hidden="true" className="custom-cursor" ref={cursorRef} />;
+  return (
+    <div aria-hidden="true" className="custom-cursor" ref={cursorRef}>
+      <svg focusable="false" viewBox="0 0 28 34">
+        <path
+          className="cursor-arrow-outline"
+          d="M2 2v25.2l6.3-5.8 4.8 10 4.5-2.2-4.8-9.8h10.1L2 2Z"
+        />
+        <path
+          className="cursor-arrow-body"
+          d="M2 2v25.2l6.3-5.8 4.8 10 4.5-2.2-4.8-9.8h10.1L2 2Z"
+        />
+        <path className="cursor-arrow-check" d="m6.1 9.2 2.2 2.2 4.4-4.5" />
+      </svg>
+    </div>
+  );
 }
