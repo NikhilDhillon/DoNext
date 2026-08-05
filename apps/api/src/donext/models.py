@@ -87,6 +87,54 @@ class ScheduleStatus(StrEnum):
     superseded = "superseded"
 
 
+class AcademicItemType(StrEnum):
+    assignment = "assignment"
+    project = "project"
+    quiz = "quiz"
+    midterm = "midterm"
+    final_exam = "final_exam"
+    presentation = "presentation"
+    reading = "reading"
+    lab = "lab"
+    other = "other"
+
+
+class WeightOrigin(StrEnum):
+    explicit = "explicit"
+    inferred_equal = "inferred_equal"
+    calculated_from_points = "calculated_from_points"
+    inherited_from_group = "inherited_from_group"
+    manual = "manual"
+    unknown = "unknown"
+
+
+class AllocationMethod(StrEnum):
+    equal = "equal"
+    explicit_percent = "explicit_percent"
+    points = "points"
+
+
+class SchemeSelectionMode(StrEnum):
+    fixed = "fixed"
+    best_outcome = "best_outcome"
+    student_selected = "student_selected"
+
+
+class SelectionRule(StrEnum):
+    all = "all"
+    best_n = "best_n"
+    drop_lowest_n = "drop_lowest_n"
+    highest_attempt = "highest_attempt"
+    latest_attempt = "latest_attempt"
+
+
+class AcademicGradeStatus(StrEnum):
+    ungraded = "ungraded"
+    graded = "graded"
+    exempt = "exempt"
+    missed = "missed"
+
+
 class UuidTimestampMixin:
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(
@@ -197,6 +245,164 @@ class Course(UuidTimestampMixin, Base):
     difficulty: Mapped[int] = mapped_column(Integer, default=3)
     weekly_study_target_minutes: Mapped[int] = mapped_column(Integer, default=180)
 
+    assessment_groups: Mapped[list["AssessmentGroup"]] = relationship(cascade="all, delete-orphan")
+    academic_items: Mapped[list["AcademicItem"]] = relationship(cascade="all, delete-orphan")
+    grading_schemes: Mapped[list["GradingScheme"]] = relationship(cascade="all, delete-orphan")
+
+
+class AssessmentGroup(UuidTimestampMixin, Base):
+    __tablename__ = "assessment_groups"
+    __table_args__ = (
+        CheckConstraint(
+            "relative_weight_percent IS NULL OR "
+            "(relative_weight_percent >= 0 AND relative_weight_percent <= 100)",
+            name="ck_assessment_group_relative_weight",
+        ),
+        CheckConstraint(
+            "extraction_confidence >= 0 AND extraction_confidence <= 1",
+            name="ck_assessment_group_confidence",
+        ),
+        UniqueConstraint("course_id", "name", name="uq_assessment_group_course_name"),
+    )
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), index=True
+    )
+    parent_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assessment_groups.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160))
+    allocation_method: Mapped[AllocationMethod] = mapped_column(
+        Enum(AllocationMethod, native_enum=False), default=AllocationMethod.equal
+    )
+    relative_weight_percent: Mapped[float | None] = mapped_column(Float)
+    weight_origin: Mapped[WeightOrigin] = mapped_column(
+        Enum(WeightOrigin, native_enum=False), default=WeightOrigin.unknown
+    )
+    extraction_confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    source_text: Mapped[str | None] = mapped_column(Text)
+
+
+class AcademicItem(UuidTimestampMixin, Base):
+    __tablename__ = "academic_items"
+    __table_args__ = (
+        CheckConstraint(
+            "direct_weight_percent IS NULL OR "
+            "(direct_weight_percent >= 0 AND direct_weight_percent <= 100)",
+            name="ck_academic_item_direct_weight",
+        ),
+        CheckConstraint(
+            "relative_weight_percent IS NULL OR "
+            "(relative_weight_percent >= 0 AND relative_weight_percent <= 100)",
+            name="ck_academic_item_relative_weight",
+        ),
+        CheckConstraint("points_possible IS NULL OR points_possible > 0", name="ck_item_points"),
+        CheckConstraint("points_earned IS NULL OR points_earned >= 0", name="ck_item_earned"),
+        CheckConstraint(
+            "points_earned IS NULL OR points_possible IS NULL OR points_earned <= points_possible",
+            name="ck_item_earned_not_above_possible",
+        ),
+        CheckConstraint(
+            "minimum_required_percent IS NULL OR "
+            "(minimum_required_percent >= 0 AND minimum_required_percent <= 100)",
+            name="ck_item_minimum_required",
+        ),
+        CheckConstraint(
+            "extraction_confidence >= 0 AND extraction_confidence <= 1",
+            name="ck_academic_item_confidence",
+        ),
+        Index("ix_academic_items_course_due", "course_id", "due_at"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), index=True
+    )
+    assessment_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assessment_groups.id", ondelete="SET NULL"), index=True
+    )
+    item_type: Mapped[AcademicItemType] = mapped_column(
+        Enum(AcademicItemType, native_enum=False), default=AcademicItemType.other
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    direct_weight_percent: Mapped[float | None] = mapped_column(Float)
+    relative_weight_percent: Mapped[float | None] = mapped_column(Float)
+    points_possible: Mapped[float | None] = mapped_column(Float)
+    points_earned: Mapped[float | None] = mapped_column(Float)
+    grade_status: Mapped[AcademicGradeStatus] = mapped_column(
+        Enum(AcademicGradeStatus, native_enum=False), default=AcademicGradeStatus.ungraded
+    )
+    weight_origin: Mapped[WeightOrigin] = mapped_column(
+        Enum(WeightOrigin, native_enum=False), default=WeightOrigin.unknown
+    )
+    extraction_confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    minimum_required_percent: Mapped[float | None] = mapped_column(Float)
+    extra_credit: Mapped[bool] = mapped_column(Boolean, default=False)
+    source_text: Mapped[str | None] = mapped_column(Text)
+    source_references: Mapped[str | None] = mapped_column(Text)
+
+
+class GradingScheme(UuidTimestampMixin, Base):
+    __tablename__ = "grading_schemes"
+    __table_args__ = (UniqueConstraint("course_id", "name", name="uq_grading_scheme_course_name"),)
+
+    course_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(160))
+    selection_mode: Mapped[SchemeSelectionMode] = mapped_column(
+        Enum(SchemeSelectionMode, native_enum=False), default=SchemeSelectionMode.fixed
+    )
+    is_primary: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    components: Mapped[list["GradingSchemeComponent"]] = relationship(cascade="all, delete-orphan")
+
+
+class GradingSchemeComponent(UuidTimestampMixin, Base):
+    __tablename__ = "grading_scheme_components"
+    __table_args__ = (
+        CheckConstraint(
+            "(assessment_group_id IS NOT NULL AND academic_item_id IS NULL) OR "
+            "(assessment_group_id IS NULL AND academic_item_id IS NOT NULL)",
+            name="ck_grading_component_one_target",
+        ),
+        CheckConstraint(
+            "weight_percent >= 0 AND weight_percent <= 100",
+            name="ck_grading_component_weight",
+        ),
+        CheckConstraint(
+            "selection_count IS NULL OR selection_count > 0",
+            name="ck_grading_component_selection_count",
+        ),
+        CheckConstraint(
+            "minimum_required_percent IS NULL OR "
+            "(minimum_required_percent >= 0 AND minimum_required_percent <= 100)",
+            name="ck_grading_component_minimum_required",
+        ),
+    )
+
+    grading_scheme_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("grading_schemes.id", ondelete="CASCADE"), index=True
+    )
+    assessment_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assessment_groups.id", ondelete="CASCADE"), index=True
+    )
+    academic_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("academic_items.id", ondelete="CASCADE"), index=True
+    )
+    weight_percent: Mapped[float] = mapped_column(Float)
+    selection_rule: Mapped[SelectionRule] = mapped_column(
+        Enum(SelectionRule, native_enum=False), default=SelectionRule.all
+    )
+    selection_count: Mapped[int | None] = mapped_column(Integer)
+    is_extra_credit: Mapped[bool] = mapped_column(Boolean, default=False)
+    minimum_required_percent: Mapped[float | None] = mapped_column(Float)
+
 
 class Goal(UuidTimestampMixin, Base):
     __tablename__ = "goals"
@@ -271,6 +477,9 @@ class Task(UuidTimestampMixin, Base):
     )
     goal_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("goals.id", ondelete="SET NULL"), index=True
+    )
+    academic_item_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("academic_items.id", ondelete="SET NULL"), index=True
     )
     parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="CASCADE"), index=True

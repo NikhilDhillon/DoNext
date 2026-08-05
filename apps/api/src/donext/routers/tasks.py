@@ -25,6 +25,7 @@ def validate_task_links(
     user_id: uuid.UUID,
     course_id: uuid.UUID | None,
     goal_id: uuid.UUID | None,
+    academic_item_id: uuid.UUID | None,
     parent_task_id: uuid.UUID | None,
 ) -> None:
     if course_id:
@@ -33,6 +34,16 @@ def validate_task_links(
         from donext.routers.goals import owned_goal
 
         owned_goal(db, user_id, goal_id)
+    if academic_item_id:
+        from donext.routers.grading import owned_academic_item
+
+        item = owned_academic_item(db, user_id, academic_item_id)
+        if course_id is not None and item.course_id != course_id:
+            raise ApiError(
+                "VALIDATION_ERROR",
+                "The academic item and task must belong to the same course.",
+                422,
+            )
     if parent_task_id:
         owned_task(db, user_id, parent_task_id)
 
@@ -53,7 +64,12 @@ def list_tasks(
 @router.post("", response_model=TaskRead, status_code=201)
 def create_task(payload: TaskCreate, db: DbSession, current_user: CurrentUser) -> Task:
     validate_task_links(
-        db, current_user.id, payload.course_id, payload.goal_id, payload.parent_task_id
+        db,
+        current_user.id,
+        payload.course_id,
+        payload.goal_id,
+        payload.academic_item_id,
+        payload.parent_task_id,
     )
     values = payload.model_dump()
     if values["remaining_minutes"] is None:
@@ -84,6 +100,7 @@ def update_task(
         current_user.id,
         values.get("course_id", task.course_id),
         values.get("goal_id", task.goal_id),
+        values.get("academic_item_id", task.academic_item_id),
         values.get("parent_task_id", task.parent_task_id),
     )
     if values.get("parent_task_id") == task.id:

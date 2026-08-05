@@ -10,6 +10,7 @@ from donext.routers import (
     documents,
     events,
     goals,
+    grading,
     preferences,
     semesters,
     tasks,
@@ -42,6 +43,7 @@ app.include_router(goals.router, prefix=api_prefix)
 app.include_router(availability.router, prefix=api_prefix)
 app.include_router(preferences.router, prefix=api_prefix)
 app.include_router(documents.router, prefix=api_prefix)
+app.include_router(grading.router, prefix=api_prefix)
 
 
 @app.get("/health", tags=["system"])

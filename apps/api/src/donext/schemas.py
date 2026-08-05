@@ -5,14 +5,20 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 from donext.models import (
+    AcademicGradeStatus,
+    AcademicItemType,
+    AllocationMethod,
     AvailabilityType,
     EnergyLevel,
     Flexibility,
     GoalStatus,
     Intensity,
     Priority,
+    SchemeSelectionMode,
+    SelectionRule,
     SemesterStatus,
     TaskStatus,
+    WeightOrigin,
 )
 
 
@@ -151,6 +157,7 @@ class TaskBase(ApiModel):
     description: str | None = None
     course_id: uuid.UUID | None = None
     goal_id: uuid.UUID | None = None
+    academic_item_id: uuid.UUID | None = None
     parent_task_id: uuid.UUID | None = None
     status: TaskStatus = TaskStatus.pending
     priority: Priority = Priority.medium
@@ -191,6 +198,7 @@ class TaskUpdate(ApiModel):
     description: str | None = None
     course_id: uuid.UUID | None = None
     goal_id: uuid.UUID | None = None
+    academic_item_id: uuid.UUID | None = None
     parent_task_id: uuid.UUID | None = None
     status: TaskStatus | None = None
     priority: Priority | None = None
@@ -211,6 +219,205 @@ class TaskRead(TaskBase):
     remaining_minutes: int
     created_at: datetime
     updated_at: datetime
+
+
+class AssessmentGroupInput(ApiModel):
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    parent_key: str | None = Field(default=None, max_length=80)
+    name: str = Field(min_length=1, max_length=160)
+    allocation_method: AllocationMethod = AllocationMethod.equal
+    relative_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    weight_origin: WeightOrigin = WeightOrigin.unknown
+    extraction_confidence: float = Field(default=1, ge=0, le=1)
+    source_text: str | None = Field(default=None, max_length=2000)
+
+
+class AcademicItemInput(ApiModel):
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    group_key: str | None = Field(default=None, max_length=80)
+    item_type: AcademicItemType = AcademicItemType.other
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    due_at: datetime | None = None
+    direct_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    relative_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    points_possible: float | None = Field(default=None, gt=0)
+    points_earned: float | None = Field(default=None, ge=0)
+    grade_status: AcademicGradeStatus = AcademicGradeStatus.ungraded
+    weight_origin: WeightOrigin = WeightOrigin.unknown
+    extraction_confidence: float = Field(default=1, ge=0, le=1)
+    minimum_required_percent: float | None = Field(default=None, ge=0, le=100)
+    extra_credit: bool = False
+    source_text: str | None = Field(default=None, max_length=2000)
+    source_references: list[str] = Field(default_factory=list, max_length=20)
+    estimated_minutes: int = Field(default=180, ge=15, le=10080)
+
+    @model_validator(mode="after")
+    def validate_grade(self) -> "AcademicItemInput":
+        if self.points_earned is not None and self.points_possible is None:
+            raise ValueError("points_possible is required when points_earned is set")
+        return self
+
+
+class GradingSchemeComponentInput(ApiModel):
+    target_group_key: str | None = Field(default=None, max_length=80)
+    target_item_key: str | None = Field(default=None, max_length=80)
+    weight_percent: float = Field(ge=0, le=100)
+    selection_rule: SelectionRule = SelectionRule.all
+    selection_count: int | None = Field(default=None, ge=1, le=1000)
+    is_extra_credit: bool = False
+    minimum_required_percent: float | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_target_and_selection(self) -> "GradingSchemeComponentInput":
+        if (self.target_group_key is None) == (self.target_item_key is None):
+            raise ValueError("exactly one grading component target is required")
+        if self.selection_rule in {SelectionRule.best_n, SelectionRule.drop_lowest_n}:
+            if self.selection_count is None:
+                raise ValueError("selection_count is required for best/drop rules")
+        elif self.selection_count is not None:
+            raise ValueError("selection_count is only valid for best/drop rules")
+        return self
+
+
+class GradingSchemeInput(ApiModel):
+    key: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    name: str = Field(min_length=1, max_length=160)
+    selection_mode: SchemeSelectionMode = SchemeSelectionMode.fixed
+    is_primary: bool = False
+    is_complete: bool = False
+    components: list[GradingSchemeComponentInput] = Field(default_factory=list, max_length=200)
+
+
+class CourseGradingReplace(ApiModel):
+    current_grade: float | None = Field(default=None, ge=0, le=100)
+    target_grade: float | None = Field(default=None, ge=0, le=100)
+    groups: list[AssessmentGroupInput] = Field(default_factory=list, max_length=200)
+    items: list[AcademicItemInput] = Field(default_factory=list, max_length=500)
+    schemes: list[GradingSchemeInput] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "CourseGradingReplace":
+        group_keys = [group.key for group in self.groups]
+        item_keys = [item.key for item in self.items]
+        scheme_keys = [scheme.key for scheme in self.schemes]
+        if len(group_keys) != len(set(group_keys)):
+            raise ValueError("assessment group keys must be unique")
+        if len(item_keys) != len(set(item_keys)):
+            raise ValueError("academic item keys must be unique")
+        if len(scheme_keys) != len(set(scheme_keys)):
+            raise ValueError("grading scheme keys must be unique")
+        group_key_set = set(group_keys)
+        item_key_set = set(item_keys)
+        for group in self.groups:
+            if group.parent_key and group.parent_key not in group_key_set:
+                raise ValueError(f"unknown parent group: {group.parent_key}")
+            if group.parent_key == group.key:
+                raise ValueError("an assessment group cannot be its own parent")
+        for item in self.items:
+            if item.group_key and item.group_key not in group_key_set:
+                raise ValueError(f"unknown item group: {item.group_key}")
+        for scheme in self.schemes:
+            for component in scheme.components:
+                if component.target_group_key not in group_key_set and component.target_group_key:
+                    raise ValueError(f"unknown component group: {component.target_group_key}")
+                if component.target_item_key not in item_key_set and component.target_item_key:
+                    raise ValueError(f"unknown component item: {component.target_item_key}")
+        return self
+
+
+class AssessmentGroupRead(ApiModel):
+    id: uuid.UUID
+    parent_group_id: uuid.UUID | None
+    name: str
+    allocation_method: AllocationMethod
+    relative_weight_percent: float | None
+    weight_origin: WeightOrigin
+    extraction_confidence: float
+    source_text: str | None
+
+
+class AcademicItemRead(ApiModel):
+    id: uuid.UUID
+    course_id: uuid.UUID
+    assessment_group_id: uuid.UUID | None
+    task_id: uuid.UUID | None = None
+    item_type: AcademicItemType
+    name: str
+    description: str | None
+    due_at: datetime | None
+    direct_weight_percent: float | None
+    relative_weight_percent: float | None
+    points_possible: float | None
+    points_earned: float | None
+    grade_status: AcademicGradeStatus
+    weight_origin: WeightOrigin
+    extraction_confidence: float
+    minimum_required_percent: float | None
+    extra_credit: bool
+    source_text: str | None
+    source_references: list[str]
+
+
+class GradingSchemeComponentRead(ApiModel):
+    id: uuid.UUID
+    assessment_group_id: uuid.UUID | None
+    academic_item_id: uuid.UUID | None
+    weight_percent: float
+    selection_rule: SelectionRule
+    selection_count: int | None
+    is_extra_credit: bool
+    minimum_required_percent: float | None
+
+
+class GradingSchemeRead(ApiModel):
+    id: uuid.UUID
+    name: str
+    selection_mode: SchemeSelectionMode
+    is_primary: bool
+    is_complete: bool
+    components: list[GradingSchemeComponentRead]
+
+
+class CourseGradingRead(ApiModel):
+    course: CourseRead
+    groups: list[AssessmentGroupRead]
+    items: list[AcademicItemRead]
+    schemes: list[GradingSchemeRead]
+    warnings: list[str]
+
+
+class AcademicItemUpdate(ApiModel):
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    due_at: datetime | None = None
+    direct_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    relative_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    points_possible: float | None = Field(default=None, gt=0)
+    points_earned: float | None = Field(default=None, ge=0)
+    grade_status: AcademicGradeStatus | None = None
+    weight_origin: WeightOrigin | None = None
+    minimum_required_percent: float | None = Field(default=None, ge=0, le=100)
+    extra_credit: bool | None = None
+
+
+AcademicImpactTier = Literal["critical", "high", "normal", "low"]
+
+
+class AcademicImpactReason(ApiModel):
+    code: str
+    label: str
+
+
+class AcademicImpactRead(ApiModel):
+    academic_item_id: uuid.UUID
+    task_id: uuid.UUID | None
+    tier: AcademicImpactTier
+    effective_weight_percent: float
+    minimum_weight_percent: float
+    maximum_weight_percent: float
+    weight_origin: WeightOrigin
+    blocking_rule: str | None
+    reasons: list[AcademicImpactReason]
 
 
 class FixedEventBase(ApiModel):
