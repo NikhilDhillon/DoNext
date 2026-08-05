@@ -3,7 +3,6 @@
 import {
   ArrowLeft,
   ArrowRight,
-  BookOpen,
   BriefcaseBusiness,
   CalendarCheck,
   Check,
@@ -24,6 +23,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 
 import { Brand } from "@/components/brand";
+import { ClassScheduleStep } from "@/components/class-schedule-step";
+import { CourseOutlineStep } from "@/components/course-outline-step";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
@@ -31,6 +32,7 @@ import type {
   Course,
   FixedEvent,
   Goal,
+  OutlineExtraction,
   PlanningTask,
   Preferences,
   Semester,
@@ -39,8 +41,8 @@ import type {
 
 const steps = [
   { label: "Semester", icon: GraduationCap },
-  { label: "Courses", icon: BookOpen },
-  { label: "Course outline", icon: FileText },
+  { label: "Course outlines", icon: FileText },
+  { label: "Class schedule", icon: CalendarCheck },
   { label: "Commitments", icon: CalendarCheck },
   { label: "Goals", icon: Flag },
   { label: "Boundaries", icon: MoonStar },
@@ -108,13 +110,15 @@ export function OnboardingWizard() {
     setStep((current) => Math.max(0, current - 1));
   }
 
-  async function perform(action: () => Promise<void>) {
+  async function perform(action: () => Promise<void>): Promise<boolean> {
     setBusy(true);
     setActionError(null);
     try {
       await action();
+      return true;
     } catch (error) {
       setActionError(error instanceof ApiRequestError ? error.message : "DoNext could not save that yet. Please try again.");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -176,6 +180,98 @@ export function OnboardingWizard() {
       });
       formElement.reset();
       await tasks.reload();
+    });
+  }
+
+  async function importOutline(proposal: OutlineExtraction): Promise<boolean> {
+    if (!currentSemester || !proposal.course.code || !proposal.course.name) return false;
+    return perform(async () => {
+      const course = await apiRequest<Course>(`/semesters/${currentSemester.id}/courses`, {
+        method: "POST",
+        body: JSON.stringify({
+          code: proposal.course.code,
+          name: proposal.course.name,
+          instructor: proposal.course.instructor,
+          difficulty: 3,
+          weekly_study_target_minutes: 180,
+        }),
+      });
+
+      await Promise.all(proposal.items.map((item) => apiRequest<PlanningTask>("/tasks", {
+        method: "POST",
+        body: JSON.stringify({
+          name: item.name,
+          course_id: course.id,
+          estimated_minutes: item.estimated_minutes,
+          deadline_at: item.deadline_at,
+          priority: item.kind === "exam" ? "critical" : "high",
+          flexibility: "low",
+          intensity: "deep",
+        }),
+      })));
+
+      await Promise.all(proposal.meetings.map((meeting) => {
+        const firstDate = firstDayInSemester(currentSemester.start_date, meeting.day_of_week);
+        return apiRequest<FixedEvent>("/events", {
+          method: "POST",
+          body: JSON.stringify({
+            title: meeting.title,
+            semester_id: currentSemester.id,
+            category: "class",
+            start_at: new Date(`${firstDate}T${meeting.start_time}`).toISOString(),
+            end_at: new Date(`${firstDate}T${meeting.end_time}`).toISOString(),
+            recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[meeting.day_of_week]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
+            location: meeting.location,
+            commute_before_minutes: 0,
+            commute_after_minutes: 0,
+            locked: true,
+          }),
+        });
+      }));
+
+      await Promise.all([courses.reload(), tasks.reload(), events.reload()]);
+    });
+  }
+
+  async function createClassSchedule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!currentSemester) return;
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const selectedDays = days.flatMap((_, index) => form.get(`class_day_${index}`) === "on" ? [index] : []);
+    if (!selectedDays.length) {
+      setActionError("Select at least one day when this class meets.");
+      return;
+    }
+    const course = courses.data?.find((item) => item.id === String(form.get("course_id")));
+    if (!course) return;
+    const startTime = String(form.get("start_time"));
+    const endTime = String(form.get("end_time"));
+    if (endTime <= startTime) {
+      setActionError("Class end time must be later than its start time.");
+      return;
+    }
+    await perform(async () => {
+      await Promise.all(selectedDays.map((day) => {
+        const firstDate = firstDayInSemester(currentSemester.start_date, day);
+        return apiRequest<FixedEvent>("/events", {
+          method: "POST",
+          body: JSON.stringify({
+            title: `${course.code} ${String(form.get("meeting_type"))}`,
+            semester_id: currentSemester.id,
+            category: "class",
+            start_at: new Date(`${firstDate}T${startTime}:00`).toISOString(),
+            end_at: new Date(`${firstDate}T${endTime}:00`).toISOString(),
+            recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[day]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
+            location: form.get("location") || null,
+            commute_before_minutes: Number(form.get("commute_before")),
+            commute_after_minutes: Number(form.get("commute_after")),
+            locked: true,
+          }),
+        });
+      }));
+      formElement.reset();
+      await events.reload();
     });
   }
 
@@ -311,8 +407,8 @@ export function OnboardingWizard() {
         <div className="onboarding-progress"><span style={{ width: `${((step + 1) / steps.length) * 100}%` }} /></div>
         <div className="onboarding-content">
           {step === 0 ? <SemesterStep semester={currentSemester} editing={editingSemester} onSubmit={saveSemester} /> : null}
-          {step === 1 ? <CoursesStep semester={currentSemester} courses={courses.data ?? []} busy={busy} onSubmit={createCourse} onRemove={(id) => void remove(`/courses/${id}`, courses.reload)} /> : null}
-          {step === 2 ? <OutlineStep courses={courses.data ?? []} tasks={tasks.data ?? []} busy={busy} onSubmit={createOutlineItem} onRemove={(id) => void remove(`/tasks/${id}`, tasks.reload)} /> : null}
+          {step === 1 && currentSemester ? <CourseOutlineStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} busy={busy} onImport={importOutline} onCreateCourse={createCourse} onCreateItem={createOutlineItem} onRemoveCourse={(id) => void remove(`/courses/${id}`, courses.reload)} onRemoveItem={(id) => void remove(`/tasks/${id}`, tasks.reload)} /> : null}
+          {step === 2 && currentSemester ? <ClassScheduleStep semester={currentSemester} courses={courses.data ?? []} events={events.data ?? []} busy={busy} onSubmit={createClassSchedule} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
           {step === 3 ? <CommitmentsStep events={events.data ?? []} busy={busy} onSubmit={createCommitment} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
           {step === 4 ? <GoalsStep goals={goals.data ?? []} busy={busy} onSubmit={createGoal} onRemove={(id) => void remove(`/goals/${id}`, goals.reload)} /> : null}
           {step === 5 && preferences.data ? <BoundariesStep preferences={preferences.data} availability={availability.data ?? []} busy={busy} onSubmit={saveBoundaries} /> : null}
@@ -337,18 +433,9 @@ function SemesterStep({ semester, editing, onSubmit }: { semester: Semester | nu
   return <><StepHeading eyebrow="Start with the calendar" title="When does this semester run?" copy="DoNext uses the term dates to understand what belongs in this planning season." /><form className="onboarding-form" id="semester-form" onSubmit={onSubmit}><label><span>Semester name</span><input name="name" defaultValue={semester?.name} placeholder="Fall 2026" required /></label><div className="form-row"><label><span>First day</span><input name="start_date" type="date" defaultValue={semester?.start_date} required /></label><label><span>Last day</span><input name="end_date" type="date" defaultValue={semester?.end_date} required /></label></div></form></>;
 }
 
-function CoursesStep({ semester, courses, busy, onSubmit, onRemove }: { semester: Semester | null; courses: Course[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
-  return <><StepHeading eyebrow={semester?.name ?? "Your semester"} title="What are you taking?" copy="Add every course so DoNext can balance deadlines and weekly study targets across the whole term." /><ItemList>{courses.map((course) => <SavedItem key={course.id} icon={<BookOpen size={18} />} title={`${course.code} · ${course.name}`} detail={`${formatMinutes(course.weekly_study_target_minutes)} weekly target`} onRemove={() => onRemove(course.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><div className="form-row"><label><span>Course code</span><input name="code" placeholder="CSC 320" required /></label><label><span>Course name</span><input name="name" placeholder="Algorithms" required /></label></div><label><span>Instructor <small>Optional</small></span><input name="instructor" placeholder="Dr. Chen" /></label><div className="form-row"><label><span>Difficulty</span><select name="difficulty" defaultValue="3"><option value="1">1 · Light</option><option value="2">2</option><option value="3">3 · Moderate</option><option value="4">4</option><option value="5">5 · Demanding</option></select></label><label><span>Weekly study target</span><select name="weekly_hours" defaultValue="3"><option value="1">1 hour</option><option value="2">2 hours</option><option value="3">3 hours</option><option value="4">4 hours</option><option value="5">5 hours</option><option value="6">6 hours</option><option value="8">8 hours</option></select></label></div><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add course</button></form></>;
-}
-
-function OutlineStep({ courses, tasks, busy, onSubmit, onRemove }: { courses: Course[]; tasks: PlanningTask[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
-  const courseIds = new Set(courses.map((course) => course.id));
-  const outlineTasks = tasks.filter((task) => task.course_id && courseIds.has(task.course_id));
-  return <><StepHeading eyebrow="Course outline" title="Add the deadlines already on your radar." copy="Transfer the important assignments, exams, projects, and readings from each syllabus. You can keep adding details later." optional /><div className="onboarding-tip"><FileText size={19} /><span><strong>Syllabus import comes with AI-assisted input.</strong>For Phase 1, add the major graded items manually so every deadline stays reviewable.</span></div><ItemList>{outlineTasks.map((task) => <SavedItem key={task.id} icon={<FileText size={18} />} title={task.name} detail={`${courseName(task.course_id, courses)} · ${task.deadline_at ? formatDate(task.deadline_at) : "No deadline"}`} onRemove={() => onRemove(task.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><div className="form-row"><label><span>Course</span><select name="course_id" required>{courses.map((course) => <option key={course.id} value={course.id}>{course.code}</option>)}</select></label><label><span>Item</span><input name="name" placeholder="Midterm exam" required /></label></div><div className="form-row"><label><span>Deadline</span><input name="deadline" type="date" required /></label><label><span>Estimated effort</span><select name="estimated_hours" defaultValue="3"><option value="1">1 hour</option><option value="2">2 hours</option><option value="3">3 hours</option><option value="5">5 hours</option><option value="8">8 hours</option><option value="12">12 hours</option><option value="20">20 hours</option></select></label></div><div className="form-row"><label><span>Priority</span><select name="priority" defaultValue="high"><option value="critical">Critical</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option></select></label><label><span>Focus type</span><select name="intensity" defaultValue="deep"><option value="deep">Deep work</option><option value="moderate">Moderate</option><option value="light">Light</option><option value="administrative">Administrative</option></select></label></div><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add outline item</button></form></>;
-}
-
 function CommitmentsStep({ events, busy, onSubmit, onRemove }: { events: FixedEvent[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
-  return <><StepHeading eyebrow="The rest of your week" title="What time is already spoken for?" copy="Add classes, work shifts, gym sessions, commutes, appointments, clubs, or anything else DoNext must plan around." optional /><div className="commitment-examples"><span><GraduationCap size={16} /> Class</span><span><BriefcaseBusiness size={16} /> Work</span><span><Dumbbell size={16} /> Gym</span><span><Plus size={16} /> Anything else</span></div><ItemList>{events.map((item) => <SavedItem key={item.id} icon={<Clock3 size={18} />} title={item.title} detail={`${capitalize(item.category)} · ${formatEventTime(item.start_at)}${item.recurrence_rule ? " · Weekly" : ""}`} onRemove={() => onRemove(item.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><div className="form-row"><label><span>Commitment</span><input name="title" placeholder="Gym session" required /></label><label><span>Type</span><select name="category" defaultValue="class"><option value="class">Class</option><option value="work">Work</option><option value="gym">Gym</option><option value="commute">Commute</option><option value="appointment">Appointment</option><option value="club">Club or team</option><option value="personal">Personal</option><option value="other">Anything else</option></select></label></div><div className="form-row three-columns"><label><span>Day</span><select name="day" defaultValue="0">{days.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label><label><span>Starts</span><input name="start_time" type="time" required /></label><label><span>Duration</span><select name="duration" defaultValue="60"><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option><option value="75">1h 15m</option><option value="90">1h 30m</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option><option value="480">8 hours</option></select></label></div><label><span>Location <small>Optional</small></span><input name="location" placeholder="Campus gym" /></label><div className="form-row"><label><span>Travel before</span><select name="commute_before" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label><label><span>Travel after</span><select name="commute_after" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label></div><label className="checkbox-field"><input name="repeats" type="checkbox" defaultChecked /><span><strong>Repeat every week</strong><small>DoNext will protect this time through the semester.</small></span></label><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add commitment</button></form></>;
+  const commitments = events.filter((event) => event.category !== "class");
+  return <><StepHeading eyebrow="The rest of your week" title="What else is already spoken for?" copy="Add work shifts, gym sessions, appointments, clubs, or anything else DoNext must plan around." optional /><div className="commitment-examples"><span><BriefcaseBusiness size={16} /> Work</span><span><Dumbbell size={16} /> Gym</span><span><Clock3 size={16} /> Appointments</span><span><Plus size={16} /> Anything else</span></div><ItemList>{commitments.map((item) => <SavedItem key={item.id} icon={<Clock3 size={18} />} title={item.title} detail={`${capitalize(item.category)} · ${formatEventTime(item.start_at)}${item.recurrence_rule ? " · Weekly" : ""}`} onRemove={() => onRemove(item.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><div className="form-row"><label><span>Commitment</span><input name="title" placeholder="Gym session" required /></label><label><span>Type</span><select name="category" defaultValue="work"><option value="work">Work</option><option value="gym">Gym</option><option value="commute">Commute</option><option value="appointment">Appointment</option><option value="club">Club or team</option><option value="personal">Personal</option><option value="other">Anything else</option></select></label></div><div className="form-row three-columns"><label><span>Day</span><select name="day" defaultValue="0">{days.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label><label><span>Starts</span><input name="start_time" type="time" required /></label><label><span>Duration</span><select name="duration" defaultValue="60"><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option><option value="75">1h 15m</option><option value="90">1h 30m</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option><option value="480">8 hours</option></select></label></div><label><span>Location <small>Optional</small></span><input name="location" placeholder="Campus gym" /></label><div className="form-row"><label><span>Travel before</span><select name="commute_before" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label><label><span>Travel after</span><select name="commute_after" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label></div><label className="checkbox-field"><input name="repeats" type="checkbox" defaultChecked /><span><strong>Repeat every week</strong><small>DoNext will protect this time through the semester.</small></span></label><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add commitment</button></form></>;
 }
 
 function GoalsStep({ goals, busy, onSubmit, onRemove }: { goals: Goal[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
@@ -363,7 +450,9 @@ function BoundariesStep({ preferences, availability, busy, onSubmit }: { prefere
 
 function ReviewStep({ semester, courses, tasks, events, goals, preferences, busy, onFinish }: { semester: Semester | null; courses: Course[]; tasks: PlanningTask[]; events: FixedEvent[]; goals: Goal[]; preferences: Preferences | null; busy: boolean; onFinish: () => void }) {
   const weeklyMinutes = courses.reduce((total, course) => total + course.weekly_study_target_minutes, 0) + goals.reduce((total, goal) => total + goal.preferred_weekly_minutes, 0);
-  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="You can edit every detail later. Finishing setup unlocks your planner without generating or moving anything yet." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outline" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Fixed commitments" value={`${events.length} added`} detail="Classes, work, gym, and life" /><ReviewCard icon={<Flag size={20} />} label="Personal goals" value={`${goals.length} protected`} detail={`${formatMinutes(weeklyMinutes)} combined weekly targets`} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? `${preferences.preserve_free_time_percent}% free-time buffer` : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>Your first plan will still ask before making tradeoffs.</strong><p>Setup gives DoNext context. It does not grant permission to silently overbook you or move fixed commitments.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} Finish setup and open my planner</button></>;
+  const classMeetings = events.filter((event) => event.category === "class").length;
+  const otherCommitments = events.length - classMeetings;
+  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="You can edit every detail later. Finishing setup unlocks your planner without generating or moving anything yet." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outlines" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Class schedule" value={`${classMeetings} meetings`} detail="Locked weekly class time" /><ReviewCard icon={<Clock3 size={20} />} label="Other commitments" value={`${otherCommitments} added`} detail="Work, gym, appointments, and life" /><ReviewCard icon={<Flag size={20} />} label="Personal goals" value={`${goals.length} protected`} detail={`${formatMinutes(weeklyMinutes)} combined weekly targets`} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? `${preferences.preserve_free_time_percent}% free-time buffer` : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>Your first plan will still ask before making tradeoffs.</strong><p>Setup gives DoNext context. It does not grant permission to silently overbook you or move fixed commitments.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} Finish setup and open my planner</button></>;
 }
 
 function ItemList({ children }: { children: ReactNode }) {
@@ -402,10 +491,6 @@ function formatMinutes(minutes: number) {
   if (minutes < 60) return `${minutes} min`;
   const hours = minutes / 60;
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
-}
-
-function courseName(courseId: string | null, courses: Course[]) {
-  return courses.find((course) => course.id === courseId)?.code ?? "Course";
 }
 
 function capitalize(value: string) {

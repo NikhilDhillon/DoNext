@@ -13,12 +13,13 @@ The current milestone establishes a polished local foundation:
 - Core planning data model and CRUD APIs
 - Responsive Today, Week, Semester, Courses, Goals, and Settings experiences
 - Data-backed semester, course, goal, and planning-preference setup
-- Required, resumable onboarding for semester dates, courses, syllabus deadlines, fixed commitments, goals, sleep, and availability
+- Required, resumable onboarding for semester dates, course outlines, class schedules, fixed commitments, goals, sleep, and availability
+- Local PDF, DOCX, and TXT course-outline extraction with a review-before-import workflow and manual-entry fallback
 
-Automatic scheduling and AI-assisted input are intentionally reserved for later phases.
+Automatic schedule generation and model-assisted document interpretation are intentionally reserved for later phases. Phase 1 uses a deterministic local parser so uploaded outlines are not sent to an external AI provider.
 Today, Week, and Semester currently use representative planning data so the product experience can be evaluated before the deterministic scheduling engine is introduced.
 
-New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Course-outline deadlines are entered manually in Phase 1; document import is reserved for the evaluated AI-assisted input phase.
+New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload text-based course outlines, review the proposed course details, assignments, exams, and class meetings, then confirm the import. Scanned PDFs without embedded text may require manual entry.
 
 ## Repository layout
 

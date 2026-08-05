@@ -124,3 +124,36 @@ export type AvailabilityWindow = {
   created_at: string;
   updated_at: string;
 };
+
+export type OutlineItemProposal = {
+  name: string;
+  kind: "assignment" | "exam" | "quiz" | "project" | "paper" | "lab" | "other";
+  deadline_at: string | null;
+  weight_percent: number | null;
+  estimated_minutes: number;
+  confidence: number;
+  source_text: string;
+};
+
+export type OutlineMeetingProposal = {
+  title: string;
+  day_of_week: number;
+  start_time: string;
+  end_time: string;
+  location: string | null;
+  confidence: number;
+  source_text: string;
+};
+
+export type OutlineExtraction = {
+  file_name: string;
+  course: {
+    code: string | null;
+    name: string | null;
+    instructor: string | null;
+    confidence: number;
+  };
+  items: OutlineItemProposal[];
+  meetings: OutlineMeetingProposal[];
+  warnings: string[];
+};

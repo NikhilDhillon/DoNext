@@ -39,3 +39,21 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 
   return response.json() as Promise<T>;
 }
+
+export async function apiUpload<T>(path: string, body: FormData): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: "POST",
+    body,
+    credentials: "include",
+  });
+
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
+    throw new ApiRequestError(
+      payload.error?.message ?? "Something went wrong. Please try again.",
+      response.status,
+    );
+  }
+
+  return response.json() as Promise<T>;
+}
