@@ -178,3 +178,103 @@ def test_academic_items_are_user_scoped(client: TestClient) -> None:
         == 404
     )
     assert client.get(f"/api/v1/courses/{course['id']}/academic-impact").status_code == 404
+
+
+def test_points_nested_extra_credit_and_unknown_weights(client: TestClient) -> None:
+    register(client)
+    course = create_course(client, "CSC 370")
+    payload = {
+        "groups": [
+            {
+                "key": "project",
+                "name": "Project",
+                "allocation_method": "explicit_percent",
+                "weight_origin": "explicit",
+            },
+            {
+                "key": "sprints",
+                "parent_key": "project",
+                "name": "Project sprints",
+                "allocation_method": "explicit_percent",
+                "relative_weight_percent": 50,
+                "weight_origin": "explicit",
+            },
+            {
+                "key": "labs",
+                "name": "Labs",
+                "allocation_method": "points",
+                "weight_origin": "explicit",
+            },
+        ],
+        "items": [
+            {
+                "key": "sprint-1",
+                "group_key": "sprints",
+                "name": "Sprint 1",
+                "item_type": "project",
+                "relative_weight_percent": 25,
+                "weight_origin": "explicit",
+            },
+            {
+                "key": "lab-1",
+                "group_key": "labs",
+                "name": "Lab 1",
+                "item_type": "lab",
+                "points_possible": 100,
+                "weight_origin": "calculated_from_points",
+            },
+            {
+                "key": "lab-2",
+                "group_key": "labs",
+                "name": "Lab 2",
+                "item_type": "lab",
+                "points_possible": 200,
+                "weight_origin": "calculated_from_points",
+            },
+            {
+                "key": "bonus",
+                "name": "Bonus reflection",
+                "item_type": "assignment",
+                "extra_credit": True,
+                "weight_origin": "explicit",
+            },
+            {
+                "key": "unknown",
+                "name": "Unconfirmed assessment",
+                "item_type": "other",
+                "weight_origin": "unknown",
+            },
+        ],
+        "schemes": [
+            {
+                "key": "standard",
+                "name": "Standard",
+                "is_primary": True,
+                "components": [
+                    {"target_group_key": "project", "weight_percent": 40},
+                    {"target_group_key": "labs", "weight_percent": 30},
+                    {
+                        "target_item_key": "bonus",
+                        "weight_percent": 10,
+                        "is_extra_credit": True,
+                    },
+                ],
+            }
+        ],
+    }
+    response = client.put(f"/api/v1/courses/{course['id']}/grading", json=payload)
+    assert response.status_code == 200
+    names = {item["id"]: item["name"] for item in response.json()["items"]}
+
+    impacts = client.get(f"/api/v1/courses/{course['id']}/academic-impact").json()
+    by_name = {names[impact["academic_item_id"]]: impact for impact in impacts}
+    assert by_name["Sprint 1"]["effective_weight_percent"] == 5
+    assert by_name["Lab 1"]["effective_weight_percent"] == 10
+    assert by_name["Lab 2"]["effective_weight_percent"] == 20
+    assert by_name["Lab 1"]["weight_origin"] == "calculated_from_points"
+    assert by_name["Bonus reflection"]["tier"] == "low"
+    assert any(
+        reason["code"] == "extra_credit" for reason in by_name["Bonus reflection"]["reasons"]
+    )
+    assert by_name["Unconfirmed assessment"]["effective_weight_percent"] == 0
+    assert by_name["Unconfirmed assessment"]["weight_origin"] == "unknown"

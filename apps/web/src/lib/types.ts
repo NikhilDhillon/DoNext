@@ -81,6 +81,7 @@ export type PlanningTask = {
   description: string | null;
   course_id: string | null;
   goal_id: string | null;
+  academic_item_id: string | null;
   parent_task_id: string | null;
   status: "pending" | "in_progress" | "completed" | "skipped";
   priority: "critical" | "high" | "medium" | "low" | "optional";
@@ -126,13 +127,66 @@ export type AvailabilityWindow = {
 };
 
 export type OutlineItemProposal = {
+  key: string | null;
+  group_key: string | null;
   name: string;
   kind: "assignment" | "exam" | "quiz" | "project" | "paper" | "lab" | "other";
   deadline_at: string | null;
   weight_percent: number | null;
+  relative_weight_percent: number | null;
+  points_possible: number | null;
+  weight_origin: WeightOrigin;
+  minimum_required_percent: number | null;
+  extra_credit: boolean;
   estimated_minutes: number;
   confidence: number;
   source_text: string;
+};
+
+export type WeightOrigin =
+  | "explicit"
+  | "inferred_equal"
+  | "calculated_from_points"
+  | "inherited_from_group"
+  | "manual"
+  | "unknown";
+
+export type AllocationMethod = "equal" | "explicit_percent" | "points";
+export type SelectionRule =
+  | "all"
+  | "best_n"
+  | "drop_lowest_n"
+  | "highest_attempt"
+  | "latest_attempt";
+
+export type AssessmentGroupProposal = {
+  key: string;
+  parent_key: string | null;
+  name: string;
+  allocation_method: AllocationMethod;
+  relative_weight_percent: number | null;
+  weight_origin: WeightOrigin;
+  extraction_confidence: number;
+  source_text: string | null;
+};
+
+export type GradingSchemeComponentProposal = {
+  target_group_key: string | null;
+  target_item_key: string | null;
+  weight_percent: number;
+  selection_rule: SelectionRule;
+  selection_count: number | null;
+  is_extra_credit: boolean;
+  minimum_required_percent: number | null;
+};
+
+export type GradingSchemeProposal = {
+  key: string;
+  name: string;
+  selection_mode: "fixed" | "best_outcome" | "student_selected";
+  is_primary: boolean;
+  is_complete: boolean;
+  components: GradingSchemeComponentProposal[];
 };
 
 export type OutlineMeetingProposal = {
@@ -156,6 +210,89 @@ export type OutlineExtraction = {
     confidence: number;
   };
   items: OutlineItemProposal[];
+  groups: AssessmentGroupProposal[];
+  schemes: GradingSchemeProposal[];
+  grading_evidence: string[];
   meetings: OutlineMeetingProposal[];
   warnings: string[];
+};
+
+export type AssessmentGroup = {
+  id: string;
+  parent_group_id: string | null;
+  name: string;
+  allocation_method: AllocationMethod;
+  relative_weight_percent: number | null;
+  weight_origin: WeightOrigin;
+  extraction_confidence: number;
+  source_text: string | null;
+};
+
+export type AcademicItem = {
+  id: string;
+  course_id: string;
+  assessment_group_id: string | null;
+  task_id: string | null;
+  item_type:
+    | "assignment"
+    | "project"
+    | "quiz"
+    | "midterm"
+    | "final_exam"
+    | "presentation"
+    | "reading"
+    | "lab"
+    | "other";
+  name: string;
+  description: string | null;
+  due_at: string | null;
+  direct_weight_percent: number | null;
+  relative_weight_percent: number | null;
+  points_possible: number | null;
+  points_earned: number | null;
+  grade_status: "ungraded" | "graded" | "exempt" | "missed";
+  weight_origin: WeightOrigin;
+  extraction_confidence: number;
+  minimum_required_percent: number | null;
+  extra_credit: boolean;
+  source_text: string | null;
+  source_references: string[];
+};
+
+export type GradingScheme = {
+  id: string;
+  name: string;
+  selection_mode: "fixed" | "best_outcome" | "student_selected";
+  is_primary: boolean;
+  is_complete: boolean;
+  components: Array<{
+    id: string;
+    assessment_group_id: string | null;
+    academic_item_id: string | null;
+    weight_percent: number;
+    selection_rule: SelectionRule;
+    selection_count: number | null;
+    is_extra_credit: boolean;
+    minimum_required_percent: number | null;
+  }>;
+};
+
+export type CourseGrading = {
+  course: Course;
+  groups: AssessmentGroup[];
+  items: AcademicItem[];
+  schemes: GradingScheme[];
+  warnings: string[];
+};
+
+export type AcademicImpact = {
+  academic_item_id: string;
+  task_id: string | null;
+  tier: "critical" | "high" | "normal" | "low";
+  effective_weight_percent: number;
+  minimum_weight_percent: number;
+  maximum_weight_percent: number;
+  weight_origin: WeightOrigin;
+  blocking_rule: string | null;
+  reasons: Array<{ code: string; label: string }>;
 };

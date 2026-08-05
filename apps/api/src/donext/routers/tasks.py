@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
-from donext.models import Task, TaskStatus
+from donext.models import AcademicItem, Task, TaskStatus, WeightOrigin
 from donext.routers.courses import owned_course
 from donext.schemas import TaskCreate, TaskRead, TaskUpdate
 
@@ -74,6 +74,18 @@ def create_task(payload: TaskCreate, db: DbSession, current_user: CurrentUser) -
     values = payload.model_dump()
     if values["remaining_minutes"] is None:
         values["remaining_minutes"] = payload.estimated_minutes
+    if payload.course_id and payload.academic_item_id is None:
+        academic_item = AcademicItem(
+            user_id=current_user.id,
+            course_id=payload.course_id,
+            name=payload.name,
+            description=payload.description,
+            due_at=payload.deadline_at,
+            weight_origin=WeightOrigin.unknown,
+        )
+        db.add(academic_item)
+        db.flush()
+        values["academic_item_id"] = academic_item.id
     task = Task(user_id=current_user.id, **values)
     db.add(task)
     db.commit()

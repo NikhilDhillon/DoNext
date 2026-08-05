@@ -210,24 +210,30 @@ export function OnboardingWizard() {
           }),
         });
 
-      await Promise.all(proposal.items.map((item) => {
-        const existingTask = (tasks.data ?? []).find(
-          (current) => current.course_id === course.id
-            && current.name.trim().toLowerCase() === item.name.trim().toLowerCase(),
-        );
-        return apiRequest<PlanningTask>(existingTask ? `/tasks/${existingTask.id}` : "/tasks", {
-          method: existingTask ? "PATCH" : "POST",
-          body: JSON.stringify({
+      await apiRequest(`/courses/${course.id}/grading`, {
+        method: "PUT",
+        body: JSON.stringify({
+          groups: proposal.groups,
+          items: proposal.items.map((item, index) => ({
+            key: item.key ?? `item-${index + 1}`,
+            group_key: item.group_key,
+            item_type: academicItemType(item),
             name: item.name,
-            ...(existingTask ? {} : { course_id: course.id }),
+            due_at: item.deadline_at,
+            direct_weight_percent: item.weight_percent,
+            relative_weight_percent: item.relative_weight_percent,
+            points_possible: item.points_possible,
+            weight_origin: item.weight_origin,
+            extraction_confidence: item.confidence,
+            minimum_required_percent: item.minimum_required_percent,
+            extra_credit: item.extra_credit,
+            source_text: item.source_text,
+            source_references: proposal.source_files,
             estimated_minutes: item.estimated_minutes,
-            deadline_at: item.deadline_at,
-            priority: item.kind === "exam" ? "critical" : "high",
-            flexibility: "low",
-            intensity: "deep",
-          }),
-        });
-      }));
+          })),
+          schemes: proposal.schemes,
+        }),
+      });
 
       const existingMeetingKeys = new Set(
         (events.data ?? []).filter((item) => item.category === "class").map(fixedEventKey),
@@ -535,6 +541,14 @@ function fixedEventKey(event: FixedEvent) {
 
 function outlineMeetingKey(meeting: OutlineExtraction["meetings"][number]) {
   return `${meeting.day_of_week}|${meeting.start_time.slice(0, 5)}|${meeting.end_time.slice(0, 5)}`;
+}
+
+function academicItemType(item: OutlineExtraction["items"][number]) {
+  if (item.kind === "exam") {
+    return item.name.toLowerCase().includes("final") ? "final_exam" : "midterm";
+  }
+  if (item.kind === "paper") return "presentation";
+  return item.kind;
 }
 
 function timeKey(value: Date) {

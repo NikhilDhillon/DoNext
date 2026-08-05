@@ -1,10 +1,11 @@
 "use client";
 
-import { BookOpen, Clock3, LoaderCircle, Plus, Trash2 } from "lucide-react";
+import { BookOpen, Clock3, LoaderCircle, Plus, Scale, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import { FormDialog } from "@/components/form-dialog";
+import { GradingEditor } from "@/components/grading-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type { Course, Semester } from "@/lib/types";
@@ -31,6 +32,7 @@ export function CourseManager() {
     currentSemester ? `/semesters/${currentSemester.id}/courses` : null,
   );
   const [courseDialogOpen, setCourseDialogOpen] = useState(false);
+  const [gradingCourse, setGradingCourse] = useState<Course | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -167,7 +169,7 @@ export function CourseManager() {
                 <span><small>Difficulty</small><strong>{course.difficulty} / 5</strong></span>
               </div>
               <div className="course-next"><span>Instructor</span><strong>{course.instructor || "Not added yet"}</strong><small>Course details can be refined anytime</small></div>
-              <div className="course-card-footer"><span><Clock3 size={15} /> {formatMinutes(course.weekly_study_target_minutes)} each week</span></div>
+              <div className="course-card-footer"><span><Clock3 size={15} /> {formatMinutes(course.weekly_study_target_minutes)} each week</span><button type="button" onClick={() => setGradingCourse(course)}><Scale size={14} /> Grading & impact</button></div>
             </article>
           ))}
           <button className="add-course-card" type="button" onClick={() => setCourseDialogOpen(true)}><span><Plus size={22} /></span><strong>Add another course</strong><small>Build a complete picture of your semester</small></button>
@@ -183,6 +185,7 @@ export function CourseManager() {
           <div className="dialog-actions"><button className="secondary-button" type="button" onClick={() => setCourseDialogOpen(false)}>Cancel</button><button className="primary-button" disabled={submitting} type="submit">{submitting ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save course</button></div>
         </form>
       </FormDialog>
+      {gradingCourse ? <GradingEditor course={gradingCourse} open onClose={() => setGradingCourse(null)} onSaved={courses.reload} /> : null}
     </main>
   );
 }

@@ -574,10 +574,17 @@ OutlineDocumentType = Literal["course_outline", "course_schedule", "lecture_mate
 
 
 class OutlineItemProposal(ApiModel):
+    key: str | None = None
+    group_key: str | None = None
     name: str
     kind: OutlineItemKind
     deadline_at: datetime | None = None
     weight_percent: float | None = Field(default=None, ge=0, le=100)
+    relative_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    points_possible: float | None = Field(default=None, gt=0)
+    weight_origin: WeightOrigin = WeightOrigin.unknown
+    minimum_required_percent: float | None = Field(default=None, ge=0, le=100)
+    extra_credit: bool = False
     estimated_minutes: int = Field(ge=15, le=10080)
     confidence: float = Field(ge=0, le=1)
     source_text: str
@@ -599,5 +606,8 @@ class OutlineExtractionRead(ApiModel):
     document_types: list[OutlineDocumentType] = Field(default_factory=list)
     course: OutlineCourseProposal
     items: list[OutlineItemProposal]
+    groups: list[AssessmentGroupInput] = Field(default_factory=list)
+    schemes: list[GradingSchemeInput] = Field(default_factory=list)
+    grading_evidence: list[str] = Field(default_factory=list)
     meetings: list[OutlineMeetingProposal]
     warnings: list[str]

@@ -16,7 +16,14 @@ import { useState } from "react";
 import type { ChangeEvent, DragEvent, FormEvent } from "react";
 
 import { apiUpload, ApiRequestError } from "@/lib/api";
-import type { Course, OutlineExtraction, PlanningTask, Semester } from "@/lib/types";
+import type {
+  Course,
+  GradingSchemeComponentProposal,
+  OutlineExtraction,
+  OutlineItemProposal,
+  PlanningTask,
+  Semester,
+} from "@/lib/types";
 
 type CourseOutlineStepProps = {
   semester: Semester;
@@ -94,6 +101,26 @@ export function CourseOutlineStep({
     if (imported) setProposals((current) => current.filter((_, itemIndex) => itemIndex !== index));
   }
 
+  function updateSchemeComponent(
+    proposalIndex: number,
+    schemeIndex: number,
+    componentIndex: number,
+    updates: Partial<GradingSchemeComponentProposal>,
+  ) {
+    const proposal = proposals[proposalIndex];
+    updateProposal(proposalIndex, {
+      ...proposal,
+      schemes: proposal.schemes.map((scheme, currentSchemeIndex) =>
+        currentSchemeIndex === schemeIndex
+          ? {
+            ...scheme,
+            components: scheme.components.map((component, currentComponentIndex) =>
+              currentComponentIndex === componentIndex ? { ...component, ...updates } : component),
+          }
+          : scheme),
+    });
+  }
+
   const courseIds = new Set(courses.map((course) => course.id));
   const outlineTasks = tasks.filter((task) => task.course_id && courseIds.has(task.course_id));
 
@@ -153,14 +180,43 @@ export function CourseOutlineStep({
             </div>
             <label className="outline-instructor"><span>Instructor <small>Optional</small></span><input value={proposal.course.instructor ?? ""} onChange={(event) => updateProposal(proposalIndex, { ...proposal, course: { ...proposal.course, instructor: event.target.value || null } })} placeholder="Dr. Chen" /></label>
 
+            {proposal.schemes.length ? <div className="grading-scheme-review">
+              <div className="proposal-section-title"><strong>Grading schemes</strong><small>Alternatives stay separate; DoNext plans for the highest plausible impact.</small></div>
+              {proposal.schemes.map((scheme, schemeIndex) => <article key={scheme.key}>
+                <header><div><strong>{scheme.name}</strong><small>{scheme.is_complete ? "Complete 100% scheme" : "Incomplete — review the missing weight"}</small></div><span>{scheme.selection_mode === "best_outcome" ? "Best outcome" : "Standard"}</span></header>
+                <div>{scheme.components.map((component, componentIndex) => {
+                  const target = proposal.groups.find((group) => group.key === component.target_group_key)?.name
+                    ?? proposal.items.find((item) => item.key === component.target_item_key)?.name
+                    ?? "Assessment";
+                  return <label key={`${component.target_group_key ?? component.target_item_key}-${componentIndex}`}><span>{target}</span><span className="scheme-weight-input"><input aria-label={`${target} course weight in ${scheme.name}`} min="0" max="100" step="0.5" type="number" value={component.weight_percent} onChange={(event) => updateSchemeComponent(proposalIndex, schemeIndex, componentIndex, { weight_percent: Number(event.target.value) })} />%</span></label>;
+                })}</div>
+              </article>)}
+            </div> : null}
+
             {proposal.items.length ? <div className="proposal-items">
-              <div className="proposal-section-title"><strong>Assignments and exams</strong><small>Review every date before importing.</small></div>
-              {proposal.items.map((item, itemIndex) => <div className="proposal-item" key={`${item.name}-${itemIndex}`}>
-                <input aria-label="Item name" value={item.name} onChange={(event) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, name: event.target.value } : current) })} />
-                <input aria-label={`${item.name} deadline`} type="date" value={item.deadline_at?.slice(0, 10) ?? ""} onChange={(event) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, deadline_at: event.target.value ? `${event.target.value}T23:59:00` : null } : current) })} />
-                <span>{Math.round(item.confidence * 100)}% confidence{item.weight_percent !== null ? ` · ${item.weight_percent}% weight` : ""}</span>
-                <button aria-label={`Remove ${item.name}`} type="button" onClick={() => updateProposal(proposalIndex, { ...proposal, items: proposal.items.filter((_, index) => index !== itemIndex) })}><Trash2 size={15} /></button>
-              </div>)}
+              <div className="proposal-section-title"><strong>Assignments and exams</strong><small>Review weights, dates, and source evidence before importing.</small></div>
+              {proposal.groups.map((group) => {
+                const primarySchemeIndex = Math.max(0, proposal.schemes.findIndex((scheme) => scheme.is_primary));
+                const componentIndex = proposal.schemes[primarySchemeIndex]?.components.findIndex((component) => component.target_group_key === group.key) ?? -1;
+                const component = componentIndex >= 0 ? proposal.schemes[primarySchemeIndex].components[componentIndex] : null;
+                const groupItems = proposal.items.filter((item) => item.group_key === group.key);
+                if (!groupItems.length) return null;
+                return <section className="proposal-group" key={group.key}>
+                  <header>
+                    <div><strong>{group.name}{component ? ` — ${component.weight_percent}% — ${formatRule(component)}` : ""}</strong><small>{formatOrigin(group.weight_origin)} · {Math.round(group.extraction_confidence * 100)}% confidence</small></div>
+                    {component ? <div className="group-rule-editor"><label><span>Group weight</span><span><input min="0" max="100" step="0.5" type="number" value={component.weight_percent} onChange={(event) => updateSchemeComponent(proposalIndex, primarySchemeIndex, componentIndex, { weight_percent: Number(event.target.value) })} />%</span></label><label><span>Counting rule</span><select value={component.selection_rule} onChange={(event) => updateSchemeComponent(proposalIndex, primarySchemeIndex, componentIndex, { selection_rule: event.target.value as GradingSchemeComponentProposal["selection_rule"], selection_count: ["best_n", "drop_lowest_n"].includes(event.target.value) ? (component.selection_count ?? 1) : null })}><option value="all">All items count</option><option value="best_n">Best N</option><option value="drop_lowest_n">Drop lowest N</option><option value="highest_attempt">Highest attempt</option><option value="latest_attempt">Latest attempt</option></select></label>{["best_n", "drop_lowest_n"].includes(component.selection_rule) ? <label><span>Number</span><input min="1" max={groupItems.length} type="number" value={component.selection_count ?? 1} onChange={(event) => updateSchemeComponent(proposalIndex, primarySchemeIndex, componentIndex, { selection_count: Number(event.target.value) })} /></label> : null}</div> : null}
+                  </header>
+                  {group.source_text ? <p className="proposal-source">Source: {group.source_text}</p> : null}
+                  {groupItems.map((item) => {
+                    const itemIndex = proposal.items.indexOf(item);
+                    return <ProposalItemRow grouped item={item} key={item.key ?? `${item.name}-${itemIndex}`} onChange={(updates) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, ...updates } : current) })} onRemove={() => updateProposal(proposalIndex, { ...proposal, items: proposal.items.filter((_, index) => index !== itemIndex) })} />;
+                  })}
+                </section>;
+              })}
+              {proposal.items.filter((item) => !item.group_key).map((item) => {
+                const itemIndex = proposal.items.indexOf(item);
+                return <ProposalItemRow grouped={false} item={item} key={item.key ?? `${item.name}-${itemIndex}`} onChange={(updates) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, ...updates } : current) })} onRemove={() => updateProposal(proposalIndex, { ...proposal, items: proposal.items.filter((_, index) => index !== itemIndex) })} />;
+              })}
             </div> : null}
 
             {proposal.warnings.map((warning) => <p className="proposal-warning" key={warning}><AlertTriangle size={15} />{warning}</p>)}
@@ -196,6 +252,37 @@ export function CourseOutlineStep({
       </details>
     </>
   );
+}
+
+function ProposalItemRow({ item, grouped, onChange, onRemove }: { item: OutlineItemProposal; grouped: boolean; onChange: (updates: Partial<OutlineItemProposal>) => void; onRemove: () => void }) {
+  const weight = grouped ? item.relative_weight_percent : item.weight_percent;
+  return <div className="proposal-item">
+    <input aria-label="Item name" value={item.name} onChange={(event) => onChange({ name: event.target.value })} />
+    <input aria-label={`${item.name} deadline`} type="date" value={item.deadline_at?.slice(0, 10) ?? ""} onChange={(event) => onChange({ deadline_at: event.target.value ? `${event.target.value}T23:59:00` : null })} />
+    <label className="proposal-weight-field"><span>{grouped ? "Within group" : "Course weight"}</span><span><input aria-label={`${item.name} weight`} min="0" max="100" placeholder={grouped ? "Equal" : "Unknown"} step="0.5" type="number" value={weight ?? ""} onChange={(event) => onChange({ [grouped ? "relative_weight_percent" : "weight_percent"]: event.target.value === "" ? null : Number(event.target.value), weight_origin: event.target.value === "" ? (grouped ? "inferred_equal" : "unknown") : "manual" })} />%</span></label>
+    <span title={item.source_text}>{formatOrigin(item.weight_origin)} · {Math.round(item.confidence * 100)}%</span>
+    <button aria-label={`Remove ${item.name}`} type="button" onClick={onRemove}><Trash2 size={15} /></button>
+    <small className="proposal-item-source">Source: {item.source_text}</small>
+  </div>;
+}
+
+function formatRule(component: GradingSchemeComponentProposal) {
+  if (component.selection_rule === "drop_lowest_n") return `drop lowest ${component.selection_count ?? 1}`;
+  if (component.selection_rule === "best_n") return `best ${component.selection_count ?? 1}`;
+  if (component.selection_rule === "highest_attempt") return "highest attempt";
+  if (component.selection_rule === "latest_attempt") return "latest attempt";
+  return "all count";
+}
+
+function formatOrigin(value: OutlineItemProposal["weight_origin"]) {
+  return {
+    explicit: "Explicit weight",
+    inferred_equal: "Provisional equal share",
+    calculated_from_points: "Calculated from points",
+    inherited_from_group: "Inherited from group",
+    manual: "Manually confirmed",
+    unknown: "Weight unknown",
+  }[value];
 }
 
 function formatDocumentType(value: OutlineExtraction["document_types"][number]) {

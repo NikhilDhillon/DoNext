@@ -10,12 +10,14 @@ export function FormDialog({
   description,
   children,
   onClose,
+  wide = false,
 }: {
   open: boolean;
   title: string;
   description: string;
   children: ReactNode;
   onClose: () => void;
+  wide?: boolean;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
@@ -27,7 +29,7 @@ export function FormDialog({
   }, [open]);
 
   return (
-    <dialog className="form-dialog" ref={dialogRef} onClose={onClose}>
+    <dialog className={`form-dialog${wide ? " wide-dialog" : ""}`} ref={dialogRef} onClose={onClose}>
       <div className="dialog-heading">
         <div>
           <h2>{title}</h2>

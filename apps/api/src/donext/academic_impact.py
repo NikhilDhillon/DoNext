@@ -15,7 +15,7 @@ from donext.models import (
     Task,
     WeightOrigin,
 )
-from donext.schemas import AcademicImpactRead, AcademicImpactReason
+from donext.schemas import AcademicImpactRead, AcademicImpactReason, AcademicImpactTier
 
 
 @dataclass(frozen=True)
@@ -32,6 +32,7 @@ class WeightResult:
     origin: WeightOrigin
     rule: SelectionRule | None
     minimum_required: float | None
+    hurdle_group_id: uuid.UUID | None
     extra_credit: bool
 
 
@@ -77,6 +78,7 @@ def _group_share(
     component: GradingSchemeComponent,
     group: AssessmentGroup,
     eligible: list[AcademicItem],
+    groups: dict[uuid.UUID, AssessmentGroup],
 ) -> tuple[float, WeightOrigin]:
     if not eligible:
         return 0.0, WeightOrigin.unknown
@@ -88,8 +90,14 @@ def _group_share(
                 WeightOrigin.calculated_from_points,
             )
     if item.relative_weight_percent is not None:
+        nested_multiplier = 1.0
+        current = groups.get(item.assessment_group_id) if item.assessment_group_id else None
+        while current is not None and current.id != group.id:
+            if current.relative_weight_percent is not None:
+                nested_multiplier *= current.relative_weight_percent / 100
+            current = groups.get(current.parent_group_id) if current.parent_group_id else None
         return (
-            component.weight_percent * item.relative_weight_percent / 100,
+            component.weight_percent * item.relative_weight_percent / 100 * nested_multiplier,
             WeightOrigin.inherited_from_group,
         )
 
@@ -98,6 +106,8 @@ def _group_share(
         counted = min(counted, component.selection_count)
     elif component.selection_rule == SelectionRule.drop_lowest_n and component.selection_count:
         counted = max(1, counted - component.selection_count)
+    elif component.selection_rule in {SelectionRule.highest_attempt, SelectionRule.latest_attempt}:
+        counted = 1
     return component.weight_percent / max(1, counted), WeightOrigin.inferred_equal
 
 
@@ -118,6 +128,7 @@ def calculate_weights(
         origins: list[WeightOrigin] = []
         matched_rules: list[SelectionRule] = []
         required_values: list[float] = []
+        hurdle_group_ids: list[uuid.UUID] = []
         extra_credit_values: list[bool] = []
         for scheme in schemes:
             scheme_weight = 0.0
@@ -128,6 +139,8 @@ def calculate_weights(
                     matched_rules.append(component.selection_rule)
                     if component.minimum_required_percent is not None:
                         required_values.append(component.minimum_required_percent)
+                        if component.assessment_group_id is not None:
+                            hurdle_group_ids.append(component.assessment_group_id)
                     extra_credit_values.append(component.is_extra_credit)
                 elif component.assessment_group_id is not None and _descends_from(
                     item.assessment_group_id, component.assessment_group_id, group_by_id
@@ -142,12 +155,13 @@ def calculate_weights(
                             group_by_id,
                         )
                     ]
-                    share, origin = _group_share(item, component, group, eligible)
+                    share, origin = _group_share(item, component, group, eligible, group_by_id)
                     scheme_weight += share
                     origins.append(origin)
                     matched_rules.append(component.selection_rule)
                     if component.minimum_required_percent is not None:
                         required_values.append(component.minimum_required_percent)
+                        hurdle_group_ids.append(component.assessment_group_id)
                     extra_credit_values.append(component.is_extra_credit)
             scheme_weights.append(scheme_weight)
 
@@ -180,6 +194,7 @@ def calculate_weights(
                 ),
                 default=None,
             ),
+            hurdle_group_id=hurdle_group_ids[-1] if hurdle_group_ids else None,
             extra_credit=item.extra_credit
             or (bool(extra_credit_values) and all(extra_credit_values)),
         )
@@ -214,6 +229,17 @@ def calculate_academic_impacts(
     now = now or datetime.now(UTC)
     task_by_item = {task.academic_item_id: task for task in tasks if task.academic_item_id}
     weights = calculate_weights(items, groups, schemes, components)
+    group_by_id = {group.id: group for group in groups}
+
+    def hurdle_group_satisfied(group_id: uuid.UUID, minimum: float) -> bool:
+        return any(
+            candidate.points_earned is not None
+            and candidate.points_possible is not None
+            and candidate.points_earned / candidate.points_possible * 100 >= minimum
+            for candidate in items
+            if _descends_from(candidate.assessment_group_id, group_id, group_by_id)
+        )
+
     results: list[CalculatedImpact] = []
 
     for item in items:
@@ -279,7 +305,13 @@ def calculate_academic_impacts(
             score_percent = None
             if item.points_earned is not None and item.points_possible:
                 score_percent = item.points_earned / item.points_possible * 100
-            if score_percent is None or score_percent < weight.minimum_required:
+            group_satisfied = bool(
+                weight.hurdle_group_id
+                and hurdle_group_satisfied(weight.hurdle_group_id, weight.minimum_required)
+            )
+            if not group_satisfied and (
+                score_percent is None or score_percent < weight.minimum_required
+            ):
                 score = max(score, 75)
                 blocking_rule = f"Requires at least {weight.minimum_required:g}% to pass"
                 reasons.append(
@@ -331,6 +363,7 @@ def calculate_academic_impacts(
             )
 
         score = max(0.0, min(100.0, score))
+        tier: AcademicImpactTier
         if blocking_rule or score >= 75:
             tier = "critical"
         elif score >= 50:

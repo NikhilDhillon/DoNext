@@ -12,7 +12,16 @@ from docx import Document
 from pypdf import PdfReader
 
 from donext.errors import ApiError
+from donext.models import (
+    AllocationMethod,
+    SchemeSelectionMode,
+    SelectionRule,
+    WeightOrigin,
+)
 from donext.schemas import (
+    AssessmentGroupInput,
+    GradingSchemeComponentInput,
+    GradingSchemeInput,
     OutlineCourseProposal,
     OutlineDocumentType,
     OutlineExtractionRead,
@@ -145,6 +154,8 @@ def extract_outline(file_name: str, content: bytes, semester_start: date) -> Out
             *_extract_calendar_items(document, semester_start),
         ]
     )
+    grading_evidence = _grading_evidence(lines)
+    items, groups, schemes = _build_grading_proposal(items, grading_evidence)
     meetings = _merge_meetings(
         [
             *_extract_meetings(lines, course),
@@ -159,6 +170,9 @@ def extract_outline(file_name: str, content: bytes, semester_start: date) -> Out
         document_types=[document_type],
         course=course,
         items=items,
+        groups=groups,
+        schemes=schemes,
+        grading_evidence=grading_evidence,
         meetings=meetings,
         warnings=warnings,
     )
@@ -180,8 +194,15 @@ def merge_outline_extractions(
     merged: list[OutlineExtractionRead] = []
     for key in order:
         related = groups[key]
+        if len(related) == 1:
+            merged.append(related[0])
+            continue
         course = _merge_course_proposals([item.course for item in related])
         items = _merge_items([proposal for item in related for proposal in item.items])
+        grading_evidence = list(
+            dict.fromkeys(evidence for item in related for evidence in item.grading_evidence)
+        )
+        items, assessment_groups, schemes = _build_grading_proposal(items, grading_evidence)
         meetings = _merge_meetings([proposal for item in related for proposal in item.meetings])
         source_files = [
             name for item in related for name in (item.source_files or [item.file_name])
@@ -204,6 +225,9 @@ def merge_outline_extractions(
                 document_types=document_types,
                 course=course,
                 items=items,
+                groups=assessment_groups,
+                schemes=schemes,
+                grading_evidence=grading_evidence,
                 meetings=meetings,
                 warnings=warnings,
             )
@@ -744,6 +768,328 @@ def _merge_items(items: list[OutlineItemProposal]) -> list[OutlineItemProposal]:
         merged,
         key=lambda item: (item.deadline_at is None, item.deadline_at or datetime.max, item.name),
     )[:100]
+
+
+def _grading_evidence(lines: list[str]) -> list[str]:
+    markers = (
+        "%",
+        "drop",
+        "lowest",
+        "best ",
+        "required to pass",
+        "in order to pass",
+        "score at least",
+        "rewrite",
+        "extra credit",
+    )
+    return list(
+        dict.fromkeys(
+            line[:1000] for line in lines if any(marker in line.lower() for marker in markers)
+        )
+    )[:80]
+
+
+def _build_grading_proposal(
+    source_items: list[OutlineItemProposal], evidence: list[str]
+) -> tuple[list[OutlineItemProposal], list[AssessmentGroupInput], list[GradingSchemeInput]]:
+    items = [
+        item.model_copy(
+            update={
+                "key": None,
+                "group_key": None,
+                "relative_weight_percent": None,
+                "weight_origin": (
+                    WeightOrigin.explicit
+                    if item.weight_percent is not None
+                    else WeightOrigin.unknown
+                ),
+            }
+        )
+        for item in source_items
+    ]
+    evidence_text = "\n".join(evidence)
+    groups: list[AssessmentGroupInput] = []
+    group_components: list[GradingSchemeComponentInput] = []
+    remove_indexes: set[int] = set()
+
+    def add_group(
+        *,
+        key: str,
+        name: str,
+        aggregate_index: int,
+        member_indexes: list[int],
+        allocation: AllocationMethod = AllocationMethod.equal,
+        rule: SelectionRule = SelectionRule.all,
+        count: int | None = None,
+    ) -> None:
+        aggregate = items[aggregate_index]
+        if aggregate.weight_percent is None or not member_indexes:
+            return
+        source = aggregate.source_text
+        if rule != SelectionRule.all:
+            supporting_rule = next(
+                (line for line in evidence if "drop" in line.lower() or "lowest" in line.lower()),
+                None,
+            )
+            if supporting_rule:
+                source = f"{source}\n{supporting_rule}"
+        groups.append(
+            AssessmentGroupInput(
+                key=key,
+                name=name,
+                allocation_method=allocation,
+                weight_origin=WeightOrigin.explicit,
+                extraction_confidence=aggregate.confidence,
+                source_text=source,
+            )
+        )
+        group_components.append(
+            GradingSchemeComponentInput(
+                target_group_key=key,
+                weight_percent=aggregate.weight_percent,
+                selection_rule=rule,
+                selection_count=count,
+            )
+        )
+        remove_indexes.add(aggregate_index)
+        for member_index in member_indexes:
+            member = items[member_index]
+            relative = member.relative_weight_percent
+            if allocation == AllocationMethod.explicit_percent:
+                match = WEIGHT_PATTERN.search(member.source_text)
+                relative = float(match.group(1)) if match else relative
+            items[member_index] = member.model_copy(
+                update={
+                    "group_key": key,
+                    "weight_percent": None,
+                    "relative_weight_percent": relative,
+                    "weight_origin": (
+                        WeightOrigin.explicit
+                        if relative is not None
+                        else WeightOrigin.inferred_equal
+                    ),
+                }
+            )
+
+    assignment_aggregate = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if item.name.lower() == "assignments"
+            and item.deadline_at is None
+            and item.weight_percent is not None
+        ),
+        None,
+    )
+    if assignment_aggregate is not None:
+        assignment_members = [
+            index
+            for index, item in enumerate(items)
+            if index != assignment_aggregate
+            and item.kind == "assignment"
+            and item.name.lower() != "assignments"
+        ]
+        drop_lowest = bool(
+            re.search(r"lowest\s+(?:assignment\s+)?grade\s+is\s+dropped", evidence_text, re.I)
+        )
+        add_group(
+            key="assignments",
+            name="Assignments",
+            aggregate_index=assignment_aggregate,
+            member_indexes=assignment_members,
+            rule=SelectionRule.drop_lowest_n if drop_lowest else SelectionRule.all,
+            count=1 if drop_lowest else None,
+        )
+
+    midterm_aggregate = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if item.name.lower() == "midterms"
+            and item.deadline_at is None
+            and item.weight_percent is not None
+        ),
+        None,
+    )
+    if midterm_aggregate is not None:
+        midterm_members = [
+            index
+            for index, item in enumerate(items)
+            if index != midterm_aggregate
+            and "midterm" in item.name.lower()
+            and item.name.lower() != "midterms"
+        ]
+        add_group(
+            key="midterms",
+            name="Midterms",
+            aggregate_index=midterm_aggregate,
+            member_indexes=midterm_members,
+        )
+
+    project_aggregate = next(
+        (
+            index
+            for index, item in enumerate(items)
+            if "group term project" in item.name.lower()
+            and item.deadline_at is None
+            and item.weight_percent is not None
+        ),
+        None,
+    )
+    if project_aggregate is not None:
+        sprint_members = [
+            index
+            for index, item in enumerate(items)
+            if index != project_aggregate
+            and (item.name.lower().startswith("sprint") or "project kick-off" in item.name.lower())
+        ]
+        add_group(
+            key="term-project",
+            name="Group term project",
+            aggregate_index=project_aggregate,
+            member_indexes=sprint_members,
+            allocation=AllocationMethod.explicit_percent,
+        )
+
+    basic_index = next(
+        (index for index, item in enumerate(items) if "basic skills test" in item.name.lower()),
+        None,
+    )
+    rewrite_index = next(
+        (index for index, item in enumerate(items) if "optional rewrite" in item.name.lower()),
+        None,
+    )
+    if basic_index is not None and rewrite_index is not None:
+        basic = items[basic_index]
+        minimum_match = re.search(
+            r"(?:score at least|grade of)\s*(\d{1,3})%[^\n]*(?:basic skills|attempt)",
+            evidence_text,
+            re.I,
+        )
+        minimum = float(minimum_match.group(1)) if minimum_match else 60.0
+        group_weight = basic.weight_percent or 0
+        groups.append(
+            AssessmentGroupInput(
+                key="basic-skills-attempts",
+                name="Basic skills test attempts",
+                allocation_method=AllocationMethod.equal,
+                weight_origin=WeightOrigin.explicit,
+                extraction_confidence=min(basic.confidence, items[rewrite_index].confidence),
+                source_text=next(
+                    (line for line in evidence if "at least one attempt" in line.lower()),
+                    basic.source_text,
+                ),
+            )
+        )
+        group_components.append(
+            GradingSchemeComponentInput(
+                target_group_key="basic-skills-attempts",
+                weight_percent=group_weight,
+                selection_rule=SelectionRule.highest_attempt,
+                minimum_required_percent=minimum,
+            )
+        )
+        for index in (basic_index, rewrite_index):
+            item = items[index]
+            items[index] = item.model_copy(
+                update={
+                    "group_key": "basic-skills-attempts",
+                    "weight_percent": None,
+                    "weight_origin": WeightOrigin.inferred_equal,
+                }
+            )
+
+    items = [item for index, item in enumerate(items) if index not in remove_indexes]
+    used_keys: set[str] = set()
+    keyed_items: list[OutlineItemProposal] = []
+    for item in items:
+        base_key = re.sub(r"[^a-z0-9]+", "-", item.name.lower()).strip("-") or "item"
+        key = base_key
+        suffix = 2
+        while key in used_keys:
+            key = f"{base_key}-{suffix}"
+            suffix += 1
+        used_keys.add(key)
+        keyed_items.append(item.model_copy(update={"key": key}))
+    items = keyed_items
+
+    direct_components = [
+        GradingSchemeComponentInput(
+            target_item_key=item.key,
+            weight_percent=item.weight_percent,
+            is_extra_credit=item.extra_credit,
+            minimum_required_percent=item.minimum_required_percent,
+        )
+        for item in items
+        if item.weight_percent is not None and item.key is not None and item.group_key is None
+    ]
+    standard_components = [*group_components, *direct_components]
+    schemes: list[GradingSchemeInput] = []
+    if standard_components:
+        standard_total = sum(
+            component.weight_percent
+            for component in standard_components
+            if not component.is_extra_credit
+        )
+        schemes.append(
+            GradingSchemeInput(
+                key="standard",
+                name="Standard grading scheme",
+                selection_mode=(
+                    SchemeSelectionMode.best_outcome
+                    if re.search(r"best midterm", evidence_text, re.I)
+                    else SchemeSelectionMode.fixed
+                ),
+                is_primary=True,
+                is_complete=abs(standard_total - 100) <= 0.01,
+                components=standard_components,
+            )
+        )
+
+    alternative_match = re.search(
+        r"best\s+midterm\s+(\d{1,3}(?:\.\d+)?)%\s+and\s+final\s+exam\s+(\d{1,3}(?:\.\d+)?)%",
+        evidence_text,
+        re.I,
+    )
+    if alternative_match:
+        alternative_components: list[GradingSchemeComponentInput] = []
+        for component in standard_components:
+            if component.target_group_key == "midterms":
+                alternative_components.append(
+                    component.model_copy(
+                        update={
+                            "weight_percent": float(alternative_match.group(1)),
+                            "selection_rule": SelectionRule.best_n,
+                            "selection_count": 1,
+                        }
+                    )
+                )
+            elif component.target_item_key and any(
+                item.key == component.target_item_key and "final" in item.name.lower()
+                for item in items
+            ):
+                alternative_components.append(
+                    component.model_copy(
+                        update={"weight_percent": float(alternative_match.group(2))}
+                    )
+                )
+            else:
+                alternative_components.append(component)
+        alternative_total = sum(
+            component.weight_percent
+            for component in alternative_components
+            if not component.is_extra_credit
+        )
+        schemes.append(
+            GradingSchemeInput(
+                key="best-midterm",
+                name="Best-midterm alternative",
+                selection_mode=SchemeSelectionMode.best_outcome,
+                is_complete=abs(alternative_total - 100) <= 0.01,
+                components=alternative_components,
+            )
+        )
+    return items, groups, schemes
 
 
 def _merge_meetings(meetings: list[OutlineMeetingProposal]) -> list[OutlineMeetingProposal]:
