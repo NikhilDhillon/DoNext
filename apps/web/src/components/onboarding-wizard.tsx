@@ -68,6 +68,7 @@ export function OnboardingWizard() {
   );
   const [step, setStep] = useState(0);
   const [furthestStep, setFurthestStep] = useState(0);
+  const [editingSemester, setEditingSemester] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -100,7 +101,7 @@ export function OnboardingWizard() {
   function back() {
     setActionError(null);
     if (step === 0) {
-      router.push("/");
+      if (currentSemester) setEditingSemester((editing) => !editing);
       return;
     }
     setStep((current) => Math.max(0, current - 1));
@@ -118,15 +119,16 @@ export function OnboardingWizard() {
     }
   }
 
-  async function createSemester(event: FormEvent<HTMLFormElement>) {
+  async function saveSemester(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     await perform(async () => {
-      await apiRequest<Semester>("/semesters", {
-        method: "POST",
+      await apiRequest<Semester>(currentSemester ? `/semesters/${currentSemester.id}` : "/semesters", {
+        method: currentSemester ? "PATCH" : "POST",
         body: JSON.stringify({ name: form.get("name"), start_date: form.get("start_date"), end_date: form.get("end_date"), status: "active" }),
       });
       await semesters.reload();
+      setEditingSemester(false);
     });
   }
 
@@ -305,7 +307,7 @@ export function OnboardingWizard() {
         <header className="onboarding-mobile-header"><Brand /><span>{step + 1} / {steps.length}</span></header>
         <div className="onboarding-progress"><span style={{ width: `${((step + 1) / steps.length) * 100}%` }} /></div>
         <div className="onboarding-content">
-          {step === 0 ? <SemesterStep semester={currentSemester} busy={busy} onSubmit={createSemester} /> : null}
+          {step === 0 ? <SemesterStep semester={currentSemester} editing={editingSemester} busy={busy} onSubmit={saveSemester} /> : null}
           {step === 1 ? <CoursesStep semester={currentSemester} courses={courses.data ?? []} busy={busy} onSubmit={createCourse} onRemove={(id) => void remove(`/courses/${id}`, courses.reload)} /> : null}
           {step === 2 ? <OutlineStep courses={courses.data ?? []} tasks={tasks.data ?? []} busy={busy} onSubmit={createOutlineItem} onRemove={(id) => void remove(`/tasks/${id}`, tasks.reload)} /> : null}
           {step === 3 ? <CommitmentsStep events={events.data ?? []} busy={busy} onSubmit={createCommitment} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
@@ -314,7 +316,7 @@ export function OnboardingWizard() {
           {step === 6 ? <ReviewStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} events={events.data ?? []} goals={goals.data ?? []} preferences={preferences.data} busy={busy} onFinish={() => void finish()} /> : null}
 
           {actionError ? <p className="onboarding-error" role="alert">{actionError}</p> : null}
-          {step !== 5 && step !== 6 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy} type="button" onClick={advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
+          {step !== 5 && step !== 6 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy || (step === 0 && !currentSemester)} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy || (step === 0 && editingSemester)} type="button" onClick={advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
           {step === 5 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
           {step === 6 ? <div className="onboarding-actions review-back"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
         </div>
@@ -327,9 +329,9 @@ function StepHeading({ eyebrow, title, copy, optional = false }: { eyebrow: stri
   return <header className="onboarding-step-heading"><div><p className="eyebrow">{eyebrow}</p>{optional ? <span>Optional, but useful</span> : null}</div><h2>{title}</h2><p>{copy}</p></header>;
 }
 
-function SemesterStep({ semester, busy, onSubmit }: { semester: Semester | null; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
-  if (semester) return <><StepHeading eyebrow="Your academic window" title="Your semester is in place." copy="These dates anchor deadlines, recurring classes, and workload forecasts." /><SavedCard icon={<GraduationCap size={21} />} title={semester.name} detail={`${formatDate(semester.start_date)} – ${formatDate(semester.end_date)}`} /></>;
-  return <><StepHeading eyebrow="Start with the calendar" title="When does this semester run?" copy="DoNext uses the term dates to understand what belongs in this planning season." /><form className="onboarding-form" onSubmit={onSubmit}><label><span>Semester name</span><input name="name" placeholder="Fall 2026" required /></label><div className="form-row"><label><span>First day</span><input name="start_date" type="date" required /></label><label><span>Last day</span><input name="end_date" type="date" required /></label></div><button className="primary-button form-submit" disabled={busy} type="submit">{busy ? <LoaderCircle className="spin" size={17} /> : <Plus size={17} />} Save semester</button></form></>;
+function SemesterStep({ semester, editing, busy, onSubmit }: { semester: Semester | null; editing: boolean; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
+  if (semester && !editing) return <><StepHeading eyebrow="Your academic window" title="Your semester is in place." copy="These dates anchor deadlines, recurring classes, and workload forecasts." /><SavedCard icon={<GraduationCap size={21} />} title={semester.name} detail={`${formatDate(semester.start_date)} – ${formatDate(semester.end_date)}`} /></>;
+  return <><StepHeading eyebrow="Start with the calendar" title="When does this semester run?" copy="DoNext uses the term dates to understand what belongs in this planning season." /><form className="onboarding-form" onSubmit={onSubmit}><label><span>Semester name</span><input name="name" defaultValue={semester?.name} placeholder="Fall 2026" required /></label><div className="form-row"><label><span>First day</span><input name="start_date" type="date" defaultValue={semester?.start_date} required /></label><label><span>Last day</span><input name="end_date" type="date" defaultValue={semester?.end_date} required /></label></div><button className="primary-button form-submit" disabled={busy} type="submit">{busy ? <LoaderCircle className="spin" size={17} /> : semester ? <Check size={17} /> : <Plus size={17} />} {semester ? "Save changes" : "Save semester"}</button></form></>;
 }
 
 function CoursesStep({ semester, courses, busy, onSubmit, onRemove }: { semester: Semester | null; courses: Course[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
