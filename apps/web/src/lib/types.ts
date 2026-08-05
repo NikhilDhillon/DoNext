@@ -147,6 +147,8 @@ export type OutlineMeetingProposal = {
 
 export type OutlineExtraction = {
   file_name: string;
+  source_files: string[];
+  document_types: ("course_outline" | "course_schedule" | "lecture_material" | "unknown")[];
   course: {
     code: string | null;
     name: string | null;

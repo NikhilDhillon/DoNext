@@ -63,21 +63,17 @@ export function CourseOutlineStep({
     setParsing(true);
     setParseError(null);
     try {
-      const extracted = await Promise.all(
-        files.map(async (file) => {
-          const body = new FormData();
-          body.append("file", file);
-          body.append("semester_start", semester.start_date);
-          return apiUpload<OutlineExtraction>("/documents/parse-outline", body);
-        }),
-      );
+      const body = new FormData();
+      files.forEach((file) => body.append("files", file));
+      body.append("semester_start", semester.start_date);
+      const extracted = await apiUpload<OutlineExtraction[]>("/documents/parse-outlines", body);
       setProposals(extracted);
       setFiles([]);
     } catch (error) {
       setParseError(
         error instanceof ApiRequestError
           ? error.message
-          : "DoNext could not read those outlines. Try a text-based PDF or enter the details manually.",
+          : "DoNext could not read those documents. Try a text-based PDF or enter the details manually.",
       );
     } finally {
       setParsing(false);
@@ -106,7 +102,7 @@ export function CourseOutlineStep({
       <header className="onboarding-step-heading">
         <div><p className="eyebrow">Start with the source</p></div>
         <h2>Upload your course outlines.</h2>
-        <p>DoNext reads each file locally and proposes the course, assignments, exams, and class times it finds. Nothing is added until you review it.</p>
+        <p>Upload outlines, schedules, or course slides together. DoNext identifies which files belong to the same course, combines their useful details, and waits for your review before adding anything.</p>
       </header>
 
       <section className="outline-upload-card">
@@ -125,7 +121,7 @@ export function CourseOutlineStep({
             onChange={(event: ChangeEvent<HTMLInputElement>) => event.target.files && selectFiles(event.target.files)}
           />
           <span><UploadCloud size={25} /></span>
-          <strong>Drop course outlines here</strong>
+          <strong>Drop course documents here</strong>
           <small>or choose files · PDF, DOCX, or TXT · up to 10 MB each</small>
         </label>
 
@@ -144,11 +140,11 @@ export function CourseOutlineStep({
 
       <div className="outline-proposals">
         {proposals.map((proposal, proposalIndex) => (
-          <article className="outline-proposal" key={`${proposal.file_name}-${proposalIndex}`}>
+          <article className="outline-proposal" key={`${proposal.source_files.join("-")}-${proposalIndex}`}>
             <header>
               <span><FileCheck2 size={19} /></span>
-              <div><strong>{proposal.file_name}</strong><small>{proposal.items.length} academic items · {proposal.meetings.length} class meetings found</small></div>
-              <button aria-label={`Dismiss ${proposal.file_name}`} type="button" onClick={() => setProposals((current) => current.filter((_, index) => index !== proposalIndex))}><X size={17} /></button>
+              <div><strong>{proposal.source_files.length === 1 ? proposal.source_files[0] : `${proposal.source_files.length} files combined`}</strong><small>{proposal.items.length} academic items · {proposal.meetings.length} class meetings · {proposal.document_types.map(formatDocumentType).join(" + ")}</small><small title={proposal.source_files.join(", ")}>{proposal.source_files.join(" · ")}</small></div>
+              <button aria-label={`Dismiss ${proposal.source_files.join(", ")}`} type="button" onClick={() => setProposals((current) => current.filter((_, index) => index !== proposalIndex))}><X size={17} /></button>
             </header>
 
             <div className="outline-course-fields form-row">
@@ -162,7 +158,7 @@ export function CourseOutlineStep({
               {proposal.items.map((item, itemIndex) => <div className="proposal-item" key={`${item.name}-${itemIndex}`}>
                 <input aria-label="Item name" value={item.name} onChange={(event) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, name: event.target.value } : current) })} />
                 <input aria-label={`${item.name} deadline`} type="date" value={item.deadline_at?.slice(0, 10) ?? ""} onChange={(event) => updateProposal(proposalIndex, { ...proposal, items: proposal.items.map((current, index) => index === itemIndex ? { ...current, deadline_at: event.target.value ? `${event.target.value}T23:59:00` : null } : current) })} />
-                <span>{Math.round(item.confidence * 100)}% confidence</span>
+                <span>{Math.round(item.confidence * 100)}% confidence{item.weight_percent !== null ? ` · ${item.weight_percent}% weight` : ""}</span>
                 <button aria-label={`Remove ${item.name}`} type="button" onClick={() => updateProposal(proposalIndex, { ...proposal, items: proposal.items.filter((_, index) => index !== itemIndex) })}><Trash2 size={15} /></button>
               </div>)}
             </div> : null}
@@ -200,4 +196,13 @@ export function CourseOutlineStep({
       </details>
     </>
   );
+}
+
+function formatDocumentType(value: OutlineExtraction["document_types"][number]) {
+  return {
+    course_outline: "outline",
+    course_schedule: "schedule",
+    lecture_material: "lecture material",
+    unknown: "other document",
+  }[value];
 }

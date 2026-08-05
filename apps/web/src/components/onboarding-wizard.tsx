@@ -184,33 +184,58 @@ export function OnboardingWizard() {
   }
 
   async function importOutline(proposal: OutlineExtraction): Promise<boolean> {
-    if (!currentSemester || !proposal.course.code || !proposal.course.name) return false;
+    const courseCode = proposal.course.code;
+    const courseName = proposal.course.name;
+    if (!currentSemester || !courseCode || !courseName) return false;
     return perform(async () => {
-      const course = await apiRequest<Course>(`/semesters/${currentSemester.id}/courses`, {
-        method: "POST",
-        body: JSON.stringify({
-          code: proposal.course.code,
-          name: proposal.course.name,
-          instructor: proposal.course.instructor,
-          difficulty: 3,
-          weekly_study_target_minutes: 180,
-        }),
-      });
+      const existingCourse = courses.data?.find(
+        (item) => normalizeCourseCode(item.code) === normalizeCourseCode(courseCode),
+      );
+      const course = existingCourse
+        ? await apiRequest<Course>(`/courses/${existingCourse.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            name: courseName,
+            instructor: proposal.course.instructor ?? existingCourse.instructor,
+          }),
+        })
+        : await apiRequest<Course>(`/semesters/${currentSemester.id}/courses`, {
+          method: "POST",
+          body: JSON.stringify({
+            code: courseCode,
+            name: courseName,
+            instructor: proposal.course.instructor,
+            difficulty: 3,
+            weekly_study_target_minutes: 180,
+          }),
+        });
 
-      await Promise.all(proposal.items.map((item) => apiRequest<PlanningTask>("/tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          name: item.name,
-          course_id: course.id,
-          estimated_minutes: item.estimated_minutes,
-          deadline_at: item.deadline_at,
-          priority: item.kind === "exam" ? "critical" : "high",
-          flexibility: "low",
-          intensity: "deep",
-        }),
-      })));
+      await Promise.all(proposal.items.map((item) => {
+        const existingTask = (tasks.data ?? []).find(
+          (current) => current.course_id === course.id
+            && current.name.trim().toLowerCase() === item.name.trim().toLowerCase(),
+        );
+        return apiRequest<PlanningTask>(existingTask ? `/tasks/${existingTask.id}` : "/tasks", {
+          method: existingTask ? "PATCH" : "POST",
+          body: JSON.stringify({
+            name: item.name,
+            ...(existingTask ? {} : { course_id: course.id }),
+            estimated_minutes: item.estimated_minutes,
+            deadline_at: item.deadline_at,
+            priority: item.kind === "exam" ? "critical" : "high",
+            flexibility: "low",
+            intensity: "deep",
+          }),
+        });
+      }));
 
-      await Promise.all(proposal.meetings.map((meeting) => {
+      const existingMeetingKeys = new Set(
+        (events.data ?? []).filter((item) => item.category === "class").map(fixedEventKey),
+      );
+      const newMeetings = proposal.meetings.filter(
+        (meeting) => !existingMeetingKeys.has(outlineMeetingKey(meeting)),
+      );
+      await Promise.all(newMeetings.map((meeting) => {
         const firstDate = firstDayInSemester(currentSemester.start_date, meeting.day_of_week);
         return apiRequest<FixedEvent>("/events", {
           method: "POST",
@@ -495,4 +520,23 @@ function formatMinutes(minutes: number) {
 
 function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function normalizeCourseCode(value: string) {
+  return value.replaceAll(/\s+/g, "").toUpperCase();
+}
+
+function fixedEventKey(event: FixedEvent) {
+  const starts = new Date(event.start_at);
+  const ends = new Date(event.end_at);
+  const day = (starts.getDay() + 6) % 7;
+  return `${day}|${timeKey(starts)}|${timeKey(ends)}`;
+}
+
+function outlineMeetingKey(meeting: OutlineExtraction["meetings"][number]) {
+  return `${meeting.day_of_week}|${meeting.start_time.slice(0, 5)}|${meeting.end_time.slice(0, 5)}`;
+}
+
+function timeKey(value: Date) {
+  return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }

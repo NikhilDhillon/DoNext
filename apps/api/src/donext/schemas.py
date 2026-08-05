@@ -363,6 +363,7 @@ class OutlineCourseProposal(ApiModel):
 
 
 OutlineItemKind = Literal["assignment", "exam", "quiz", "project", "paper", "lab", "other"]
+OutlineDocumentType = Literal["course_outline", "course_schedule", "lecture_material", "unknown"]
 
 
 class OutlineItemProposal(ApiModel):
@@ -387,6 +388,8 @@ class OutlineMeetingProposal(ApiModel):
 
 class OutlineExtractionRead(ApiModel):
     file_name: str
+    source_files: list[str] = Field(default_factory=list)
+    document_types: list[OutlineDocumentType] = Field(default_factory=list)
     course: OutlineCourseProposal
     items: list[OutlineItemProposal]
     meetings: list[OutlineMeetingProposal]

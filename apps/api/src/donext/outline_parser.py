@@ -1,15 +1,20 @@
 import io
 import re
 import zipfile
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from pathlib import Path
+from typing import Any
 
+import pdfplumber
 from docx import Document
 from pypdf import PdfReader
 
 from donext.errors import ApiError
 from donext.schemas import (
     OutlineCourseProposal,
+    OutlineDocumentType,
     OutlineExtractionRead,
     OutlineItemKind,
     OutlineItemProposal,
@@ -21,16 +26,20 @@ MAX_EXTRACTED_CHARACTERS = 200_000
 MAX_DOCX_EXPANDED_BYTES = 25 * 1024 * 1024
 MAX_DOCX_ENTRIES = 2_000
 
-COURSE_CODE_PATTERN = re.compile(r"\b([A-Z]{2,5})\s*[- ]?\s*(\d{3,4}[A-Z]?)\b")
+COURSE_CODE_PATTERN = re.compile(r"\b([A-Z]{2,5})\s*[- ]?\s*(\d{3,4}[A-Z]?)\b", re.I)
 INSTRUCTOR_PATTERN = re.compile(
     r"(?:instructor|professor|prof\.?|lecturer)\s*[:\-]\s*([^\n|]{2,100})",
     re.IGNORECASE,
 )
 DATE_PATTERN = re.compile(
     r"\b(?:"
+    r"(?:Mon|Tue(?:s)?|Wed|Thu(?:rs)?|Fri|Sat|Sun)(?:day)?\s*,?\s+)?(?:"
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|"
     r"Dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|"
+    r"Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
+    r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)(?:,?\s+\d{4})?"
     r"|\d{4}-\d{1,2}-\d{1,2}"
     r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?"
     r")\b",
@@ -44,12 +53,17 @@ TIME_RANGE_PATTERN = re.compile(
 )
 WEIGHT_PATTERN = re.compile(r"\b(\d{1,3}(?:\.\d+)?)\s*%")
 LOCATION_PATTERN = re.compile(r"(?:location|room)\s*[:\-]?\s*([A-Za-z0-9 .#-]{2,60})", re.I)
+SEMESTER_PREFIX_PATTERN = re.compile(r"^(?:spring|summer|fall|autumn|winter)\s+\d{4}\s*", re.I)
+MONTH_YEAR_PATTERN = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+2\s*0\s*(\d)\s*(\d)\b",
+    re.I,
+)
 
 ITEM_KIND_KEYWORDS: tuple[tuple[OutlineItemKind, tuple[str, ...]], ...] = (
-    ("exam", ("final exam", "midterm", "exam", "test")),
+    ("exam", ("final exam", "midterm", "exam", "test", "rewrite")),
     ("quiz", ("quiz",)),
-    ("assignment", ("assignment", "homework", "problem set")),
-    ("project", ("project", "capstone")),
+    ("assignment", ("assignment", "homework", "problem set", "due: ass", " ass ")),
+    ("project", ("project", "capstone", "sprint")),
     ("paper", ("paper", "essay", "report", "presentation")),
     ("lab", ("lab",)),
 )
@@ -77,6 +91,9 @@ COMPACT_DAYS = {
     "m": [0],
     "mw": [0, 2],
     "mwf": [0, 2, 4],
+    "mwr": [0, 2, 3],
+    "mtwr": [0, 1, 2, 3],
+    "mtwrf": [0, 1, 2, 3, 4],
     "wf": [2, 4],
     "t": [1],
     "tu": [1],
@@ -88,29 +105,58 @@ COMPACT_DAYS = {
     "sa": [5],
     "su": [6],
 }
+MONTH_NUMBERS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+
+
+@dataclass
+class ExtractedDocument:
+    text: str
+    pages: list[str] = field(default_factory=list)
+    tables: list[list[list[str]]] = field(default_factory=list)
+    metadata: dict[str, str] = field(default_factory=dict)
 
 
 def extract_outline(file_name: str, content: bytes, semester_start: date) -> OutlineExtractionRead:
     suffix = Path(file_name).suffix.lower()
-    text = _extract_text(suffix, content)
-    lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
-    lines = [line for line in lines if line]
+    document = _extract_document(suffix, content)
+    lines = _clean_lines(document.text)
     if not lines:
-        raise ApiError("EMPTY_DOCUMENT", "No readable text was found in that course outline.", 422)
+        raise ApiError("EMPTY_DOCUMENT", "No readable text was found in that document.", 422)
 
-    course = _extract_course(lines)
-    items = _extract_items(lines, semester_start.year)
-    meetings = _extract_meetings(lines, course)
-    warnings: list[str] = []
-    if course.code is None:
-        warnings.append("Course code was not found. Add it before importing.")
-    if not items:
-        warnings.append("No dated assignments or exams were found. You can add them manually.")
-    if not meetings:
-        warnings.append("No recurring class times were found. Add them in the next step.")
+    document_type = _classify_document(file_name, document)
+    course = _extract_course(lines, document, file_name)
+    items = _merge_items(
+        [
+            *_extract_items(lines, semester_start.year),
+            *_extract_items_from_tables(document.tables, semester_start.year),
+            *_extract_calendar_items(document, semester_start),
+        ]
+    )
+    meetings = _merge_meetings(
+        [
+            *_extract_meetings(lines, course),
+            *_extract_meetings_from_tables(document.tables, course),
+        ]
+    )
+    warnings = _proposal_warnings(course, items, meetings, document_type)
 
     return OutlineExtractionRead(
         file_name=file_name,
+        source_files=[file_name],
+        document_types=[document_type],
         course=course,
         items=items,
         meetings=meetings,
@@ -118,53 +164,624 @@ def extract_outline(file_name: str, content: bytes, semester_start: date) -> Out
     )
 
 
-def _extract_text(suffix: str, content: bytes) -> str:
+def merge_outline_extractions(
+    extractions: list[OutlineExtractionRead],
+) -> list[OutlineExtractionRead]:
+    groups: dict[str, list[OutlineExtractionRead]] = {}
+    order: list[str] = []
+    for index, extraction in enumerate(extractions):
+        code = _normalized_course_code(extraction.course.code)
+        key = code or f"unknown:{index}"
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(extraction)
+
+    merged: list[OutlineExtractionRead] = []
+    for key in order:
+        related = groups[key]
+        course = _merge_course_proposals([item.course for item in related])
+        items = _merge_items([proposal for item in related for proposal in item.items])
+        meetings = _merge_meetings([proposal for item in related for proposal in item.meetings])
+        source_files = [
+            name for item in related for name in (item.source_files or [item.file_name])
+        ]
+        document_types = list(
+            dict.fromkeys(kind for item in related for kind in item.document_types)
+        )
+        warnings = _proposal_warnings(course, items, meetings, document_types[0])
+        if len(source_files) > 1:
+            warnings.insert(0, f"Combined {len(source_files)} related files for this course.")
+        if "lecture_material" in document_types:
+            warnings.append(
+                "Lecture material supplied course and grading context; slide topics were not "
+                "treated as deadlines."
+            )
+        merged.append(
+            OutlineExtractionRead(
+                file_name=source_files[0],
+                source_files=source_files,
+                document_types=document_types,
+                course=course,
+                items=items,
+                meetings=meetings,
+                warnings=warnings,
+            )
+        )
+    return merged
+
+
+def _extract_document(suffix: str, content: bytes) -> ExtractedDocument:
     if suffix == ".pdf":
-        try:
-            reader = PdfReader(io.BytesIO(content), strict=False)
-            if reader.is_encrypted:
-                raise ApiError(
-                    "ENCRYPTED_DOCUMENT", "Password-protected PDFs are not supported.", 422
-                )
-            if len(reader.pages) > MAX_DOCUMENT_PAGES:
-                raise ApiError(
-                    "DOCUMENT_TOO_LONG", "Course outlines may contain up to 150 pages.", 413
-                )
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        except ApiError:
-            raise
-        except Exception as error:
-            raise ApiError("INVALID_DOCUMENT", "That PDF could not be read.", 422) from error
-    elif suffix == ".docx":
+        return _extract_pdf(content)
+    if suffix == ".docx":
         _validate_docx_archive(content)
         try:
             document = Document(io.BytesIO(content))
             paragraphs = [paragraph.text for paragraph in document.paragraphs]
-            table_rows = [
-                " | ".join(cell.text for cell in row.cells)
+            tables = [
+                [[cell.text for cell in row.cells] for row in table.rows]
                 for table in document.tables
-                for row in table.rows
             ]
+            table_rows = [" | ".join(row) for table in tables for row in table]
             text = "\n".join([*paragraphs, *table_rows])
+            return _checked_document(ExtractedDocument(text=text, pages=[text], tables=tables))
         except Exception as error:
             raise ApiError(
                 "INVALID_DOCUMENT", "That Word document could not be read.", 422
             ) from error
-    elif suffix == ".txt":
+    if suffix == ".txt":
         try:
             text = content.decode("utf-8-sig")
         except UnicodeDecodeError as error:
             raise ApiError(
-                "INVALID_DOCUMENT", "Text outlines must use UTF-8 encoding.", 422
+                "INVALID_DOCUMENT", "Text documents must use UTF-8 encoding.", 422
             ) from error
-    else:
-        raise ApiError("UNSUPPORTED_DOCUMENT", "Upload a PDF, DOCX, or TXT course outline.", 415)
+        return _checked_document(ExtractedDocument(text=text, pages=[text]))
+    raise ApiError("UNSUPPORTED_DOCUMENT", "Upload a PDF, DOCX, or TXT document.", 415)
 
-    if len(text) > MAX_EXTRACTED_CHARACTERS:
-        raise ApiError(
-            "DOCUMENT_TOO_LONG", "The extracted outline text is too long to process.", 413
+
+def _extract_pdf(content: bytes) -> ExtractedDocument:
+    try:
+        reader = PdfReader(io.BytesIO(content), strict=False)
+        if reader.is_encrypted:
+            raise ApiError("ENCRYPTED_DOCUMENT", "Password-protected PDFs are not supported.", 422)
+        if len(reader.pages) > MAX_DOCUMENT_PAGES:
+            raise ApiError("DOCUMENT_TOO_LONG", "Documents may contain up to 150 pages.", 413)
+        metadata = {
+            str(key).removeprefix("/"): str(value)
+            for key, value in (reader.metadata or {}).items()
+            if value
+        }
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            pages = [
+                page.extract_text(layout=True) or page.extract_text() or "" for page in pdf.pages
+            ]
+            tables = [
+                _clean_table(table)
+                for page in pdf.pages
+                for table in page.extract_tables()
+                if table
+            ]
+        return _checked_document(
+            ExtractedDocument(
+                text="\n\f\n".join(pages), pages=pages, tables=tables, metadata=metadata
+            )
         )
-    return text
+    except ApiError:
+        raise
+    except Exception as error:
+        raise ApiError("INVALID_DOCUMENT", "That PDF could not be read.", 422) from error
+
+
+def _checked_document(document: ExtractedDocument) -> ExtractedDocument:
+    if len(document.text) > MAX_EXTRACTED_CHARACTERS:
+        raise ApiError(
+            "DOCUMENT_TOO_LONG", "The extracted document text is too long to process.", 413
+        )
+    return document
+
+
+def _clean_table(table: list[list[Any]]) -> list[list[str]]:
+    return [[re.sub(r"\s+", " ", str(cell or "")).strip() for cell in row] for row in table]
+
+
+def _clean_lines(text: str) -> list[str]:
+    return [line for raw in text.splitlines() if (line := re.sub(r"\s+", " ", raw).strip())]
+
+
+def _classify_document(file_name: str, document: ExtractedDocument) -> OutlineDocumentType:
+    lowered = f"{file_name}\n{document.text[:80_000]}".lower()
+    headers = [{_key(cell) for cell in table[0]} for table in document.tables if table]
+    if any(
+        {"sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"}.issubset(
+            header
+        )
+        for header in headers
+    ):
+        return "course_schedule"
+    if any(
+        marker in lowered
+        for marker in (
+            "assessment methods",
+            "course overview",
+            "course learning outcomes",
+            "course-outlines.",
+        )
+    ):
+        return "course_outline"
+    if "lecture" in file_name.lower() or re.search(r"\blecture\s+\d+\b", lowered):
+        return "lecture_material"
+    return "unknown"
+
+
+def _extract_course(
+    lines: list[str], document: ExtractedDocument, file_name: str
+) -> OutlineCourseProposal:
+    evidence = [file_name, *document.metadata.values(), *lines[:160]]
+    weighted_codes: Counter[str] = Counter()
+    for index, value in enumerate(evidence):
+        for match in COURSE_CODE_PATTERN.finditer(value):
+            found_code = f"{match.group(1).upper()} {match.group(2).upper()}"
+            weighted_codes[found_code] += 4 if index < 1 + len(document.metadata) else 1
+    code: str | None = weighted_codes.most_common(1)[0][0] if weighted_codes else None
+
+    name_candidates: list[tuple[int, str]] = []
+    if code:
+        compact_code = code.replace(" ", r"\s*")
+        code_pattern = re.compile(compact_code, re.I)
+        for index, line in enumerate(lines[:120]):
+            line_match = code_pattern.search(line)
+            if not line_match:
+                continue
+            after = line[line_match.end() :]
+            before = SEMESTER_PREFIX_PATTERN.sub("", line[: line_match.start()])
+            candidate_value = after if after.strip(" :-–—") else before
+            candidate_name = _clean_course_name(candidate_value)
+            if candidate_name:
+                score = 100 - index
+                if ":" in after:
+                    score += 20
+                if "lecture" in candidate_name.lower():
+                    score -= 25
+                name_candidates.append((score, candidate_name))
+        metadata_title = document.metadata.get("Title")
+        if metadata_title:
+            metadata_match = code_pattern.search(metadata_title)
+            if metadata_match:
+                metadata_name = _clean_course_name(metadata_title[metadata_match.end() :])
+                if metadata_name:
+                    name_candidates.append((110, metadata_name))
+
+    name = max(name_candidates, key=lambda item: item[0])[1] if name_candidates else None
+    instructor = _extract_instructor(lines, document)
+    confidence = 0.95 if code and name else 0.78 if code or name else 0.3
+    return OutlineCourseProposal(code=code, name=name, instructor=instructor, confidence=confidence)
+
+
+def _clean_course_name(value: str) -> str | None:
+    value = SEMESTER_PREFIX_PATTERN.sub("", value)
+    value = re.sub(r"\(\s*Units?\s*:.*$", "", value, flags=re.I)
+    value = re.sub(r"\bLecture\s+\d+.*$", "", value, flags=re.I)
+    value = re.sub(r"^[\s:|\-–—]+|[\s:|\-–—]+$", "", value)
+    if (
+        not 3 <= len(value) <= 120
+        or _looks_like_metadata(value)
+        or _looks_like_month_heading(value)
+    ):
+        return None
+    return value
+
+
+def _extract_instructor(lines: list[str], document: ExtractedDocument) -> str | None:
+    text = "\n".join(lines[:180])
+    explicit = INSTRUCTOR_PATTERN.search(text)
+    if explicit:
+        return _clean_person_name(explicit.group(1))
+
+    for index, line in enumerate(lines[:180]):
+        if "instructor" not in line.lower():
+            continue
+        for candidate in lines[index + 1 : index + 12]:
+            name_match = re.match(r"Name\s*:\s*(.{2,100})", candidate, re.I)
+            if name_match:
+                return _clean_person_name(name_match.group(1))
+
+    for table in document.tables:
+        if not table:
+            continue
+        header = [_key(cell) for cell in table[0]]
+        if "instructor" in header:
+            column = header.index("instructor")
+            for row in table[1:]:
+                if column < len(row) and row[column].strip():
+                    return _clean_person_name(row[column])
+
+    author = document.metadata.get("Author")
+    if author and not any(
+        value in author.lower() for value in ("department", "dept", "microsoft", "acrobat")
+    ):
+        return _clean_person_name(author)
+    return None
+
+
+def _clean_person_name(value: str) -> str:
+    return re.split(
+        r"\s{2,}|\s+(?:Office|Phone|Email)\s*:", value.strip(" .,-"), maxsplit=1, flags=re.I
+    )[0][:120]
+
+
+def _extract_items(lines: list[str], default_year: int) -> list[OutlineItemProposal]:
+    proposals: list[OutlineItemProposal] = []
+    for line in lines:
+        lowered = f" {line.lower()} "
+        if any(
+            marker in lowered
+            for marker in ("required to pass", "in order to pass", "score at least", "best midterm")
+        ):
+            continue
+        summary_items = _extract_assessment_summary(line) if not DATE_PATTERN.search(line) else []
+        if summary_items:
+            proposals.extend(summary_items)
+            continue
+        kind = _item_kind(lowered)
+        if kind is None or any(
+            marker in lowered for marker in ("exam period", "exams begin", "exams end")
+        ):
+            continue
+        dates = list(DATE_PATTERN.finditer(line))
+        date_match = dates[-1] if dates else None
+        deadline = _parse_date(date_match.group(0), default_year) if date_match else None
+        if (
+            deadline is None
+            and not WEIGHT_PATTERN.search(line)
+            and not any(marker in lowered for marker in ("tbd", "to be announced"))
+        ):
+            continue
+        name = _normalize_item_name(_item_name(line, date_match), kind)
+        weight_match = WEIGHT_PATTERN.search(line)
+        weight = float(weight_match.group(1)) if weight_match else None
+        if kind == "project" and name.lower().startswith("sprint"):
+            weight = None
+        if deadline is None and weight == 0:
+            continue
+        proposals.append(
+            OutlineItemProposal(
+                name=name,
+                kind=kind,
+                deadline_at=deadline,
+                weight_percent=weight if weight is None or weight <= 100 else None,
+                estimated_minutes=_estimated_minutes(kind),
+                confidence=0.9 if deadline else 0.68,
+                source_text=line[:500],
+            )
+        )
+    return proposals[:140]
+
+
+def _extract_assessment_summary(line: str) -> list[OutlineItemProposal]:
+    lowered = line.lower()
+    weights = [float(match.group(1)) for match in WEIGHT_PATTERN.finditer(line)]
+    summaries: list[tuple[str, OutlineItemKind, float]] = []
+    if "assignment" in lowered and weights:
+        summaries.append(("Assignments", "assignment", weights[0]))
+    if "midterm" in lowered and "final exam" in lowered and len(weights) >= 2:
+        summaries.extend([("Midterms", "exam", weights[0]), ("Final Exam", "exam", weights[1])])
+    if not summaries:
+        return []
+    return [
+        OutlineItemProposal(
+            name=name,
+            kind=kind,
+            deadline_at=None,
+            weight_percent=weight,
+            estimated_minutes=_estimated_minutes(kind),
+            confidence=0.82,
+            source_text=line[:500],
+        )
+        for name, kind, weight in summaries
+    ]
+
+
+def _extract_items_from_tables(
+    tables: list[list[list[str]]], default_year: int
+) -> list[OutlineItemProposal]:
+    proposals: list[OutlineItemProposal] = []
+    for table in tables:
+        if len(table) < 2:
+            continue
+        header = [_key(cell) for cell in table[0]]
+        name_column = _column(header, "assessment", "exams", "sprint no", "item")
+        date_column = _column(header, "due date", "deadline", "date")
+        weight_column = _column(header, "weight")
+        if name_column is None or (date_column is None and weight_column is None):
+            continue
+        for row in table[1:]:
+            if name_column >= len(row) or not row[name_column].strip():
+                continue
+            raw_name = row[name_column].strip()
+            kind = _item_kind(f" {raw_name.lower()} ") or (
+                "project" if "sprint" in " ".join(header) else "other"
+            )
+            date_value = (
+                row[date_column] if date_column is not None and date_column < len(row) else ""
+            )
+            matches = list(DATE_PATTERN.finditer(date_value))
+            deadline = _parse_date(matches[-1].group(0), default_year) if matches else None
+            weight_value = (
+                row[weight_column] if weight_column is not None and weight_column < len(row) else ""
+            )
+            weight_match = WEIGHT_PATTERN.search(weight_value)
+            weight = float(weight_match.group(1)) if weight_match else None
+            if "sprint no" in header:
+                weight = None
+            if deadline is None and (weight is None or weight == 0):
+                continue
+            proposals.append(
+                OutlineItemProposal(
+                    name=_normalize_item_name(raw_name, kind),
+                    kind=kind,
+                    deadline_at=deadline,
+                    weight_percent=weight,
+                    estimated_minutes=_estimated_minutes(kind),
+                    confidence=0.96 if deadline else 0.82,
+                    source_text=" | ".join(row)[:500],
+                )
+            )
+    return proposals
+
+
+def _extract_calendar_items(
+    document: ExtractedDocument, semester_start: date
+) -> list[OutlineItemProposal]:
+    proposals: list[OutlineItemProposal] = []
+    calendar_tables = [
+        table
+        for table in document.tables
+        if table
+        and [_key(cell) for cell in table[0]]
+        == ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+    ]
+    for index, table in enumerate(calendar_tables):
+        page_text = document.pages[index] if index < len(document.pages) else ""
+        month_match = MONTH_YEAR_PATTERN.search(page_text)
+        if not month_match:
+            continue
+        month = MONTH_NUMBERS[month_match.group(1).lower()]
+        year = semester_start.year
+        for row in table[1:]:
+            for cell in row:
+                cell_match = re.match(r"\s*(\d{1,2})\s*(.*)", cell, re.S)
+                if not cell_match:
+                    continue
+                day = int(cell_match.group(1))
+                details = re.sub(r"\s+", " ", cell_match.group(2)).strip()
+                if not details or any(
+                    marker in details.lower() for marker in ("exams begin", "exams end")
+                ):
+                    continue
+                kind = _item_kind(f" {details.lower()} ")
+                if kind is None:
+                    continue
+                try:
+                    deadline = datetime(year, month, day, 23, 59)
+                except ValueError:
+                    continue
+                proposals.append(
+                    OutlineItemProposal(
+                        name=_normalize_item_name(details, kind),
+                        kind=kind,
+                        deadline_at=deadline,
+                        weight_percent=None,
+                        estimated_minutes=_estimated_minutes(kind),
+                        confidence=0.94,
+                        source_text=f"{month_match.group(1)} {day}: {details}"[:500],
+                    )
+                )
+    return proposals
+
+
+def _extract_meetings(
+    lines: list[str], course: OutlineCourseProposal
+) -> list[OutlineMeetingProposal]:
+    meetings: list[OutlineMeetingProposal] = []
+    for line in lines:
+        lowered = line.lower()
+        if (
+            "office hour" in lowered
+            or "after each class" in lowered
+            or lowered.startswith("time:")
+            or not any(
+                marker in lowered for marker in ("lecture", "class", "seminar", "tutorial", "lab")
+            )
+        ):
+            continue
+        time_match = TIME_RANGE_PATTERN.search(line)
+        if time_match is None:
+            continue
+        if not any(marker in time_match.group(0).lower() for marker in (":", "am", "pm")):
+            continue
+        day_indexes = _parse_days(line[: time_match.start()]) or _parse_days(line)
+        if not day_indexes:
+            continue
+        start_time, end_time = _parse_time_range(time_match.group(1), time_match.group(2))
+        if start_time is None or end_time is None or end_time <= start_time:
+            continue
+        location_match = LOCATION_PATTERN.search(line)
+        location = location_match.group(1).strip(" .,-") if location_match else None
+        for day_index in day_indexes:
+            meetings.append(_meeting(course, day_index, start_time, end_time, location, line, 0.82))
+    return meetings
+
+
+def _extract_meetings_from_tables(
+    tables: list[list[list[str]]], course: OutlineCourseProposal
+) -> list[OutlineMeetingProposal]:
+    meetings: list[OutlineMeetingProposal] = []
+    for table in tables:
+        if len(table) < 2:
+            continue
+        header = [_key(cell) for cell in table[0]]
+        days_column = _column(header, "days of weeks", "days", "day")
+        hours_column = _column(header, "hours of day", "hours", "time")
+        schedule_column = _column(header, "schedule", "meeting type", "type")
+        location_column = _column(header, "location", "room")
+        if days_column is None or hours_column is None:
+            continue
+        for row in table[1:]:
+            if days_column >= len(row) or hours_column >= len(row):
+                continue
+            day_indexes = _parse_days(row[days_column])
+            time_match = TIME_RANGE_PATTERN.search(row[hours_column])
+            if not day_indexes or not time_match:
+                continue
+            start_time, end_time = _parse_time_range(time_match.group(1), time_match.group(2))
+            if start_time is None or end_time is None or end_time <= start_time:
+                continue
+            location = (
+                row[location_column].strip()
+                if location_column is not None and location_column < len(row)
+                else None
+            )
+            meeting_type = (
+                row[schedule_column].strip()
+                if schedule_column is not None and schedule_column < len(row)
+                else "class"
+            )
+            source = " | ".join(row)
+            for day_index in day_indexes:
+                meetings.append(
+                    _meeting(
+                        course,
+                        day_index,
+                        start_time,
+                        end_time,
+                        location,
+                        source,
+                        0.97,
+                        meeting_type,
+                    )
+                )
+    return meetings
+
+
+def _meeting(
+    course: OutlineCourseProposal,
+    day_index: int,
+    start_time: time,
+    end_time: time,
+    location: str | None,
+    source: str,
+    confidence: float,
+    meeting_type: str = "class",
+) -> OutlineMeetingProposal:
+    return OutlineMeetingProposal(
+        title=f"{course.code or course.name or 'Course'} {meeting_type.lower()}",
+        day_of_week=day_index,
+        start_time=start_time,
+        end_time=end_time,
+        location=location or None,
+        confidence=confidence,
+        source_text=source[:500],
+    )
+
+
+def _merge_course_proposals(proposals: list[OutlineCourseProposal]) -> OutlineCourseProposal:
+    code = max(
+        (item for item in proposals if item.code), key=lambda item: item.confidence, default=None
+    )
+    name = max(
+        (item for item in proposals if item.name),
+        key=lambda item: (item.confidence, len(item.name or "")),
+        default=None,
+    )
+    instructor = max(
+        (item for item in proposals if item.instructor),
+        key=lambda item: item.confidence,
+        default=None,
+    )
+    return OutlineCourseProposal(
+        code=code.code if code else None,
+        name=name.name if name else None,
+        instructor=instructor.instructor if instructor else None,
+        confidence=max((item.confidence for item in proposals), default=0.3),
+    )
+
+
+def _merge_items(items: list[OutlineItemProposal]) -> list[OutlineItemProposal]:
+    merged: list[OutlineItemProposal] = []
+    for item in items:
+        key = _normalized_item_name(item.name)
+        existing_index = next(
+            (
+                index
+                for index, current in enumerate(merged)
+                if _normalized_item_name(current.name) == key
+            ),
+            None,
+        )
+        if existing_index is None:
+            merged.append(item)
+            continue
+        current = merged[existing_index]
+        dates = [value for value in (current.deadline_at, item.deadline_at) if value]
+        close_dates = len(dates) == 2 and abs((dates[0] - dates[1]).days) <= 3
+        deadline = max(dates) if close_dates else current.deadline_at or item.deadline_at
+        if len(dates) == 2 and not close_dates:
+            merged.append(item)
+            continue
+        merged[existing_index] = current.model_copy(
+            update={
+                "deadline_at": deadline,
+                "weight_percent": current.weight_percent or item.weight_percent,
+                "confidence": max(current.confidence, item.confidence),
+                "source_text": current.source_text
+                if current.confidence >= item.confidence
+                else item.source_text,
+            }
+        )
+    return sorted(
+        merged,
+        key=lambda item: (item.deadline_at is None, item.deadline_at or datetime.max, item.name),
+    )[:100]
+
+
+def _merge_meetings(meetings: list[OutlineMeetingProposal]) -> list[OutlineMeetingProposal]:
+    unique: dict[tuple[int, time, time, str], OutlineMeetingProposal] = {}
+    for meeting in meetings:
+        key = (
+            meeting.day_of_week,
+            meeting.start_time,
+            meeting.end_time,
+            (meeting.location or "").lower(),
+        )
+        current = unique.get(key)
+        if current is None or meeting.confidence > current.confidence:
+            unique[key] = meeting
+    return sorted(unique.values(), key=lambda item: (item.day_of_week, item.start_time))[:30]
+
+
+def _proposal_warnings(
+    course: OutlineCourseProposal,
+    items: list[OutlineItemProposal],
+    meetings: list[OutlineMeetingProposal],
+    document_type: OutlineDocumentType,
+) -> list[str]:
+    warnings: list[str] = []
+    if course.code is None:
+        warnings.append("Course code was not found. Add it before importing.")
+    if course.name is None:
+        warnings.append("Course name was not found. Add it before importing.")
+    if not items:
+        warnings.append("No assignments or exams were found. You can add them manually.")
+    if not meetings:
+        warnings.append("No recurring class times were found. Add them in the next step.")
+    if document_type == "lecture_material":
+        warnings.append(
+            "This looks like lecture material. DoNext used its course and grading context "
+            "but did not treat slide topics as deadlines."
+        )
+    return warnings
 
 
 def _validate_docx_archive(content: bytes) -> None:
@@ -183,140 +800,35 @@ def _validate_docx_archive(content: bytes) -> None:
         raise ApiError("INVALID_DOCUMENT", "That Word document could not be read.", 422) from error
 
 
-def _extract_course(lines: list[str]) -> OutlineCourseProposal:
-    code: str | None = None
-    name: str | None = None
-    code_index: int | None = None
-    for index, line in enumerate(lines[:80]):
-        match = COURSE_CODE_PATTERN.search(line)
-        if match:
-            code = f"{match.group(1).upper()} {match.group(2).upper()}"
-            code_index = index
-            remainder = line[: match.start()] + " " + line[match.end() :]
-            remainder = re.sub(r"^[\s:|\-–—]+|[\s:|\-–—]+$", "", remainder)
-            if 3 <= len(remainder) <= 120:
-                name = remainder
-            break
-
-    if name is None and code_index is not None:
-        for candidate in lines[code_index + 1 : code_index + 4]:
-            if 3 <= len(candidate) <= 120 and not _looks_like_metadata(candidate):
-                name = candidate
-                break
-
-    instructor_match = INSTRUCTOR_PATTERN.search("\n".join(lines[:120]))
-    instructor = instructor_match.group(1).strip(" .,-") if instructor_match else None
-    confidence = 0.92 if code and name else 0.76 if code or name else 0.35
-    return OutlineCourseProposal(
-        code=code,
-        name=name,
-        instructor=instructor,
-        confidence=confidence,
-    )
-
-
-def _extract_items(lines: list[str], default_year: int) -> list[OutlineItemProposal]:
-    proposals: list[OutlineItemProposal] = []
-    seen: set[tuple[str, datetime | None]] = set()
-    for line in lines:
-        lowered = line.lower()
-        kind = next(
-            (
-                item_kind
-                for item_kind, keywords in ITEM_KIND_KEYWORDS
-                if any(word in lowered for word in keywords)
-            ),
-            None,
-        )
-        if kind is None:
-            continue
-        date_match = DATE_PATTERN.search(line)
-        deadline = _parse_date(date_match.group(0), default_year) if date_match else None
-        if deadline is None and not any(marker in lowered for marker in ("tbd", "to be announced")):
-            continue
-        name = _item_name(line, date_match)
-        key = (name.lower(), deadline)
-        if key in seen:
-            continue
-        seen.add(key)
-        weight_match = WEIGHT_PATTERN.search(line)
-        weight = float(weight_match.group(1)) if weight_match else None
-        proposals.append(
-            OutlineItemProposal(
-                name=name,
-                kind=kind,
-                deadline_at=deadline,
-                weight_percent=weight if weight is None or weight <= 100 else None,
-                estimated_minutes=_estimated_minutes(kind),
-                confidence=0.9 if deadline else 0.55,
-                source_text=line[:500],
-            )
-        )
-    return proposals[:100]
-
-
-def _extract_meetings(
-    lines: list[str], course: OutlineCourseProposal
-) -> list[OutlineMeetingProposal]:
-    meetings: list[OutlineMeetingProposal] = []
-    seen: set[tuple[int, time, time]] = set()
-    for line in lines:
-        time_match = TIME_RANGE_PATTERN.search(line)
-        if time_match is None:
-            continue
-        day_indexes = _parse_days(line[: time_match.start()])
-        if not day_indexes:
-            continue
-        start_time, end_time = _parse_time_range(time_match.group(1), time_match.group(2))
-        if start_time is None or end_time is None or end_time <= start_time:
-            continue
-        location_match = LOCATION_PATTERN.search(line)
-        location = location_match.group(1).strip(" .,-") if location_match else None
-        title = f"{course.code or course.name or 'Course'} class"
-        for day_index in day_indexes:
-            key = (day_index, start_time, end_time)
-            if key in seen:
-                continue
-            seen.add(key)
-            meetings.append(
-                OutlineMeetingProposal(
-                    title=title,
-                    day_of_week=day_index,
-                    start_time=start_time,
-                    end_time=end_time,
-                    location=location,
-                    confidence=0.82,
-                    source_text=line[:500],
-                )
-            )
-    return meetings[:30]
-
-
 def _parse_date(value: str, default_year: int) -> datetime | None:
-    cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", value.strip(), flags=re.I)
+    cleaned = re.sub(
+        r"^(?:Mon|Tue(?:s)?|Wed|Thu(?:rs)?|Fri|Sat|Sun)(?:day)?\s*,?\s+",
+        "",
+        value.strip(),
+        flags=re.I,
+    )
+    cleaned = re.sub(r"(\d)(st|nd|rd|th)\b", r"\1", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned)
     has_year = bool(re.search(r"\b\d{4}\b", cleaned) or re.search(r"/\d{2}$", cleaned))
-    if has_year:
-        candidates = (
-            (cleaned, date_format)
-            for date_format in (
-                "%Y-%m-%d",
-                "%m/%d/%Y",
-                "%m/%d/%y",
-                "%B %d, %Y",
-                "%B %d %Y",
-                "%b %d, %Y",
-                "%b %d %Y",
-            )
+    formats = (
+        (
+            "%Y-%m-%d",
+            "%m/%d/%Y",
+            "%m/%d/%y",
+            "%B %d, %Y",
+            "%B %d %Y",
+            "%b %d, %Y",
+            "%b %d %Y",
+            "%d %B %Y",
+            "%d %b %Y",
         )
-    else:
-        candidates = (
-            (f"{cleaned} {default_year}", date_format)
-            for date_format in ("%m/%d %Y", "%B %d %Y", "%b %d %Y")
-        )
-    for candidate, date_format in candidates:
+        if has_year
+        else ("%m/%d %Y", "%B %d %Y", "%b %d %Y", "%d %B %Y", "%d %b %Y")
+    )
+    candidate = cleaned if has_year else f"{cleaned} {default_year}"
+    for date_format in formats:
         try:
-            parsed = datetime.strptime(candidate, date_format)
-            return parsed.replace(hour=23, minute=59)
+            return datetime.strptime(candidate, date_format).replace(hour=23, minute=59)
         except ValueError:
             continue
     return None
@@ -331,8 +843,7 @@ def _parse_days(value: str) -> list[int]:
     }
     if matches:
         return sorted(matches)
-    tokens = re.findall(r"\b[A-Za-z]{1,3}\b", value)
-    for token in reversed(tokens):
+    for token in reversed(re.findall(r"\b[A-Za-z]{1,5}\b", value)):
         compact = token.lower()
         if compact in COMPACT_DAYS:
             return COMPACT_DAYS[compact]
@@ -340,9 +851,9 @@ def _parse_days(value: str) -> list[int]:
 
 
 def _parse_time_range(start_value: str, end_value: str) -> tuple[time | None, time | None]:
-    start = _parse_time(start_value)
     start_meridiem = _meridiem(start_value)
     end_meridiem = _meridiem(end_value) or start_meridiem
+    start = _parse_time(start_value, end_meridiem if start_meridiem is None else None)
     end = _parse_time(end_value, end_meridiem)
     if start and end and end <= start and _meridiem(end_value) is None and start.hour < 12:
         end = end.replace(hour=end.hour + 12 if end.hour < 12 else end.hour)
@@ -368,21 +879,42 @@ def _parse_time(value: str, assumed_meridiem: str | None = None) -> time | None:
 
 def _meridiem(value: str) -> str | None:
     cleaned = value.lower().replace(".", "")
-    if "pm" in cleaned:
-        return "pm"
-    if "am" in cleaned:
-        return "am"
-    return None
+    return "pm" if "pm" in cleaned else "am" if "am" in cleaned else None
+
+
+def _item_kind(value: str) -> OutlineItemKind | None:
+    return next(
+        (kind for kind, keywords in ITEM_KIND_KEYWORDS if any(word in value for word in keywords)),
+        None,
+    )
 
 
 def _item_name(line: str, date_match: re.Match[str] | None) -> str:
-    value = line
-    if date_match:
-        value = value[: date_match.start()]
+    value = line[: date_match.start()] if date_match else line
     value = re.sub(r"\b(?:due|deadline|date)\s*[:\-]?\s*$", "", value, flags=re.I)
     value = WEIGHT_PATTERN.sub("", value)
-    value = re.sub(r"^[\s|:;\-–—]+|[\s|:;\-–—]+$", "", value)
-    return (value or "Course item")[:160]
+    return re.sub(r"^[\s|:;\-–—]+|[\s|:;\-–—]+$", "", value)[:160] or "Course item"
+
+
+def _normalize_item_name(value: str, kind: OutlineItemKind) -> str:
+    value = re.sub(r"^\d{1,2}\s+", "", value.strip())
+    value = DATE_PATTERN.sub("", value)
+    value = re.sub(r"\s+(?:-|–|—|to)\s*$", "", value, flags=re.I)
+    assignment = re.search(r"(?:due\s*:\s*)?ass(?:ignment)?\s*(\d+)", value, re.I)
+    if assignment:
+        return f"Assignment {assignment.group(1)}"
+    value = re.sub(r"\s+", " ", value).strip(" .,:;-–—")
+    return (value or kind.replace("_", " ").title())[:160]
+
+
+def _normalized_item_name(value: str) -> str:
+    value = re.sub(r"\b(?:optional|current)\b", "", value.lower())
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _normalized_course_code(value: str | None) -> str | None:
+    return re.sub(r"\s+", "", value).upper() if value else None
 
 
 def _estimated_minutes(kind: str) -> int:
@@ -396,9 +928,28 @@ def _estimated_minutes(kind: str) -> int:
     }.get(kind, 180)
 
 
+def _key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _column(header: list[str], *names: str) -> int | None:
+    normalized_names = {_key(name) for name in names}
+    return next((index for index, value in enumerate(header) if value in normalized_names), None)
+
+
 def _looks_like_metadata(value: str) -> bool:
     lowered = value.lower()
     return any(
         marker in lowered
-        for marker in ("semester", "instructor", "office", "email", "credits", "schedule")
+        for marker in ("semester", "instructor", "office", "email", "credits", "schedule", "units")
+    )
+
+
+def _looks_like_month_heading(value: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}",
+            value,
+            re.I,
+        )
     )

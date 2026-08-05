@@ -14,12 +14,12 @@ The current milestone establishes a polished local foundation:
 - Responsive Today, Week, Semester, Courses, Goals, and Settings experiences
 - Data-backed semester, course, goal, and planning-preference setup
 - Required, resumable onboarding for semester dates, course outlines, class schedules, fixed commitments, goals, sleep, and availability
-- Local PDF, DOCX, and TXT course-outline extraction with a review-before-import workflow and manual-entry fallback
+- Local PDF, DOCX, and TXT extraction with document classification, table/calendar parsing, same-course file merging, a review-before-import workflow, and manual-entry fallback
 
 Automatic schedule generation and model-assisted document interpretation are intentionally reserved for later phases. Phase 1 uses a deterministic local parser so uploaded outlines are not sent to an external AI provider.
 Today, Week, and Semester currently use representative planning data so the product experience can be evaluated before the deterministic scheduling engine is introduced.
 
-New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload text-based course outlines, review the proposed course details, assignments, exams, and class meetings, then confirm the import. Scanned PDFs without embedded text may require manual entry.
+New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload outlines, course calendars, and lecture materials together. DoNext groups files by course code, combines complementary evidence, and proposes course details, weighted assessments, deadlines, and recurring class meetings for confirmation. Scanned PDFs without embedded text may require manual entry.
 
 ## Repository layout
 

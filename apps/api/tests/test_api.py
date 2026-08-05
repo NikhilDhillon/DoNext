@@ -248,3 +248,41 @@ def test_course_outline_upload_rejects_unsupported_files(client: TestClient) -> 
 
     assert response.status_code == 415
     assert response.json()["error"]["code"] == "UNSUPPORTED_DOCUMENT"
+
+
+def test_related_course_documents_are_classified_and_merged(client: TestClient) -> None:
+    register(client)
+
+    response = client.post(
+        "/api/v1/documents/parse-outlines",
+        data={"semester_start": "2026-01-05"},
+        files=[
+            (
+                "files",
+                (
+                    "course-schedule.txt",
+                    b"CSC 349A Numerical Analysis\nAssignment 1 due January 18, 2026\n",
+                    "text/plain",
+                ),
+            ),
+            (
+                "files",
+                (
+                    "lecture-01.txt",
+                    b"CSC349A Numerical Analysis\n"
+                    b"Instructor: Bruce Kapron\n"
+                    b"Midterm 1 Fri, 13 February 2026\n",
+                    "text/plain",
+                ),
+            ),
+        ],
+    )
+
+    assert response.status_code == 200
+    proposals = response.json()
+    assert len(proposals) == 1
+    assert proposals[0]["source_files"] == ["course-schedule.txt", "lecture-01.txt"]
+    assert proposals[0]["course"]["code"] == "CSC 349A"
+    assert proposals[0]["course"]["name"] == "Numerical Analysis"
+    assert proposals[0]["course"]["instructor"] == "Bruce Kapron"
+    assert [item["name"] for item in proposals[0]["items"]] == ["Assignment 1", "Midterm 1"]
