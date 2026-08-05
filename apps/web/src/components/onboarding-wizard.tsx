@@ -99,6 +99,10 @@ export function OnboardingWizard() {
 
   function back() {
     setActionError(null);
+    if (step === 0) {
+      router.push("/");
+      return;
+    }
     setStep((current) => Math.max(0, current - 1));
   }
 
@@ -310,7 +314,7 @@ export function OnboardingWizard() {
           {step === 6 ? <ReviewStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} events={events.data ?? []} goals={goals.data ?? []} preferences={preferences.data} busy={busy} onFinish={() => void finish()} /> : null}
 
           {actionError ? <p className="onboarding-error" role="alert">{actionError}</p> : null}
-          {step !== 5 && step !== 6 ? <div className="onboarding-actions"><button className="secondary-button" disabled={step === 0 || busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy} type="button" onClick={advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
+          {step !== 5 && step !== 6 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy} type="button" onClick={advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
           {step === 5 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
           {step === 6 ? <div className="onboarding-actions review-back"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
         </div>
