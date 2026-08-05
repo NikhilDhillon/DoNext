@@ -1,5 +1,6 @@
 import uuid
 from datetime import date, datetime, time
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
@@ -352,3 +353,41 @@ class AvailabilityRead(AvailabilityInput):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+
+
+class OutlineCourseProposal(ApiModel):
+    code: str | None = None
+    name: str | None = None
+    instructor: str | None = None
+    confidence: float = Field(ge=0, le=1)
+
+
+OutlineItemKind = Literal["assignment", "exam", "quiz", "project", "paper", "lab", "other"]
+
+
+class OutlineItemProposal(ApiModel):
+    name: str
+    kind: OutlineItemKind
+    deadline_at: datetime | None = None
+    weight_percent: float | None = Field(default=None, ge=0, le=100)
+    estimated_minutes: int = Field(ge=15, le=10080)
+    confidence: float = Field(ge=0, le=1)
+    source_text: str
+
+
+class OutlineMeetingProposal(ApiModel):
+    title: str
+    day_of_week: int = Field(ge=0, le=6)
+    start_time: time
+    end_time: time
+    location: str | None = None
+    confidence: float = Field(ge=0, le=1)
+    source_text: str
+
+
+class OutlineExtractionRead(ApiModel):
+    file_name: str
+    course: OutlineCourseProposal
+    items: list[OutlineItemProposal]
+    meetings: list[OutlineMeetingProposal]
+    warnings: list[str]

@@ -210,3 +210,41 @@ def test_planning_preferences_can_be_read_and_updated(client: TestClient) -> Non
     )
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_course_outline_upload_returns_reviewable_proposals(client: TestClient) -> None:
+    register(client)
+    outline = b"""CSC 320 Algorithms
+Instructor: Dr. Chen
+Lectures MWF 9:00 AM - 9:50 AM Room ECS 125
+Assignment 1 due September 25, 2026 10%
+Midterm exam October 20, 2026 25%
+"""
+
+    response = client.post(
+        "/api/v1/documents/parse-outline",
+        data={"semester_start": "2026-09-02"},
+        files={"file": ("csc-320-outline.txt", outline, "text/plain")},
+    )
+
+    assert response.status_code == 200
+    proposal = response.json()
+    assert proposal["course"]["code"] == "CSC 320"
+    assert proposal["course"]["name"] == "Algorithms"
+    assert proposal["course"]["instructor"] == "Dr. Chen"
+    assert [item["kind"] for item in proposal["items"]] == ["assignment", "exam"]
+    assert len(proposal["meetings"]) == 3
+    assert {meeting["day_of_week"] for meeting in proposal["meetings"]} == {0, 2, 4}
+
+
+def test_course_outline_upload_rejects_unsupported_files(client: TestClient) -> None:
+    register(client)
+
+    response = client.post(
+        "/api/v1/documents/parse-outline",
+        data={"semester_start": "2026-09-02"},
+        files={"file": ("outline.html", b"<p>Course outline</p>", "text/html")},
+    )
+
+    assert response.status_code == 415
+    assert response.json()["error"]["code"] == "UNSUPPORTED_DOCUMENT"
