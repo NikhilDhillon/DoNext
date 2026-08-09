@@ -443,6 +443,19 @@ class FixedEventCreate(FixedEventBase):
     pass
 
 
+class CourseOutlineImport(ApiModel):
+    course: CourseCreate
+    grading: CourseGradingReplace
+    meetings: list[FixedEventCreate] = Field(default_factory=list, max_length=30)
+    replace_existing: bool = False
+
+
+class CourseOutlineImportRead(ApiModel):
+    course: CourseRead
+    updated_existing: bool
+    meetings_created: int
+
+
 class FixedEventUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     semester_id: uuid.UUID | None = None

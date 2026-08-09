@@ -30,6 +30,7 @@ import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
   AvailabilityWindow,
   Course,
+  CourseOutlineImportResult,
   FixedEvent,
   Goal,
   OutlineExtraction,
@@ -78,8 +79,14 @@ export function OnboardingWizard() {
     if (user.data?.onboarding_completed_at) router.replace("/today");
   }, [router, user.data]);
 
-  const initialLoading = user.loading || semesters.loading || goals.loading || tasks.loading
-    || events.loading || preferences.loading || availability.loading || (Boolean(currentSemester) && courses.loading);
+  const initialLoading = (user.loading && user.data === null)
+    || (semesters.loading && semesters.data === null)
+    || (goals.loading && goals.data === null)
+    || (tasks.loading && tasks.data === null)
+    || (events.loading && events.data === null)
+    || (preferences.loading && preferences.data === null)
+    || (availability.loading && availability.data === null)
+    || (Boolean(currentSemester) && courses.loading && courses.data === null);
   const loadError = user.error || semesters.error || goals.error || tasks.error || events.error
     || preferences.error || availability.error || courses.error;
   const semesterFormVisible = step === 0 && (!currentSemester || editingSemester);
@@ -191,74 +198,58 @@ export function OnboardingWizard() {
       const existingCourse = courses.data?.find(
         (item) => normalizeCourseCode(item.code) === normalizeCourseCode(courseCode),
       );
-      const course = existingCourse
-        ? await apiRequest<Course>(`/courses/${existingCourse.id}`, {
-          method: "PATCH",
-          body: JSON.stringify({
-            name: courseName,
-            instructor: proposal.course.instructor ?? existingCourse.instructor,
-          }),
-        })
-        : await apiRequest<Course>(`/semesters/${currentSemester.id}/courses`, {
-          method: "POST",
-          body: JSON.stringify({
+      const meetings = proposal.meetings.map((meeting) => {
+        const firstDate = firstDayInSemester(currentSemester.start_date, meeting.day_of_week);
+        return {
+          title: meeting.title,
+          semester_id: currentSemester.id,
+          category: "class",
+          start_at: new Date(`${firstDate}T${meeting.start_time}`).toISOString(),
+          end_at: new Date(`${firstDate}T${meeting.end_time}`).toISOString(),
+          recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[meeting.day_of_week]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
+          location: meeting.location,
+          commute_before_minutes: 0,
+          commute_after_minutes: 0,
+          locked: true,
+        };
+      });
+
+      await apiRequest<CourseOutlineImportResult>(
+        `/semesters/${currentSemester.id}/courses/import-outline`, {
+        method: "POST",
+        body: JSON.stringify({
+          course: {
             code: courseCode,
             name: courseName,
             instructor: proposal.course.instructor,
             difficulty: 3,
             weekly_study_target_minutes: 180,
-          }),
-        });
-
-      await apiRequest(`/courses/${course.id}/grading`, {
-        method: "PUT",
-        body: JSON.stringify({
-          groups: proposal.groups,
-          items: proposal.items.map((item, index) => ({
-            key: item.key ?? `item-${index + 1}`,
-            group_key: item.group_key,
-            item_type: academicItemType(item),
-            name: item.name,
-            due_at: item.deadline_at,
-            direct_weight_percent: item.weight_percent,
-            relative_weight_percent: item.relative_weight_percent,
-            points_possible: item.points_possible,
-            weight_origin: item.weight_origin,
-            extraction_confidence: item.confidence,
-            minimum_required_percent: item.minimum_required_percent,
-            extra_credit: item.extra_credit,
-            source_text: item.source_text,
-            source_references: proposal.source_files,
-            estimated_minutes: item.estimated_minutes,
-          })),
-          schemes: proposal.schemes,
+          },
+          grading: {
+            groups: proposal.groups,
+            items: proposal.items.map((item, index) => ({
+              key: item.key ?? `item-${index + 1}`,
+              group_key: item.group_key,
+              item_type: academicItemType(item),
+              name: item.name,
+              due_at: item.deadline_at,
+              direct_weight_percent: item.weight_percent,
+              relative_weight_percent: item.relative_weight_percent,
+              points_possible: item.points_possible,
+              weight_origin: item.weight_origin,
+              extraction_confidence: item.confidence,
+              minimum_required_percent: item.minimum_required_percent,
+              extra_credit: item.extra_credit,
+              source_text: item.source_text,
+              source_references: proposal.source_files,
+              estimated_minutes: item.estimated_minutes,
+            })),
+            schemes: proposal.schemes,
+          },
+          meetings,
+          replace_existing: Boolean(existingCourse),
         }),
       });
-
-      const existingMeetingKeys = new Set(
-        (events.data ?? []).filter((item) => item.category === "class").map(fixedEventKey),
-      );
-      const newMeetings = proposal.meetings.filter(
-        (meeting) => !existingMeetingKeys.has(outlineMeetingKey(meeting)),
-      );
-      await Promise.all(newMeetings.map((meeting) => {
-        const firstDate = firstDayInSemester(currentSemester.start_date, meeting.day_of_week);
-        return apiRequest<FixedEvent>("/events", {
-          method: "POST",
-          body: JSON.stringify({
-            title: meeting.title,
-            semester_id: currentSemester.id,
-            category: "class",
-            start_at: new Date(`${firstDate}T${meeting.start_time}`).toISOString(),
-            end_at: new Date(`${firstDate}T${meeting.end_time}`).toISOString(),
-            recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[meeting.day_of_week]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
-            location: meeting.location,
-            commute_before_minutes: 0,
-            commute_after_minutes: 0,
-            locked: true,
-          }),
-        });
-      }));
 
       await Promise.all([courses.reload(), tasks.reload(), events.reload()]);
     });
@@ -532,25 +523,10 @@ function normalizeCourseCode(value: string) {
   return value.replaceAll(/\s+/g, "").toUpperCase();
 }
 
-function fixedEventKey(event: FixedEvent) {
-  const starts = new Date(event.start_at);
-  const ends = new Date(event.end_at);
-  const day = (starts.getDay() + 6) % 7;
-  return `${day}|${timeKey(starts)}|${timeKey(ends)}`;
-}
-
-function outlineMeetingKey(meeting: OutlineExtraction["meetings"][number]) {
-  return `${meeting.day_of_week}|${meeting.start_time.slice(0, 5)}|${meeting.end_time.slice(0, 5)}`;
-}
-
 function academicItemType(item: OutlineExtraction["items"][number]) {
   if (item.kind === "exam") {
     return item.name.toLowerCase().includes("final") ? "final_exam" : "midterm";
   }
   if (item.kind === "paper") return "presentation";
   return item.kind;
-}
-
-function timeKey(value: Date) {
-  return `${String(value.getHours()).padStart(2, "0")}:${String(value.getMinutes()).padStart(2, "0")}`;
 }

@@ -48,7 +48,7 @@ export function ClassScheduleStep({ semester, courses, events, busy, onSubmit, o
 
         <fieldset className="class-day-picker">
           <legend>Meets on</legend>
-          {days.map((day, index) => <label key={day}><input name={`class_day_${index}`} type="checkbox" defaultChecked={index === 0 || index === 2 || index === 4} /><span>{day.slice(0, 3)}</span></label>)}
+          {days.map((day, index) => <label key={day}><input name={`class_day_${index}`} type="checkbox" /><span>{day.slice(0, 3)}</span></label>)}
         </fieldset>
 
         <div className="form-row">

@@ -217,6 +217,12 @@ export type OutlineExtraction = {
   warnings: string[];
 };
 
+export type CourseOutlineImportResult = {
+  course: Course;
+  updated_existing: boolean;
+  meetings_created: number;
+};
+
 export type AssessmentGroup = {
   id: string;
   parent_group_id: string | null;

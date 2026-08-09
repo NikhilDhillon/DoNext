@@ -165,6 +165,71 @@ def test_complete_scheme_requires_one_hundred_percent(client: TestClient) -> Non
     assert client.get(f"/api/v1/courses/{course['id']}/grading").json()["items"] == []
 
 
+def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    deadline = datetime.now(UTC) + timedelta(days=10)
+    payload = {
+        "course": {
+            "code": "CSC 349A",
+            "name": "Numerical Analysis",
+            "instructor": "Bruce Kapron",
+        },
+        "grading": grading_payload(deadline),
+        "meetings": [
+            {
+                "title": "CSC 349A lecture",
+                "semester_id": semester["id"],
+                "category": "class",
+                "start_at": "2026-09-07T10:00:00-07:00",
+                "end_at": "2026-09-07T11:20:00-07:00",
+                "recurrence_rule": "FREQ=WEEKLY;BYDAY=MO",
+            }
+        ],
+    }
+
+    created = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline", json=payload
+    )
+    assert created.status_code == 200
+    assert created.json()["updated_existing"] is False
+    assert created.json()["meetings_created"] == 1
+    assert len(client.get("/api/v1/tasks").json()) == 3
+    assert len(client.get("/api/v1/events").json()) == 1
+
+    conflict = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline", json=payload
+    )
+    assert conflict.status_code == 409
+
+    payload["replace_existing"] = True
+    payload["course"]["name"] = "Numerical Methods"  # type: ignore[index]
+    updated = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline", json=payload
+    )
+    assert updated.status_code == 200
+    assert updated.json()["updated_existing"] is True
+    assert updated.json()["course"]["name"] == "Numerical Methods"
+    assert updated.json()["meetings_created"] == 0
+
+    invalid_payload = {
+        **payload,
+        "replace_existing": False,
+        "course": {"code": "CSC 350", "name": "Broken import"},
+        "grading": grading_payload(deadline),
+        "meetings": [],
+    }
+    invalid_payload["grading"]["schemes"][0]["is_complete"] = True  # type: ignore[index]
+    failed = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline", json=invalid_payload
+    )
+    assert failed.status_code == 422
+    courses = client.get(f"/api/v1/semesters/{semester['id']}/courses").json()
+    assert {course["code"] for course in courses} == {"CSC 349A"}
+
+
 def test_academic_items_are_user_scoped(client: TestClient) -> None:
     register(client, "first-grading@example.com")
     course = create_course(client)

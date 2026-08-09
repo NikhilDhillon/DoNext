@@ -6,6 +6,9 @@ from donext.outline_parser import (
     _extract_calendar_items,
     _extract_items_from_tables,
     _extract_meetings_from_tables,
+    _merge_items,
+    _proposal_warnings,
+    _source_date_warnings,
 )
 from donext.schemas import OutlineCourseProposal, OutlineItemProposal
 
@@ -30,6 +33,30 @@ def test_calendar_grid_extracts_assignments_and_exam_windows() -> None:
         ("Midterm 1", date(2026, 2, 12)),
         ("Midterm 1", date(2026, 2, 13)),
     ]
+    merged = _merge_items(items)
+    midterm = next(item for item in merged if item.name == "Midterm 1")
+    assert midterm.deadline_at and midterm.deadline_at.date() == date(2026, 2, 13)
+    assert "February 12" in midterm.source_text
+    assert "February 13" in midterm.source_text
+
+
+def test_calendar_year_conflicts_and_missing_dates_are_review_warnings() -> None:
+    document = ExtractedDocument(text="CSC 349A - March 2025", pages=[], tables=[])
+    year_warnings = _source_date_warnings(document, date(2026, 1, 5))
+    item = proposal("Final Exam", "exam", 40)
+    proposal_warnings = _proposal_warnings(
+        OutlineCourseProposal(code="CSC 349A", name="Numerical Analysis", confidence=0.9),
+        [item],
+        [],
+        "course_schedule",
+    )
+
+    assert year_warnings == [
+        "The document contains calendar headings for 2025, but this semester starts in 2026. "
+        "DoNext used 2026; review those dates."
+    ]
+    assert any("1 academic item has no date" in warning for warning in proposal_warnings)
+    assert any("No recurring class times" in warning for warning in proposal_warnings)
 
 
 def test_formal_outline_tables_extract_assessments_and_recurring_meetings() -> None:

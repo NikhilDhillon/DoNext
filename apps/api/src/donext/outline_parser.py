@@ -163,6 +163,8 @@ def extract_outline(file_name: str, content: bytes, semester_start: date) -> Out
         ]
     )
     warnings = _proposal_warnings(course, items, meetings, document_type)
+    if document_type == "course_schedule":
+        warnings.extend(_source_date_warnings(document, semester_start))
 
     return OutlineExtractionRead(
         file_name=file_name,
@@ -210,7 +212,17 @@ def merge_outline_extractions(
         document_types = list(
             dict.fromkeys(kind for item in related for kind in item.document_types)
         )
-        warnings = _proposal_warnings(course, items, meetings, document_types[0])
+        source_warnings = [
+            warning
+            for item in related
+            for warning in item.warnings
+            if warning.startswith("The document contains calendar headings")
+        ]
+        warnings = list(
+            dict.fromkeys(
+                [*_proposal_warnings(course, items, meetings, document_types[0]), *source_warnings]
+            )
+        )
         if len(source_files) > 1:
             warnings.insert(0, f"Combined {len(source_files)} related files for this course.")
         if "lecture_material" in document_types:
@@ -754,14 +766,19 @@ def _merge_items(items: list[OutlineItemProposal]) -> list[OutlineItemProposal]:
         if len(dates) == 2 and not close_dates:
             merged.append(item)
             continue
+        source_text = (
+            f"{current.source_text} – {item.source_text}"
+            if close_dates and current.source_text != item.source_text
+            else (
+                current.source_text if current.confidence >= item.confidence else item.source_text
+            )
+        )
         merged[existing_index] = current.model_copy(
             update={
                 "deadline_at": deadline,
                 "weight_percent": current.weight_percent or item.weight_percent,
                 "confidence": max(current.confidence, item.confidence),
-                "source_text": current.source_text
-                if current.confidence >= item.confidence
-                else item.source_text,
+                "source_text": source_text,
             }
         )
     return sorted(
@@ -1120,6 +1137,14 @@ def _proposal_warnings(
         warnings.append("Course name was not found. Add it before importing.")
     if not items:
         warnings.append("No assignments or exams were found. You can add them manually.")
+    else:
+        undated_items = [item for item in items if item.deadline_at is None]
+        if undated_items:
+            count = len(undated_items)
+            warnings.append(
+                f"{count} academic {'item has' if count == 1 else 'items have'} no date. "
+                "Add the missing date before relying on the generated schedule."
+            )
     if not meetings:
         warnings.append("No recurring class times were found. Add them in the next step.")
     if document_type == "lecture_material":
@@ -1128,6 +1153,21 @@ def _proposal_warnings(
             "but did not treat slide topics as deadlines."
         )
     return warnings
+
+
+def _source_date_warnings(document: ExtractedDocument, semester_start: date) -> list[str]:
+    source_years = {
+        int(f"20{match.group(2)}{match.group(3)}")
+        for match in MONTH_YEAR_PATTERN.finditer(document.text)
+    }
+    conflicting_years = sorted(year for year in source_years if year != semester_start.year)
+    if not conflicting_years:
+        return []
+    listed = ", ".join(str(year) for year in conflicting_years)
+    return [
+        f"The document contains calendar headings for {listed}, but this semester starts in "
+        f"{semester_start.year}. DoNext used {semester_start.year}; review those dates."
+    ]
 
 
 def _validate_docx_archive(content: bytes) -> None:

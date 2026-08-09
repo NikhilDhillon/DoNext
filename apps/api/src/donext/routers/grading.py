@@ -12,12 +12,14 @@ from donext.models import (
     AcademicItemType,
     AssessmentGroup,
     Course,
+    FixedEvent,
     GradingScheme,
     GradingSchemeComponent,
     Priority,
     Task,
 )
 from donext.routers.courses import owned_course
+from donext.routers.semesters import owned_semester
 from donext.schemas import (
     AcademicImpactRead,
     AcademicItemRead,
@@ -25,7 +27,10 @@ from donext.schemas import (
     AssessmentGroupRead,
     CourseGradingRead,
     CourseGradingReplace,
+    CourseOutlineImport,
+    CourseOutlineImportRead,
     CourseRead,
+    FixedEventCreate,
     GradingSchemeComponentRead,
     GradingSchemeRead,
 )
@@ -172,13 +177,12 @@ def get_course_grading(
     return _grading_read(db, course_id)
 
 
-@router.put("/courses/{course_id}/grading", response_model=CourseGradingRead)
-def replace_course_grading(
+def _replace_course_grading_data(
     course_id: uuid.UUID,
     payload: CourseGradingReplace,
     db: DbSession,
     current_user: CurrentUser,
-) -> CourseGradingRead:
+) -> Course:
     course = owned_course(db, current_user.id, course_id)
     _validate_group_cycles(payload)
     if sum(scheme.is_primary for scheme in payload.schemes) > 1:
@@ -330,8 +334,108 @@ def replace_course_grading(
                 )
             )
 
+    return course
+
+
+@router.put("/courses/{course_id}/grading", response_model=CourseGradingRead)
+def replace_course_grading(
+    course_id: uuid.UUID,
+    payload: CourseGradingReplace,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> CourseGradingRead:
+    _replace_course_grading_data(course_id, payload, db, current_user)
     db.commit()
     return _grading_read(db, course_id)
+
+
+def _event_key(event: FixedEvent | FixedEventCreate) -> tuple[str, int, int, int, int, int]:
+    title = event.title.strip().casefold()
+    start_at = event.start_at
+    end_at = event.end_at
+    return (
+        title,
+        start_at.weekday(),
+        start_at.hour,
+        start_at.minute,
+        end_at.hour,
+        end_at.minute,
+    )
+
+
+@router.post(
+    "/semesters/{semester_id}/courses/import-outline",
+    response_model=CourseOutlineImportRead,
+)
+def import_course_outline(
+    semester_id: uuid.UUID,
+    payload: CourseOutlineImport,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> CourseOutlineImportRead:
+    owned_semester(db, current_user.id, semester_id)
+    normalized_code = payload.course.code.replace(" ", "").upper()
+    existing_course = next(
+        (
+            course
+            for course in db.scalars(select(Course).where(Course.semester_id == semester_id))
+            if course.code.replace(" ", "").upper() == normalized_code
+        ),
+        None,
+    )
+    if existing_course is not None and not payload.replace_existing:
+        raise ApiError(
+            "CONFLICT",
+            f"{existing_course.code} is already in this semester. "
+            "Confirm that you want to update it.",
+            409,
+        )
+
+    updated_existing = existing_course is not None
+    if existing_course is None:
+        values = payload.course.model_dump()
+        values["code"] = payload.course.code.strip().upper()
+        course = Course(semester_id=semester_id, **values)
+        db.add(course)
+        db.flush()
+    else:
+        course = existing_course
+        course.name = payload.course.name
+        course.instructor = payload.course.instructor or course.instructor
+
+    _replace_course_grading_data(course.id, payload.grading, db, current_user)
+
+    existing_events = list(
+        db.scalars(
+            select(FixedEvent).where(
+                FixedEvent.user_id == current_user.id,
+                FixedEvent.semester_id == semester_id,
+                FixedEvent.category == "class",
+            )
+        )
+    )
+    existing_keys = {_event_key(event) for event in existing_events}
+    meetings_created = 0
+    for meeting in payload.meetings:
+        if meeting.semester_id != semester_id or meeting.category != "class":
+            raise ApiError(
+                "VALIDATION_ERROR",
+                "Imported meetings must be classes in the selected semester.",
+                422,
+            )
+        if _event_key(meeting) in existing_keys:
+            continue
+        db.add(FixedEvent(user_id=current_user.id, **meeting.model_dump()))
+        existing_keys.add(_event_key(meeting))
+        meetings_created += 1
+
+    db.commit()
+    db.refresh(course)
+    return CourseOutlineImportRead(
+        course=CourseRead.model_validate(course),
+        updated_existing=updated_existing,
+        meetings_created=meetings_created,
+    )
 
 
 @router.patch("/academic-items/{item_id}", response_model=AcademicItemRead)
