@@ -44,3 +44,22 @@ def test_solver_reports_partial_capacity_honestly() -> None:
 
     assert result.scheduled_minutes["large"] < 120
     assert result.placements
+
+
+def test_solver_uses_a_valid_remainder_session() -> None:
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 20, 0, tzinfo=UTC),
+        )
+    ]
+    result = solve_schedule([task("three-hours", minutes=180)], windows, minimum_break_minutes=10)
+
+    assert result.scheduled_minutes["three-hours"] == 180
+    assert (
+        sum(
+            round((placement.end_at - placement.start_at).total_seconds() / 60)
+            for placement in result.placements
+        )
+        == 180
+    )

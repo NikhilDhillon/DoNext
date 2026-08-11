@@ -171,7 +171,14 @@ def _session_durations(item: SchedulingItem) -> list[int]:
     upper = min(item.maximum_session_minutes, item.target_minutes)
     lower = min(item.minimum_session_minutes, upper)
     preferred = min(max(item.preferred_session_minutes, lower), upper)
-    values = {preferred, upper, item.target_minutes}
+    values = {
+        lower,
+        preferred,
+        upper,
+        item.target_minutes,
+        item.target_minutes - upper,
+        item.target_minutes % preferred,
+    }
     return sorted({value for value in values if lower <= value <= upper}, reverse=True)
 
 

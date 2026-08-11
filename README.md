@@ -4,7 +4,8 @@ DoNext is an adaptive life planner that helps students decide what to do next wh
 
 ## Current milestone
 
-The project now includes the Phase 1 local foundation and the Phase 2 live manual planner:
+The project now includes the Phase 1 local foundation, the Phase 2 live manual planner, and the
+Phase 3 review-first scheduling workflow:
 
 - Next.js and TypeScript web application
 - FastAPI backend
@@ -13,13 +14,18 @@ The project now includes the Phase 1 local foundation and the Phase 2 live manua
 - Core planning data model and CRUD APIs
 - Responsive Today, Week, Semester, Courses, Goals, and Settings experiences backed by authenticated user data
 - Manual schedule-block creation, editing, moving, linking, locking, and deletion
+- Deterministic 14-day schedule proposals that preserve the accepted plan until explicit approval
+- Reviewable placement reasons, unresolved-work warnings, stale-input protection, and editable drafts
 - User-local day and week planning views with recurring commitments, commute time, availability, and protected buffer calculations
 - Semester workload, deadline, capacity, and risk summaries derived from stored tasks and preferences
 - Data-backed semester, course, goal, and planning-preference setup
 - Required, resumable onboarding for semester dates, course outlines, class schedules, fixed commitments, goals, sleep, and availability
 - Local PDF, DOCX, and TXT extraction with document classification, table/calendar parsing, same-course file merging, a review-before-import workflow, and manual-entry fallback
 
-Automatic schedule generation and model-assisted document interpretation are intentionally reserved for later phases. Uploaded outlines use a deterministic local parser and are not sent to an external AI provider. Today, Week, and Semester now read the accepted manual schedule and planning inputs; they do not use representative fixture data.
+Model-assisted document interpretation and automatic proposal acceptance are intentionally reserved
+for later phases. Uploaded outlines use a deterministic local parser and are not sent to an external
+AI provider. Today, Week, and Semester read the accepted schedule and planning inputs; a generated
+proposal stays separate and editable until the student accepts the complete draft.
 
 New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload outlines, course calendars, and lecture materials together. DoNext groups files by course code, combines complementary evidence, and proposes course details, weighted assessments, deadlines, and recurring class meetings for confirmation. Scanned PDFs without embedded text may require manual entry.
 
@@ -42,7 +48,8 @@ Requirements:
 - Python 3.13 or later
 - PostgreSQL 14 or later, installed locally or through Docker
 
-Redis is not required for the current application. It will be introduced when schedule generation moves into background jobs.
+Redis is not required for the current application. It will be introduced if schedule generation
+moves into background jobs.
 
 Copy `.env.example` to `.env`, then install dependencies:
 
