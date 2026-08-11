@@ -13,6 +13,7 @@ from donext.routers import (
     grading,
     planning,
     preferences,
+    proposals,
     schedules,
     semesters,
     tasks,
@@ -47,6 +48,7 @@ app.include_router(preferences.router, prefix=api_prefix)
 app.include_router(documents.router, prefix=api_prefix)
 app.include_router(grading.router, prefix=api_prefix)
 app.include_router(schedules.router, prefix=api_prefix)
+app.include_router(proposals.router, prefix=api_prefix)
 app.include_router(planning.router, prefix=api_prefix)
 
 

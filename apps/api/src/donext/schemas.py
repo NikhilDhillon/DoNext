@@ -625,6 +625,8 @@ class ScheduleBlockRead(ApiModel):
     locked: bool
     source: str
     stability_weight: float
+    reason_code: str | None = None
+    reason_details: dict[str, object] | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -639,6 +641,25 @@ class ScheduleRead(ApiModel):
     blocks: list[ScheduleBlockRead]
     created_at: datetime
     updated_at: datetime
+
+
+class ProposalSummaryRead(ApiModel):
+    solve_status: Literal["optimal", "feasible", "infeasible"]
+    scheduled_minutes: int
+    requested_minutes: int
+    preserved_blocks: int
+    generated_blocks: int
+    moved_blocks: int = 0
+    warnings: list[str] = Field(default_factory=list)
+    unscheduled: list[dict[str, object]] = Field(default_factory=list)
+
+
+class ScheduleProposalRead(ScheduleRead):
+    base_schedule_version_id: uuid.UUID | None
+    horizon_start: date
+    horizon_end: date
+    stale: bool
+    generation_summary: ProposalSummaryRead
 
 
 PlanningEntryKind = Literal["scheduled_block", "fixed_event"]
