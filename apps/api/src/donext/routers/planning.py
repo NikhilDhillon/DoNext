@@ -27,8 +27,11 @@ def get_day_plan(
 def get_week_plan(
     db: DbSession,
     current_user: CurrentUser,
-    start: Annotated[date, Query()],
+    start: Annotated[date | None, Query()] = None,
 ) -> PlanningViewRead:
+    if start is None:
+        today = datetime.now(UTC).astimezone(resolve_timezone(current_user.timezone)).date()
+        start = today - timedelta(days=today.weekday())
     return build_planning_view(db, current_user, start, start + timedelta(days=7))
 
 
