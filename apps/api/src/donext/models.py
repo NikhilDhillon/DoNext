@@ -3,6 +3,7 @@ from datetime import date, datetime, time
 from enum import StrEnum
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     CheckConstraint,
     Date,
@@ -571,6 +572,9 @@ class ScheduleVersion(UuidTimestampMixin, Base):
     semester_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semesters.id", ondelete="CASCADE"), index=True
     )
+    base_schedule_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedule_versions.id", ondelete="SET NULL"), index=True
+    )
     version_number: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(String(200))
     status: Mapped[ScheduleStatus] = mapped_column(
@@ -578,6 +582,10 @@ class ScheduleVersion(UuidTimestampMixin, Base):
     )
     objective_score: Mapped[float | None] = mapped_column(Float)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    horizon_start: Mapped[date | None] = mapped_column(Date)
+    horizon_end: Mapped[date | None] = mapped_column(Date)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    generation_summary: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
     blocks: Mapped[list["ScheduledBlock"]] = relationship(cascade="all, delete-orphan")
 
@@ -612,3 +620,5 @@ class ScheduledBlock(UuidTimestampMixin, Base):
     locked: Mapped[bool] = mapped_column(Boolean, default=False)
     source: Mapped[str] = mapped_column(String(32), default="manual")
     stability_weight: Mapped[float] = mapped_column(Float, default=1.0)
+    reason_code: Mapped[str | None] = mapped_column(String(64))
+    reason_details: Mapped[dict[str, object] | None] = mapped_column(JSON)

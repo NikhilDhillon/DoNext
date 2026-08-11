@@ -12,6 +12,7 @@ dependencies = [
   "alembic>=1.16,<2",
   "email-validator>=2.2,<3",
   "fastapi>=0.116,<1",
+  "ortools>=9.15,<10",
   "pdfplumber>=0.11,<1",
   "psycopg[binary]>=3.2,<4",
   "pydantic-settings>=2.10,<3",
@@ -57,5 +58,5 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["redis.*"]
+module = ["ortools.*", "redis.*"]
 ignore_missing_imports = true
