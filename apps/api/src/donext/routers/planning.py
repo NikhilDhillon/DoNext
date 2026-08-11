@@ -1,11 +1,11 @@
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query
 
 from donext.dependencies import CurrentUser, DbSession
-from donext.planning import build_planning_view, build_semester_view
+from donext.planning import build_planning_view, build_semester_view, resolve_timezone
 from donext.routers.semesters import owned_semester
 from donext.schemas import PlanningViewRead, SemesterPlanningRead
 
@@ -16,8 +16,10 @@ router = APIRouter(prefix="/planning", tags=["planning"])
 def get_day_plan(
     db: DbSession,
     current_user: CurrentUser,
-    target_date: Annotated[date, Query(alias="date")],
+    target_date: Annotated[date | None, Query(alias="date")] = None,
 ) -> PlanningViewRead:
+    if target_date is None:
+        target_date = datetime.now(UTC).astimezone(resolve_timezone(current_user.timezone)).date()
     return build_planning_view(db, current_user, target_date, target_date + timedelta(days=1))
 
 

@@ -126,6 +126,114 @@ export type AvailabilityWindow = {
   updated_at: string;
 };
 
+export type ScheduleBlock = {
+  id: string;
+  schedule_version_id: string;
+  title: string;
+  task_id: string | null;
+  fixed_event_id: string | null;
+  goal_id: string | null;
+  start_at: string;
+  end_at: string;
+  block_type: "focus" | "commitment" | "goal" | "break" | "personal";
+  locked: boolean;
+  source: string;
+  stability_weight: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Schedule = {
+  id: string;
+  semester_id: string;
+  version_number: number;
+  reason: string;
+  status: "proposed" | "accepted" | "rejected" | "superseded";
+  accepted_at: string | null;
+  blocks: ScheduleBlock[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type PlanningEntry = {
+  id: string;
+  kind: "scheduled_block" | "fixed_event";
+  source_id: string;
+  title: string;
+  start_at: string;
+  end_at: string;
+  block_type: string;
+  category: string;
+  location: string | null;
+  task_id: string | null;
+  task_status: PlanningTask["status"] | null;
+  goal_id: string | null;
+  course_code: string | null;
+  locked: boolean;
+  recurring: boolean;
+  editable: boolean;
+};
+
+export type PlannerTask = {
+  id: string;
+  name: string;
+  remaining_minutes: number;
+  deadline_at: string | null;
+  priority: PlanningTask["priority"];
+  intensity: PlanningTask["intensity"];
+  course_code: string | null;
+  goal_name: string | null;
+};
+
+export type PlanningCapacity = {
+  available_minutes: number;
+  commitment_minutes: number;
+  usable_focus_minutes: number;
+  planned_focus_minutes: number;
+  protected_free_minutes: number;
+  remaining_focus_minutes: number;
+  preferred_sleep_minutes: number;
+};
+
+export type PlanningView = {
+  start_date: string;
+  end_date: string;
+  timezone: string;
+  entries: PlanningEntry[];
+  days: { date: string; capacity: PlanningCapacity }[];
+  unscheduled_tasks: PlannerTask[];
+  next_entry_id: string | null;
+  warnings: string[];
+};
+
+export type SemesterPlanning = {
+  semester: Semester;
+  total_demand_minutes: number;
+  total_capacity_minutes: number;
+  open_capacity_minutes: number;
+  upcoming_deadlines: number;
+  incomplete_data: boolean;
+  weeks: {
+    week_number: number;
+    start_date: string;
+    end_date: string;
+    demand_minutes: number;
+    capacity_minutes: number;
+    commitment_minutes: number;
+    scheduled_minutes: number;
+    load_percent: number | null;
+    risk: "low" | "medium" | "high" | "unknown";
+  }[];
+  deadlines: {
+    id: string;
+    name: string;
+    due_at: string;
+    course_code: string | null;
+    remaining_minutes: number | null;
+    weight_percent: number | null;
+  }[];
+};
+
 export type OutlineItemProposal = {
   key: string | null;
   group_key: string | null;

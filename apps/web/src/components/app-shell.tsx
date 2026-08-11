@@ -19,7 +19,7 @@ import type { ReactNode } from "react";
 
 import { Brand } from "@/components/brand";
 import { useApiResource } from "@/hooks/use-api-resource";
-import type { Semester, User } from "@/lib/types";
+import type { PlanningView, Semester, User } from "@/lib/types";
 
 const primaryNavigation = [
   { href: "/today", label: "Today", icon: LayoutDashboard },
@@ -34,6 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const user = useApiResource<User>("/auth/me");
   const semesters = useApiResource<Semester[]>("/semesters");
+  const { data: planningData, reload: reloadPlanning } = useApiResource<PlanningView>("/planning/day");
   const currentSemester = semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null;
   const displayName = user.data?.name || "Your workspace";
   const firstName = displayName.split(" ")[0];
@@ -46,6 +47,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       router.replace("/onboarding");
     }
   }, [router, user.data]);
+
+  useEffect(() => {
+    const refreshPlanning = () => void reloadPlanning();
+    window.addEventListener("donext:planning-updated", refreshPlanning);
+    return () => window.removeEventListener("donext:planning-updated", refreshPlanning);
+  }, [reloadPlanning]);
+
+  const todayCapacity = planningData?.days[0]?.capacity;
 
   return (
     <div className="app-frame">
@@ -77,7 +86,9 @@ export function AppShell({ children }: { children: ReactNode }) {
               >
                 <Icon size={19} strokeWidth={1.9} aria-hidden="true" />
                 {item.label}
-                {item.href === "/today" && <span className="nav-count">4</span>}
+                {item.href === "/today" && Boolean(planningData?.entries.length) && (
+                  <span className="nav-count">{planningData?.entries.length}</span>
+                )}
               </Link>
             );
           })}
@@ -87,8 +98,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="planner-note">
           <Sparkles size={18} aria-hidden="true" />
           <div>
-            <strong>Your plan has breathing room</strong>
-            <span>3h 20m remains unallocated</span>
+            <strong>{todayCapacity ? "Today reflects your saved plan" : "Capacity needs your input"}</strong>
+            <span>{todayCapacity ? `${formatMinutes(todayCapacity.remaining_focus_minutes)} focus time remains` : "Add availability in Settings"}</span>
           </div>
         </div>
         <Link href="/settings" className="sidebar-settings">
@@ -140,4 +151,11 @@ function semesterCode(semester: Semester) {
   const start = new Date(`${semester.start_date}T12:00:00`);
   const season = start.getMonth() < 4 ? "W" : start.getMonth() < 8 ? "S" : "F";
   return `${season}${String(start.getFullYear()).slice(-2)}`;
+}
+
+function formatMinutes(minutes: number) {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }
