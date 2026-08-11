@@ -139,6 +139,8 @@ export type ScheduleBlock = {
   locked: boolean;
   source: string;
   stability_weight: number;
+  reason_code: string | null;
+  reason_details: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -153,6 +155,23 @@ export type Schedule = {
   blocks: ScheduleBlock[];
   created_at: string;
   updated_at: string;
+};
+
+export type ScheduleProposal = Schedule & {
+  base_schedule_version_id: string | null;
+  horizon_start: string;
+  horizon_end: string;
+  stale: boolean;
+  generation_summary: {
+    solve_status: "optimal" | "feasible" | "infeasible";
+    scheduled_minutes: number;
+    requested_minutes: number;
+    preserved_blocks: number;
+    generated_blocks: number;
+    moved_blocks: number;
+    warnings: string[];
+    unscheduled: { id: string; name: string; remaining_minutes: number; reason: string }[];
+  };
 };
 
 export type PlanningEntry = {

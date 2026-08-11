@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, LoaderCircle, Pencil, Plus } from "lucide-re
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
+import { ScheduleProposalReview } from "@/components/schedule-proposal-review";
 import { useApiResource } from "@/hooks/use-api-resource";
 import type { PlannerTask, PlanningEntry, PlanningView, Semester } from "@/lib/types";
 
@@ -70,6 +71,15 @@ export function WeekPlanner() {
           <button className="primary-button" disabled={!currentSemester} type="button" onClick={() => openNew(defaultEditorDate(data))}><Plus size={17} /> Add block</button>
         </div>
       </header>
+
+      {currentSemester ? (
+        <ScheduleProposalReview
+          semester={currentSemester}
+          tasks={data.unscheduled_tasks}
+          timezone={data.timezone}
+          onAccepted={plan.reload}
+        />
+      ) : null}
 
       <section className="week-summary" aria-label="Weekly totals">
         <div><span className="summary-icon violet" /> <strong>{formatMinutes(commitmentMinutes)}</strong><small>Commitments</small></div>

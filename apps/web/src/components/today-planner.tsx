@@ -18,7 +18,7 @@ import { useMemo, useState } from "react";
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { PlannerTask, PlanningEntry, PlanningView, Semester, User } from "@/lib/types";
+import type { PlannerTask, PlanningEntry, PlanningView, ScheduleProposal, Semester, User } from "@/lib/types";
 
 export function TodayPlanner() {
   const user = useApiResource<User>("/auth/me");
@@ -27,6 +27,9 @@ export function TodayPlanner() {
   const currentSemester = useMemo(
     () => semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null,
     [semesters.data],
+  );
+  const proposal = useApiResource<ScheduleProposal>(
+    currentSemester ? `/semesters/${currentSemester.id}/schedule/proposal` : null,
   );
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
@@ -91,6 +94,10 @@ export function TodayPlanner() {
           </button>
         </div>
       </header>
+
+      {proposal.data ? (
+        <Link className="proposal-pending-banner" href="/week"><Sparkles size={17} /><span><strong>A 14-day draft is waiting for review.</strong><small>Today still reflects your accepted schedule.</small></span><ArrowRight size={17} /></Link>
+      ) : null}
 
       <section className="day-overview" aria-label="Day overview">
         <div className="capacity-card">

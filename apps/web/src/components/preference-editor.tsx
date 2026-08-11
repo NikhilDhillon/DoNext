@@ -59,7 +59,7 @@ export function PreferenceEditor() {
 
   return (
     <main className="page-shell narrow-page">
-      <header className="page-heading"><div><p className="eyebrow">Your boundaries</p><h1>Planning preferences</h1><p>These rules are saved now and will constrain automatic schedules in the next phase.</p></div></header>
+      <header className="page-heading"><div><p className="eyebrow">Your boundaries</p><h1>Planning preferences</h1><p>These rules constrain every generated schedule draft.</p></div></header>
       <form className="preference-form" onSubmit={savePreferences}>
         <section className="preference-section">
           <div className="preference-heading"><span><MoonStar size={20} /></span><div><h2>Sleep protection</h2><p>Sleep is a hard planning boundary, not spare capacity.</p></div></div>
@@ -76,7 +76,7 @@ export function PreferenceEditor() {
         <section className="preference-section">
           <div className="preference-heading"><span><ShieldCheck size={20} /></span><div><h2>Schedule stability</h2><p>Keep near-term commitments stable and preserve unscheduled breathing room.</p></div></div>
           <div className="form-row"><label><span>Freeze window</span><select name="freeze_window_hours" defaultValue={value.freeze_window_minutes / 60}><option value="0">No freeze window</option><option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></label><label><span>Preserve as free time</span><select name="preserve_free_time_percent" defaultValue={value.preserve_free_time_percent}><option value="0">No minimum</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option></select></label></div>
-          <label className="checkbox-field"><input name="auto_apply_low_impact_changes" type="checkbox" defaultChecked={value.auto_apply_low_impact_changes} /><span><strong>Automatically apply low-impact changes</strong><small>Only changes outside the freeze window will qualify.</small></span></label>
+          <label className="checkbox-field"><input name="auto_apply_low_impact_changes" type="checkbox" defaultChecked={value.auto_apply_low_impact_changes} /><span><strong>Automatically apply low-impact changes</strong><small>Saved for a later phase. Phase 3 always requires your review.</small></span></label>
         </section>
 
         <section className="preference-section compact-section"><div className="preference-heading"><span><Bell size={20} /></span><div><h2>Reminders</h2><p>Notification controls will arrive with completion tracking.</p></div></div><span className="coming-soon-label">Phase 2</span></section>

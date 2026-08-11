@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
-import type { Semester, SemesterPlanning } from "@/lib/types";
+import type { ScheduleProposal, Semester, SemesterPlanning } from "@/lib/types";
 
 export function SemesterPlanner() {
   const semesters = useApiResource<Semester[]>("/semesters");
@@ -15,6 +15,9 @@ export function SemesterPlanner() {
   );
   const planning = useApiResource<SemesterPlanning>(
     currentSemester ? `/planning/semesters/${currentSemester.id}` : null,
+  );
+  const proposal = useApiResource<ScheduleProposal>(
+    currentSemester ? `/semesters/${currentSemester.id}/schedule/proposal` : null,
   );
 
   if ((semesters.loading || planning.loading) && !planning.data) {
@@ -44,6 +47,10 @@ export function SemesterPlanner() {
         </div>
         <Link className="secondary-button" href="/courses"><CalendarRange size={18} /> Review courses</Link>
       </header>
+
+      {proposal.data ? (
+        <Link className="proposal-pending-banner" href="/week"><CalendarRange size={17} /><span><strong>Draft projection available</strong><small>{formatMinutes(proposal.data.generation_summary.scheduled_minutes)} is proposed, not yet accepted.</small></span></Link>
+      ) : null}
 
       <section className="semester-metrics">
         <article><span>Remaining work</span><strong>{formatMinutes(data.total_demand_minutes)}</strong><small>From unfinished task estimates</small></article>

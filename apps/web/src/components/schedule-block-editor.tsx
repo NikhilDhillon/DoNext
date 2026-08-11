@@ -15,6 +15,7 @@ type ScheduleBlockEditorProps = {
   tasks: PlannerTask[];
   entry: PlanningEntry | null;
   suggestedTask: PlannerTask | null;
+  proposalId?: string;
   onClose: () => void;
   onSaved: () => Promise<void> | void;
 };
@@ -26,6 +27,7 @@ export function ScheduleBlockEditor({
   tasks,
   entry,
   suggestedTask,
+  proposalId,
   onClose,
   onSaved,
 }: ScheduleBlockEditorProps) {
@@ -55,10 +57,15 @@ export function ScheduleBlockEditor({
         block_type: String(form.get("block_type")),
         locked: form.get("locked") === "on",
       };
-      await apiRequest<ScheduleBlock>(
-        entry
+      const path = proposalId
+        ? entry
+          ? `/schedule-proposals/${proposalId}/blocks/${entry.source_id}`
+          : `/schedule-proposals/${proposalId}/blocks`
+        : entry
           ? `/schedule-blocks/${entry.source_id}`
-          : `/semesters/${semesterId}/schedule/blocks`,
+          : `/semesters/${semesterId}/schedule/blocks`;
+      await apiRequest<ScheduleBlock>(
+        path,
         {
           method: entry ? "PATCH" : "POST",
           body: JSON.stringify(payload),
@@ -83,7 +90,10 @@ export function ScheduleBlockEditor({
     setBusy(true);
     setError(null);
     try {
-      await apiRequest<void>(`/schedule-blocks/${entry.source_id}`, { method: "DELETE" });
+      const path = proposalId
+        ? `/schedule-proposals/${proposalId}/blocks/${entry.source_id}`
+        : `/schedule-blocks/${entry.source_id}`;
+      await apiRequest<void>(path, { method: "DELETE" });
       window.dispatchEvent(new Event("donext:planning-updated"));
       await onSaved();
       close();
@@ -108,7 +118,7 @@ export function ScheduleBlockEditor({
     <FormDialog
       open={open}
       title={entry ? "Adjust time block" : "Plan a time block"}
-      description="Choose the exact time yourself. Automatic scheduling remains off in Phase 2."
+      description={proposalId ? "Adjust this draft before accepting it." : "Choose the exact time yourself."}
       onClose={close}
     >
       <form className="onboarding-form planner-block-form" key={formKey} onSubmit={submit}>
