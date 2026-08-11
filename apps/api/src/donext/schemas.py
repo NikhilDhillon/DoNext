@@ -641,6 +641,100 @@ class ScheduleRead(ApiModel):
     updated_at: datetime
 
 
+PlanningEntryKind = Literal["scheduled_block", "fixed_event"]
+
+
+class PlanningEntryRead(ApiModel):
+    id: str
+    kind: PlanningEntryKind
+    source_id: uuid.UUID
+    title: str
+    start_at: datetime
+    end_at: datetime
+    block_type: str
+    category: str
+    location: str | None
+    task_id: uuid.UUID | None
+    task_status: TaskStatus | None
+    goal_id: uuid.UUID | None
+    course_code: str | None
+    locked: bool
+    recurring: bool
+    editable: bool
+
+
+class PlanningTaskRead(ApiModel):
+    id: uuid.UUID
+    name: str
+    remaining_minutes: int
+    deadline_at: datetime | None
+    priority: Priority
+    intensity: Intensity
+    course_code: str | None
+    goal_name: str | None
+
+
+class PlanningCapacityRead(ApiModel):
+    available_minutes: int
+    commitment_minutes: int
+    usable_focus_minutes: int
+    planned_focus_minutes: int
+    protected_free_minutes: int
+    remaining_focus_minutes: int
+    preferred_sleep_minutes: int
+
+
+class PlanningDayRead(ApiModel):
+    date: date
+    capacity: PlanningCapacityRead
+
+
+class PlanningViewRead(ApiModel):
+    start_date: date
+    end_date: date
+    timezone: str
+    entries: list[PlanningEntryRead]
+    days: list[PlanningDayRead]
+    unscheduled_tasks: list[PlanningTaskRead]
+    next_entry_id: str | None
+    warnings: list[str]
+
+
+SemesterRisk = Literal["low", "medium", "high", "unknown"]
+
+
+class SemesterWeekRead(ApiModel):
+    week_number: int
+    start_date: date
+    end_date: date
+    demand_minutes: int
+    capacity_minutes: int
+    commitment_minutes: int
+    scheduled_minutes: int
+    load_percent: int | None
+    risk: SemesterRisk
+
+
+class SemesterDeadlineRead(ApiModel):
+    id: uuid.UUID
+    name: str
+    due_at: datetime
+    course_code: str | None
+    remaining_minutes: int | None
+    weight_percent: float | None
+
+
+class SemesterPlanningRead(ApiModel):
+    semester: SemesterRead
+    total_demand_minutes: int
+    total_capacity_minutes: int
+    open_capacity_minutes: int
+    upcoming_deadlines: int
+    incomplete_data: bool
+    weeks: list[SemesterWeekRead]
+    deadlines: list[SemesterDeadlineRead]
+
+
 class OutlineCourseProposal(ApiModel):
     code: str | None = None
     name: str | None = None
