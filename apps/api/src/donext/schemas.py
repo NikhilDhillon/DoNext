@@ -14,6 +14,7 @@ from donext.models import (
     GoalStatus,
     Intensity,
     Priority,
+    ScheduleStatus,
     SchemeSelectionMode,
     SelectionRule,
     SemesterStatus,
@@ -571,6 +572,71 @@ class AvailabilityReplace(ApiModel):
 
 class AvailabilityRead(AvailabilityInput):
     id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+
+ScheduleBlockType = Literal["focus", "commitment", "goal", "break", "personal"]
+
+
+class ScheduleBlockCreate(ApiModel):
+    title: str = Field(min_length=1, max_length=200)
+    task_id: uuid.UUID | None = None
+    fixed_event_id: uuid.UUID | None = None
+    goal_id: uuid.UUID | None = None
+    start_at: datetime
+    end_at: datetime
+    block_type: ScheduleBlockType = "focus"
+    locked: bool = False
+
+    @model_validator(mode="after")
+    def validate_block(self) -> "ScheduleBlockCreate":
+        if self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
+            raise ValueError("schedule block timestamps must include a timezone")
+        links = (self.task_id, self.fixed_event_id, self.goal_id)
+        if sum(value is not None for value in links) > 1:
+            raise ValueError("a schedule block can link to only one resource")
+        return self
+
+
+class ScheduleBlockUpdate(ApiModel):
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    task_id: uuid.UUID | None = None
+    fixed_event_id: uuid.UUID | None = None
+    goal_id: uuid.UUID | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    block_type: ScheduleBlockType | None = None
+    locked: bool | None = None
+
+
+class ScheduleBlockRead(ApiModel):
+    id: uuid.UUID
+    schedule_version_id: uuid.UUID
+    title: str
+    task_id: uuid.UUID | None
+    fixed_event_id: uuid.UUID | None
+    goal_id: uuid.UUID | None
+    start_at: datetime
+    end_at: datetime
+    block_type: str
+    locked: bool
+    source: str
+    stability_weight: float
+    created_at: datetime
+    updated_at: datetime
+
+
+class ScheduleRead(ApiModel):
+    id: uuid.UUID
+    semester_id: uuid.UUID
+    version_number: int
+    reason: str
+    status: ScheduleStatus
+    accepted_at: datetime | None
+    blocks: list[ScheduleBlockRead]
     created_at: datetime
     updated_at: datetime
 

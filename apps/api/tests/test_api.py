@@ -212,6 +212,85 @@ def test_planning_preferences_can_be_read_and_updated(client: TestClient) -> Non
     assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
+def test_manual_schedule_blocks_are_persisted_and_validated(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    task_response = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Draft literature review",
+            "estimated_minutes": 120,
+        },
+    )
+    assert task_response.status_code == 201
+    task = task_response.json()
+
+    assert client.get(f"/api/v1/semesters/{semester['id']}/schedule").json() is None
+
+    response = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/blocks",
+        json={
+            "title": "Literature review",
+            "task_id": task["id"],
+            "start_at": "2026-09-08T17:00:00-07:00",
+            "end_at": "2026-09-08T18:00:00-07:00",
+            "block_type": "focus",
+            "locked": True,
+        },
+    )
+    assert response.status_code == 201
+    block = response.json()
+    assert block["source"] == "manual"
+
+    schedule = client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()
+    assert schedule["status"] == "accepted"
+    assert schedule["reason"] == "Manual planning"
+    assert [item["id"] for item in schedule["blocks"]] == [block["id"]]
+
+    conflict = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/blocks",
+        json={
+            "title": "Conflicting work",
+            "start_at": "2026-09-08T17:30:00-07:00",
+            "end_at": "2026-09-08T18:30:00-07:00",
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "SCHEDULE_CONFLICT"
+
+    moved = client.patch(
+        f"/api/v1/schedule-blocks/{block['id']}",
+        json={
+            "start_at": "2026-09-08T18:00:00-07:00",
+            "end_at": "2026-09-08T19:00:00-07:00",
+            "locked": False,
+        },
+    )
+    assert moved.status_code == 200
+    assert moved.json()["locked"] is False
+    assert client.delete(f"/api/v1/schedule-blocks/{block['id']}").status_code == 204
+
+
+def test_schedule_blocks_are_user_scoped(client: TestClient) -> None:
+    register(client, "first@example.com")
+    semester = create_semester(client)
+    block_response = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/blocks",
+        json={
+            "title": "Private plan",
+            "start_at": "2026-09-09T09:00:00-07:00",
+            "end_at": "2026-09-09T10:00:00-07:00",
+        },
+    )
+    assert block_response.status_code == 201
+    block = block_response.json()
+    client.post("/api/v1/auth/logout")
+    register(client, "second@example.com")
+
+    response = client.patch(f"/api/v1/schedule-blocks/{block['id']}", json={"title": "Not mine"})
+    assert response.status_code == 404
+
+
 def test_course_outline_upload_returns_reviewable_proposals(client: TestClient) -> None:
     register(client)
     outline = b"""CSC 320 Algorithms
