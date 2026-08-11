@@ -5,7 +5,7 @@ Author: Nikhil Dhillon
 ## Purpose
 
 Phase 2 turns the Phase 1 data foundation into a usable manual planner. Today, Week, and
-Semester will be computed from the authenticated student's real courses, tasks, goals,
+Semester are computed from the authenticated student's real courses, tasks, goals,
 commitments, availability, preferences, and schedule blocks.
 
 Automatic schedule generation remains a Phase 3 concern. Phase 2 establishes the same
@@ -67,7 +67,7 @@ Capacity is deterministic and explainable:
 - Scheduled focus blocks count as allocated focus.
 - Sleep is reported from preferences and is never consumed as capacity.
 
-The first Phase 2 release will not infer that unscheduled work has been planned. Semester demand
+The first Phase 2 release does not infer that unscheduled work has been planned. Semester demand
 comes from remaining task estimates, while capacity comes from availability and fixed commitments.
 Any risk label must be derived from those values and must identify incomplete input instead of
 presenting uncertain data as fact.
@@ -89,15 +89,14 @@ prerequisite and can be added only after keyboard and touch workflows are comple
 
 ## Validation gate
 
-Phase 2 is complete when:
+The completed milestone was validated against these gates:
 
-- Today and Week contain no representative fixture data.
-- A user can create, edit, move, and remove a real manual block.
-- Recurring commitments appear on the correct local dates.
-- Completing a linked task updates the planner.
-- Cross-user schedule access returns `NOT_FOUND`.
-- Daylight-saving and timezone boundaries have regression coverage.
-- Semester demand and capacity are derived from stored data.
-- The full repository quality gate, migration cycle, and browser checks pass.
-- Desktop and 390px layouts have no console errors, overlays, or horizontal overflow.
-
+- [x] Today and Week contain no representative fixture data.
+- [x] A user can create, edit, move, and remove a real manual block.
+- [x] Recurring commitments appear on the correct local dates.
+- [x] Completing a linked task updates the planner.
+- [x] Cross-user schedule access returns `NOT_FOUND`.
+- [x] Daylight-saving and timezone boundaries have regression coverage.
+- [x] Semester demand and capacity are derived from stored data.
+- [x] The full repository quality gate, migration cycle, and browser checks pass.
+- [x] Desktop and 390px layouts have no console errors, overlays, or horizontal overflow.
