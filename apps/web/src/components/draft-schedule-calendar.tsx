@@ -1,9 +1,11 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Lock, Pencil } from "lucide-react";
-import { useMemo, useState } from "react";
+import { ChevronLeft, ChevronRight, LoaderCircle, Lock, Pencil } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
+import { apiRequest, ApiRequestError } from "@/lib/api";
 import type { PlanningEntry, PlanningView, ScheduleBlock } from "@/lib/types";
 
 type DraftScheduleCalendarProps = {
@@ -11,8 +13,24 @@ type DraftScheduleCalendarProps = {
   horizonStart: string;
   horizonEnd: string;
   timezone: string;
+  proposalId: string;
   onEdit: (block: ScheduleBlock) => void;
   onAdd: (date: string) => void;
+  onMoved: () => Promise<void> | void;
+};
+
+type DragSession = {
+  block: ScheduleBlock;
+  pointerId: number;
+  originX: number;
+  originY: number;
+  moved: boolean;
+};
+
+type DragPreview = {
+  blockId: string;
+  startAt: string;
+  endAt: string;
 };
 
 export function DraftScheduleCalendar({
@@ -20,8 +38,10 @@ export function DraftScheduleCalendar({
   horizonStart,
   horizonEnd,
   timezone,
+  proposalId,
   onEdit,
   onAdd,
+  onMoved,
 }: DraftScheduleCalendarProps) {
   const weekStarts = useMemo(() => {
     const dayCount = Math.max(dateDifference(horizonStart, horizonEnd) + 1, 1);
@@ -31,6 +51,15 @@ export function DraftScheduleCalendar({
     );
   }, [horizonEnd, horizonStart]);
   const [weekIndex, setWeekIndex] = useState(0);
+  const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
+  const [savingBlockId, setSavingBlockId] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
+  const [moveStatus, setMoveStatus] = useState<string | null>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const dragSessionRef = useRef<DragSession | null>(null);
+  const dragPreviewRef = useRef<DragPreview | null>(null);
+  const suppressClickRef = useRef<string | null>(null);
 
   const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
   const selectedWeekEnd = earlierDate(addDays(selectedWeek, 6), horizonEnd);
@@ -53,8 +82,118 @@ export function DraftScheduleCalendar({
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
   const rows = (endHour - startHour) * 2;
 
+  function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLButtonElement>) {
+    if (savingBlockId) return;
+    setMoveError(null);
+    setMoveStatus(null);
+    dragSessionRef.current = {
+      block,
+      pointerId: event.pointerId,
+      originX: event.clientX,
+      originY: event.clientY,
+      moved: false,
+    };
+    setDraggingBlockId(block.id);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    const distance = Math.hypot(event.clientX - session.originX, event.clientY - session.originY);
+    if (!session.moved && distance < 5) return;
+    session.moved = true;
+    event.preventDefault();
+    const placement = placementFromPointer(
+      session.block,
+      event.clientX,
+      event.clientY,
+      session.originX,
+      session.originY,
+      gridRef.current,
+      days,
+      startHour,
+      endHour,
+      timezone,
+    );
+    if (!placement) return;
+    dragPreviewRef.current = placement;
+    setDragPreview(placement);
+  }
+
+  async function finishDrag(pointerId?: number) {
+    const session = dragSessionRef.current;
+    if (!session || (pointerId !== undefined && session.pointerId !== pointerId)) return;
+    dragSessionRef.current = null;
+    setDraggingBlockId(null);
+    const placement = dragPreviewRef.current;
+    dragPreviewRef.current = null;
+    if (!session.moved || !placement) {
+      setDragPreview(null);
+      return;
+    }
+
+    suppressClickRef.current = session.block.id;
+    window.setTimeout(() => {
+      if (suppressClickRef.current === session.block.id) suppressClickRef.current = null;
+    }, 0);
+    if (new Date(placement.startAt).getTime() === new Date(session.block.start_at).getTime()) {
+      setDragPreview(null);
+      return;
+    }
+
+    setSavingBlockId(session.block.id);
+    setMoveStatus(`Saving the new time for ${session.block.title}…`);
+    try {
+      await apiRequest<ScheduleBlock>(
+        `/schedule-proposals/${proposalId}/blocks/${session.block.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            start_at: placement.startAt,
+            end_at: placement.endAt,
+          }),
+        },
+      );
+      window.dispatchEvent(new Event("donext:planning-updated"));
+      await onMoved();
+      setMoveStatus(`${session.block.title} moved to ${formatMoveTime(placement.startAt, timezone)}`);
+    } catch (requestError) {
+      setMoveError(
+        requestError instanceof ApiRequestError
+          ? requestError.message
+          : "DoNext could not move that block.",
+      );
+      setMoveStatus(null);
+    } finally {
+      setSavingBlockId(null);
+      setDragPreview(null);
+    }
+  }
+
+  function cancelDrag(event: ReactPointerEvent<HTMLButtonElement>) {
+    const session = dragSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    dragSessionRef.current = null;
+    dragPreviewRef.current = null;
+    setDraggingBlockId(null);
+    setDragPreview(null);
+  }
+
+  function openBlock(block: ScheduleBlock) {
+    if (suppressClickRef.current === block.id) {
+      suppressClickRef.current = null;
+      return;
+    }
+    onEdit(block);
+  }
+
   return (
-    <div className="draft-calendar-shell">
+    <div
+      className="draft-calendar-shell"
+      onMouseUp={() => void finishDrag()}
+      onPointerUpCapture={(event) => void finishDrag(event.pointerId)}
+    >
       <div className="draft-calendar-toolbar">
         <div>
           <span>Showing week {weekIndex + 1} of {weekStarts.length}</span>
@@ -109,7 +248,11 @@ export function DraftScheduleCalendar({
           <div className="time-axis live-time-axis" style={{ gridTemplateRows: `repeat(${hours.length}, 60px)` }}>
             {hours.map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
           </div>
-          <div className="calendar-grid live-calendar-grid draft-calendar-grid" style={{ gridTemplateRows: `repeat(${rows}, 30px)` }}>
+          <div
+            className={`calendar-grid live-calendar-grid draft-calendar-grid${draggingBlockId ? " drag-active" : ""}`}
+            ref={gridRef}
+            style={{ gridTemplateRows: `repeat(${rows}, 30px)` }}
+          >
             {days.map((day) => (
               <button
                 aria-label={`Add a draft block on ${formatCalendarDate(day)}`}
@@ -122,11 +265,18 @@ export function DraftScheduleCalendar({
             {visibleBlocks.map((block) => (
               <DraftBlock
                 block={block}
+                dragging={draggingBlockId === block.id}
                 key={block.id}
-                onEdit={() => onEdit(block)}
+                preview={dragPreview?.blockId === block.id ? dragPreview : null}
+                saving={savingBlockId === block.id}
                 startHour={startHour}
                 timezone={timezone}
                 weekStart={selectedWeek}
+                onClick={() => openBlock(block)}
+                onPointerCancel={cancelDrag}
+                onPointerDown={(event) => beginDrag(block, event)}
+                onPointerMove={moveDrag}
+                onPointerUp={(event) => void finishDrag(event.pointerId)}
               />
             ))}
             {visibleClasses.map((entry) => (
@@ -141,6 +291,8 @@ export function DraftScheduleCalendar({
           </div>
         </div>
       </section>
+      {moveError ? <p className="draft-calendar-move-message error" role="alert">{moveError}</p> : null}
+      {moveStatus ? <p className="draft-calendar-move-message" aria-live="polite">{moveStatus}</p> : null}
       {classPlan.error ? (
         <p className="draft-calendar-notice error">Classes could not be loaded into this preview.</p>
       ) : classPlan.loading ? (
@@ -192,20 +344,37 @@ function DraftClassBlock({
 
 function DraftBlock({
   block,
+  preview,
+  dragging,
+  saving,
   timezone,
   weekStart,
   startHour,
-  onEdit,
+  onClick,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerCancel,
 }: {
   block: ScheduleBlock;
+  preview: DragPreview | null;
+  dragging: boolean;
+  saving: boolean;
   timezone: string;
   weekStart: string;
   startHour: number;
-  onEdit: () => void;
+  onClick: () => void;
+  onPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onPointerMove: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onPointerUp: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  onPointerCancel: (event: ReactPointerEvent<HTMLButtonElement>) => void;
 }) {
-  const start = timeParts(block.start_at, timezone);
+  const displayedBlock = preview
+    ? { ...block, start_at: preview.startAt, end_at: preview.endAt }
+    : block;
+  const start = timeParts(displayedBlock.start_at, timezone);
   const duration = Math.max(
-    Math.ceil((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 1_800_000),
+    Math.ceil((new Date(displayedBlock.end_at).getTime() - new Date(displayedBlock.start_at).getTime()) / 1_800_000),
     1,
   );
   const row = Math.max(
@@ -213,23 +382,122 @@ function DraftBlock({
     1,
   );
   const column = Math.min(
-    Math.max(dateDifference(weekStart, dateInTimezone(block.start_at, timezone)) + 1, 1),
+    Math.max(dateDifference(weekStart, dateInTimezone(displayedBlock.start_at, timezone)) + 1, 1),
     7,
   );
 
   return (
     <button
-      aria-label={`Edit ${block.title}, ${formatBlockTime(block, timezone)}`}
-      className={`week-block editable draft-block ${blockColor(block)}`}
+      aria-label={`Move or edit ${block.title}, ${formatBlockTime(displayedBlock, timezone)}`}
+      className={`week-block editable draft-block ${blockColor(block)}${dragging ? " dragging" : ""}${saving ? " saving" : ""}`}
+      disabled={saving}
       style={{ gridColumn: column, gridRow: `${row} / span ${duration}` }}
       type="button"
-      onClick={onEdit}
+      onClick={onClick}
+      onPointerCancel={onPointerCancel}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
     >
       <strong>{block.title}</strong>
-      <span>{formatBlockTime(block, timezone)}</span>
-      {block.locked ? <Lock size={12} /> : <Pencil size={12} />}
+      <span>{formatBlockTime(displayedBlock, timezone)}</span>
+      {saving ? <LoaderCircle className="spin" size={12} /> : block.locked ? <Lock size={12} /> : <Pencil size={12} />}
     </button>
   );
+}
+
+function placementFromPointer(
+  block: ScheduleBlock,
+  clientX: number,
+  clientY: number,
+  originX: number,
+  originY: number,
+  grid: HTMLDivElement | null,
+  days: string[],
+  startHour: number,
+  endHour: number,
+  timezone: string,
+): DragPreview | null {
+  if (!grid || !days.length) return null;
+  const bounds = grid.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return null;
+  const originalDayIndex = clamp(
+    dateDifference(days[0], dateInTimezone(block.start_at, timezone)),
+    0,
+    days.length - 1,
+  );
+  const dayIndex = clamp(
+    originalDayIndex + Math.round((clientX - originX) / (bounds.width / 7)),
+    0,
+    days.length - 1,
+  );
+  const durationMinutes = Math.max(
+    Math.round((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000),
+    15,
+  );
+  const calendarMinutes = (endHour - startHour) * 60;
+  const originalStart = timeParts(block.start_at, timezone);
+  const originalMinutes = originalStart.hour * 60 + originalStart.minute - startHour * 60;
+  const minuteDelta = Math.round(
+    ((clientY - originY) / (bounds.height / calendarMinutes)) / 15,
+  ) * 15;
+  const targetMinutesFromStart = clamp(
+    originalMinutes + minuteDelta,
+    0,
+    Math.max(calendarMinutes - durationMinutes, 0),
+  );
+  const targetHour = startHour + Math.floor(targetMinutesFromStart / 60);
+  const targetMinute = targetMinutesFromStart % 60;
+  const startAt = zonedDateTimeToIso(days[dayIndex], targetHour, targetMinute, timezone);
+  return {
+    blockId: block.id,
+    startAt,
+    endAt: new Date(new Date(startAt).getTime() + durationMinutes * 60_000).toISOString(),
+  };
+}
+
+function zonedDateTimeToIso(dateValue: string, hour: number, minute: number, timezone: string) {
+  const [year, month, day] = dateValue.split("-").map(Number);
+  const desiredUtc = Date.UTC(year, month - 1, day, hour, minute);
+  let candidate = desiredUtc;
+  for (let iteration = 0; iteration < 3; iteration += 1) {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+      timeZone: timezone,
+    }).formatToParts(new Date(candidate));
+    const valueOf = (type: Intl.DateTimeFormatPartTypes) => Number(
+      parts.find((part) => part.type === type)?.value ?? 0,
+    );
+    const observedAsUtc = Date.UTC(
+      valueOf("year"),
+      valueOf("month") - 1,
+      valueOf("day"),
+      valueOf("hour"),
+      valueOf("minute"),
+    );
+    candidate += desiredUtc - observedAsUtc;
+  }
+  return new Date(candidate).toISOString();
+}
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function formatMoveTime(value: string, timezone: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: timezone,
+  }).format(new Date(value));
 }
 
 function calendarBounds(entries: Array<{ start_at: string; end_at: string }>, timezone: string) {

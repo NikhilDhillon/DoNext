@@ -145,16 +145,18 @@ export function ScheduleProposalReview({
       ))}
 
       <div className="proposal-block-heading">
-        <div><h3>Draft calendar</h3><p>See when each block lands. Select a block to edit it, or click an open day to add one.</p></div>
+        <div><h3>Draft calendar</h3><p>Drag a generated block to move it, select it to edit details, or click an open day to add one.</p></div>
         <button className="text-button" type="button" onClick={() => addBlock()}>Add draft block</button>
       </div>
       <DraftScheduleCalendar
         blocks={draft.blocks}
         horizonEnd={draft.horizon_end}
         horizonStart={draft.horizon_start}
+        proposalId={draft.id}
         timezone={timezone}
         onAdd={addBlock}
         onEdit={edit}
+        onMoved={proposal.reload}
       />
 
       {draft.generation_summary.unscheduled.length ? (
