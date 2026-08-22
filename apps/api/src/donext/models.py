@@ -207,6 +207,7 @@ class UserPreference(UuidTimestampMixin, Base):
     freeze_window_minutes: Mapped[int] = mapped_column(Integer, default=240)
     preserve_free_time_percent: Mapped[int] = mapped_column(Integer, default=15)
     auto_apply_low_impact_changes: Mapped[bool] = mapped_column(Boolean, default=False)
+    schedule_revision_policy: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
     user: Mapped[User] = relationship(back_populates="preferences")
 
@@ -596,6 +597,9 @@ class ScheduleVersion(UuidTimestampMixin, Base):
     base_schedule_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("schedule_versions.id", ondelete="SET NULL"), index=True
     )
+    revision_of_proposal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("schedule_versions.id", ondelete="SET NULL"), index=True
+    )
     version_number: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(String(200))
     status: Mapped[ScheduleStatus] = mapped_column(
@@ -607,6 +611,7 @@ class ScheduleVersion(UuidTimestampMixin, Base):
     horizon_end: Mapped[date | None] = mapped_column(Date)
     input_fingerprint: Mapped[str | None] = mapped_column(String(64))
     generation_summary: Mapped[dict[str, object] | None] = mapped_column(JSON)
+    revision_feedback: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
     blocks: Mapped[list["ScheduledBlock"]] = relationship(cascade="all, delete-orphan")
 

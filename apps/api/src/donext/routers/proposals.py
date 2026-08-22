@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import uuid
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Protocol, cast
 from zoneinfo import ZoneInfo
@@ -42,13 +43,24 @@ from donext.planning import (
 )
 from donext.routers.schedules import validate_links, validate_times
 from donext.routers.semesters import owned_semester
-from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
+from donext.schedule_revision import (
+    RevisionInterpretation,
+    ScheduleRevisionPolicy,
+    interpret_revision_feedback,
+)
+from donext.scheduler import (
+    SchedulingItem,
+    SchedulingPolicy,
+    SchedulingWindow,
+    solve_schedule,
+)
 from donext.schemas import (
     ProposalSummaryRead,
     ScheduleBlockCreate,
     ScheduleBlockRead,
     ScheduleBlockUpdate,
     ScheduleProposalRead,
+    ScheduleRevisionRequest,
 )
 
 router = APIRouter(tags=["schedule proposals"])
@@ -115,6 +127,7 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
         created_at=proposal.created_at,
         updated_at=proposal.updated_at,
         base_schedule_version_id=proposal.base_schedule_version_id,
+        revision_of_proposal_id=proposal.revision_of_proposal_id,
         horizon_start=proposal.horizon_start or date.min,
         horizon_end=proposal.horizon_end or date.min,
         stale=(
@@ -122,6 +135,7 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
             and proposal.input_fingerprint != input_fingerprint(db, user, proposal.semester_id)
         ),
         generation_summary=summary,
+        revision_feedback=proposal.revision_feedback,
     )
 
 
@@ -133,6 +147,19 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
 def generate_proposal(
     semester_id: uuid.UUID, db: DbSession, current_user: CurrentUser
 ) -> ScheduleProposalRead:
+    proposal = _build_proposal(db, current_user, semester_id)
+    db.commit()
+    return proposal_read(db, current_user, owned_proposal(db, current_user.id, proposal.id))
+
+
+def _build_proposal(
+    db: DbSession,
+    current_user: User,
+    semester_id: uuid.UUID,
+    *,
+    revision_of: ScheduleVersion | None = None,
+    interpretation: RevisionInterpretation | None = None,
+) -> ScheduleVersion:
     semester = owned_semester(db, current_user.id, semester_id)
     timezone = resolve_timezone(current_user.timezone)
     today = datetime.now(UTC).astimezone(timezone).date()
@@ -155,7 +182,7 @@ def generate_proposal(
     ) or UserPreference(user_id=current_user.id)
     accepted = _accepted_schedule(db, current_user.id, semester_id)
     existing = current_proposal(db, current_user.id, semester_id)
-    if existing:
+    if existing and revision_of is None:
         existing.status = ScheduleStatus.superseded
 
     latest_version = db.scalar(
@@ -167,12 +194,27 @@ def generate_proposal(
         user_id=current_user.id,
         semester_id=semester_id,
         base_schedule_version_id=accepted.id if accepted else None,
+        revision_of_proposal_id=revision_of.id if revision_of else None,
         version_number=(latest_version or 0) + 1,
-        reason="Deterministic 14-day proposal",
+        reason=(
+            "Revised 14-day proposal"
+            if revision_of is not None
+            else "Deterministic 14-day proposal"
+        ),
         status=ScheduleStatus.proposed,
         horizon_start=horizon_start,
         horizon_end=horizon_end,
         input_fingerprint=input_fingerprint(db, current_user, semester_id),
+        revision_feedback=(
+            {
+                "policy": interpretation.policy.model_dump(mode="json"),
+                "interpreter": interpretation.source,
+                "note_applied": interpretation.note_applied,
+                "summary": interpretation.policy.summary,
+            }
+            if interpretation is not None
+            else None
+        ),
     )
     db.add(proposal)
     db.flush()
@@ -199,6 +241,12 @@ def generate_proposal(
         timezone,
         freeze_until.astimezone(timezone),
     )
+    policy = interpretation.policy if interpretation is not None else None
+    if policy is not None:
+        windows = _apply_avoid_time_ranges(windows, policy, timezone)
+    preferred_session_minutes = _preferred_session_minutes(
+        preferences.preferred_session_minutes, policy
+    )
     items, item_links, warnings = _scheduling_items(
         db,
         current_user.id,
@@ -206,10 +254,19 @@ def generate_proposal(
         horizon_start,
         horizon_end,
         preserved,
-        preferences.preferred_session_minutes,
+        preferred_session_minutes,
         timezone,
     )
-    result = solve_schedule(items, windows, preferences.minimum_break_minutes)
+    if policy is not None:
+        items = _apply_item_adjustments(items, item_links, policy)
+    scheduler_policy = _scheduler_policy(policy)
+    result = solve_schedule(
+        items,
+        windows,
+        preferences.minimum_break_minutes,
+        time_limit_seconds=3.0 if revision_of is not None else 5.0,
+        policy=scheduler_policy,
+    )
     for placement in result.placements:
         task_id, goal_id, block_type = item_links[placement.item_id]
         db.add(
@@ -261,8 +318,8 @@ def generate_proposal(
         result.timed_out,
         result.used_baseline,
     )
-    db.commit()
-    return proposal_read(db, current_user, owned_proposal(db, current_user.id, proposal.id))
+    db.flush()
+    return proposal
 
 
 @router.get(
@@ -430,6 +487,111 @@ def reject_proposal(proposal_id: uuid.UUID, db: DbSession, current_user: Current
     proposal = owned_proposal(db, current_user.id, proposal_id)
     proposal.status = ScheduleStatus.rejected
     db.commit()
+
+
+@router.post(
+    "/schedule-proposals/{proposal_id}/revise",
+    response_model=ScheduleProposalRead,
+    status_code=201,
+)
+def revise_proposal(
+    proposal_id: uuid.UUID,
+    payload: ScheduleRevisionRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> ScheduleProposalRead:
+    previous = owned_proposal(db, current_user.id, proposal_id)
+    preferences = db.scalar(select(UserPreference).where(UserPreference.user_id == current_user.id))
+    if preferences is None:
+        raise ApiError("NOT_FOUND", "Planning preferences not found.", 404)
+    interpretation = interpret_revision_feedback(
+        payload,
+        _revision_activities(db, current_user.id, previous),
+        cast(dict[str, object] | None, preferences.schedule_revision_policy),
+    )
+    fallback_reasons = {
+        "too_packed",
+        "sessions_too_long",
+        "sessions_too_short",
+        "balance_activities",
+    }
+    if interpretation.source == "fallback" and not fallback_reasons.intersection(payload.reasons):
+        raise ApiError(
+            "REVISION_FEEDBACK_UNAVAILABLE",
+            "DoNext could not interpret that timing feedback. Your current draft is unchanged.",
+            503,
+        )
+    if payload.remember:
+        preferences.schedule_revision_policy = interpretation.policy.model_dump(mode="json")
+        db.flush()
+    revised = _build_proposal(
+        db,
+        current_user,
+        previous.semester_id,
+        revision_of=previous,
+        interpretation=interpretation,
+    )
+    previous.status = ScheduleStatus.rejected
+    db.commit()
+    return proposal_read(db, current_user, owned_proposal(db, current_user.id, revised.id))
+
+
+def _revision_activities(
+    db: DbSession, user_id: uuid.UUID, proposal: ScheduleVersion
+) -> list[dict[str, object]]:
+    task_ids = {block.task_id for block in proposal.blocks if block.task_id is not None}
+    goal_ids = {block.goal_id for block in proposal.blocks if block.goal_id is not None}
+    tasks = {
+        task.id: task
+        for task in db.scalars(select(Task).where(Task.user_id == user_id, Task.id.in_(task_ids)))
+    }
+    goals = {
+        goal.id: goal
+        for goal in db.scalars(select(Goal).where(Goal.user_id == user_id, Goal.id.in_(goal_ids)))
+    }
+    activities: dict[str, dict[str, object]] = {}
+    for block in proposal.blocks:
+        duration = round((aware(block.end_at) - aware(block.start_at)).total_seconds() / 60)
+        if block.task_id is not None and block.task_id in tasks:
+            task = tasks[block.task_id]
+            source_id = f"task:{task.id}"
+            priority = task.priority.value
+        elif block.goal_id is not None and block.goal_id in goals:
+            goal = goals[block.goal_id]
+            source_id = f"goal:{goal.id}"
+            priority = goal.priority.value
+        else:
+            continue
+        entry = activities.setdefault(
+            source_id,
+            {
+                "source_id": source_id,
+                "name": block.title,
+                "priority": priority,
+                "scheduled_minutes": 0,
+            },
+        )
+        entry["scheduled_minutes"] = cast(int, entry["scheduled_minutes"]) + duration
+    summary = ProposalSummaryRead.model_validate(proposal.generation_summary or {})
+    for unresolved in summary.unscheduled:
+        identifier = str(unresolved.get("id", ""))
+        identifier_parts = identifier.split(":", 2)
+        if len(identifier_parts) < 2:
+            continue
+        normalized = (
+            f"{'goal' if identifier_parts[0] in {'goal', 'flex'} else 'task'}:{identifier_parts[1]}"
+        )
+        entry = activities.setdefault(
+            normalized,
+            {
+                "source_id": normalized,
+                "name": str(unresolved.get("name", "Activity")),
+                "priority": "unknown",
+                "scheduled_minutes": 0,
+            },
+        )
+        entry["remaining_minutes"] = unresolved.get("remaining_minutes", 0)
+    return sorted(activities.values(), key=lambda activity: str(activity["source_id"]))
 
 
 def input_fingerprint(db: DbSession, user: User, semester_id: uuid.UUID) -> str:
@@ -609,6 +771,80 @@ def _scheduling_windows(
                     )
                 )
     return windows
+
+
+def _apply_avoid_time_ranges(
+    windows: list[SchedulingWindow],
+    policy: ScheduleRevisionPolicy,
+    timezone: ZoneInfo,
+) -> list[SchedulingWindow]:
+    adjusted: list[SchedulingWindow] = []
+    for window in windows:
+        day = window.start_at.astimezone(timezone).date()
+        exclusions: list[Interval] = []
+        for blocked in policy.avoid_time_ranges:
+            if blocked.weekday is not None and blocked.weekday != day.weekday():
+                continue
+            exclusions.append(
+                (
+                    datetime.combine(day, blocked.start, tzinfo=timezone),
+                    datetime.combine(day, blocked.end, tzinfo=timezone),
+                )
+            )
+        for start_at, end_at in subtract_intervals([(window.start_at, window.end_at)], exclusions):
+            if end_at > start_at:
+                adjusted.append(
+                    SchedulingWindow(
+                        start_at,
+                        end_at,
+                        window.energy_level,
+                        window.daily_capacity_minutes,
+                        window.protected_free_minutes,
+                    )
+                )
+    return adjusted
+
+
+def _preferred_session_minutes(current: int, policy: ScheduleRevisionPolicy | None) -> int:
+    if policy is None or policy.session_length_preference == "same":
+        return current
+    change = -15 if policy.session_length_preference == "shorter" else 15
+    return min(max(current + change, 15), 240)
+
+
+def _apply_item_adjustments(
+    items: list[SchedulingItem],
+    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
+    policy: ScheduleRevisionPolicy,
+) -> list[SchedulingItem]:
+    adjustments = {adjustment.source_id: adjustment for adjustment in policy.item_adjustments}
+    revised: list[SchedulingItem] = []
+    for item in items:
+        task_id, goal_id, _block_type = links[item.id]
+        source_id = f"task:{task_id}" if task_id is not None else f"goal:{goal_id}"
+        adjustment = adjustments.get(source_id)
+        if adjustment is None:
+            revised.append(item)
+            continue
+        direction = 1 if adjustment.direction == "more" else -1
+        revised.append(
+            replace(
+                item,
+                priority_rank=min(max(item.priority_rank + direction * adjustment.weight, 0), 4),
+            )
+        )
+    return revised
+
+
+def _scheduler_policy(policy: ScheduleRevisionPolicy | None) -> SchedulingPolicy | None:
+    if policy is None:
+        return None
+    return SchedulingPolicy(
+        max_blocks_per_day=policy.max_blocks_per_day,
+        preferred_time_ranges=tuple(
+            (value.weekday, value.start, value.end) for value in policy.preferred_time_ranges
+        ),
+    )
 
 
 def _scheduling_items(

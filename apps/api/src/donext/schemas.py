@@ -720,10 +720,34 @@ class ProposalSummaryRead(ApiModel):
 
 class ScheduleProposalRead(ScheduleRead):
     base_schedule_version_id: uuid.UUID | None
+    revision_of_proposal_id: uuid.UUID | None = None
     horizon_start: date
     horizon_end: date
     stale: bool
     generation_summary: ProposalSummaryRead
+    revision_feedback: dict[str, object] | None = None
+
+
+RevisionReason = Literal[
+    "too_packed",
+    "wrong_times",
+    "sessions_too_long",
+    "sessions_too_short",
+    "balance_activities",
+    "other",
+]
+
+
+class ScheduleRevisionRequest(ApiModel):
+    reasons: list[RevisionReason] = Field(min_length=1, max_length=6)
+    note: str | None = Field(default=None, max_length=1000)
+    remember: bool = False
+
+    @model_validator(mode="after")
+    def validate_other_reason(self) -> "ScheduleRevisionRequest":
+        if "other" in self.reasons and not (self.note and self.note.strip()):
+            raise ValueError("A note is required when Other is selected")
+        return self
 
 
 PlanningEntryKind = Literal["scheduled_block", "fixed_event"]

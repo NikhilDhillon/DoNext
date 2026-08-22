@@ -5,6 +5,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock_time
 from typing import Literal
 
 from ortools.sat.python import cp_model
@@ -38,6 +39,12 @@ class SchedulingWindow:
     energy_level: str = "medium"
     daily_capacity_minutes: int | None = None
     protected_free_minutes: int = 0
+
+
+@dataclass(frozen=True)
+class SchedulingPolicy:
+    max_blocks_per_day: int | None = None
+    preferred_time_ranges: tuple[tuple[int | None, clock_time, clock_time], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -92,6 +99,7 @@ def solve_schedule(
     windows: list[SchedulingWindow],
     minimum_break_minutes: int,
     time_limit_seconds: float = 5.0,
+    policy: SchedulingPolicy | None = None,
 ) -> SchedulingResult:
     started = time.monotonic()
     sessions = [
@@ -100,23 +108,30 @@ def solve_schedule(
         for index, duration in enumerate(_session_plan(item))
     ]
     capacity_by_day = _capacity_by_day(windows)
-    baseline = _greedy_baseline(items, sessions, windows, capacity_by_day, minimum_break_minutes)
-    remaining = max(time_limit_seconds - (time.monotonic() - started), 0.05)
-    improved = _optimize_sessions(
-        items,
-        sessions,
-        windows,
-        capacity_by_day,
-        minimum_break_minutes,
-        baseline,
-        remaining,
+    baseline = _greedy_baseline(
+        items, sessions, windows, capacity_by_day, minimum_break_minutes, policy
     )
+    optimizer_attempted = policy is None or not policy.preferred_time_ranges
+    if not optimizer_attempted:
+        improved = None
+    else:
+        remaining = max(time_limit_seconds - (time.monotonic() - started), 0.05)
+        improved = _optimize_sessions(
+            items,
+            sessions,
+            windows,
+            capacity_by_day,
+            minimum_break_minutes,
+            baseline,
+            remaining,
+            policy,
+        )
     result = improved or baseline
     return SchedulingResult(
         status=result.status,
         placements=result.placements,
         scheduled_minutes=result.scheduled_minutes,
-        timed_out=improved is None or result.timed_out,
+        timed_out=(optimizer_attempted and improved is None) or result.timed_out,
         used_baseline=improved is None,
         eligible_capacity_minutes=sum(capacity_by_day.values()),
         protected_free_minutes=_protected_free_minutes(windows),
@@ -130,12 +145,14 @@ def _greedy_baseline(
     windows: list[SchedulingWindow],
     capacity_by_day: dict[date, int],
     minimum_break_minutes: int,
+    policy: SchedulingPolicy | None,
 ) -> SchedulingResult:
     free = [
         _FreeSegment(window.start_at, window.end_at, window.energy_level)
         for window in sorted(windows, key=lambda value: value.start_at)
     ]
     used_by_day: dict[date, int] = defaultdict(int)
+    blocks_by_day: dict[date, int] = defaultdict(int)
     item_dates: dict[tuple[str, date], int] = defaultdict(int)
     scheduled = {item.id: 0 for item in items}
     placements: list[Placement] = []
@@ -175,7 +192,9 @@ def _greedy_baseline(
             used_by_day,
             capacity_by_day,
             item_dates,
+            blocks_by_day,
             minimum_break_minutes,
+            policy,
         )
         if choice is None:
             continue
@@ -190,6 +209,7 @@ def _greedy_baseline(
             free.append(_FreeSegment(occupied_end, segment.end_at, segment.energy_level))
         free.sort(key=lambda value: value.start_at)
         used_by_day[start_at.date()] += session.duration_minutes
+        blocks_by_day[start_at.date()] += 1
         item_dates[(session.item.id, start_at.date())] += 1
         scheduled[session.item.id] += session.duration_minutes
         placements.append(_placement(session, start_at, segment.energy_level))
@@ -211,7 +231,9 @@ def _best_greedy_slot(
     used_by_day: dict[date, int],
     capacity_by_day: dict[date, int],
     item_dates: dict[tuple[str, date], int],
+    blocks_by_day: dict[date, int],
     minimum_break_minutes: int,
+    policy: SchedulingPolicy | None,
 ) -> tuple[int, datetime] | None:
     choices: list[tuple[tuple[object, ...], int, datetime]] = []
     occupied = session.duration_minutes + minimum_break_minutes
@@ -220,6 +242,12 @@ def _best_greedy_slot(
         if session.item.eligible_dates is not None and day not in session.item.eligible_dates:
             continue
         if used_by_day[day] + session.duration_minutes > capacity_by_day.get(day, 0):
+            continue
+        if (
+            policy is not None
+            and policy.max_blocks_per_day is not None
+            and blocks_by_day[day] >= policy.max_blocks_per_day
+        ):
             continue
         earliest = max(
             segment.start_at,
@@ -234,12 +262,18 @@ def _best_greedy_slot(
             continue
         if session.item.kind == "task":
             score: tuple[object, ...] = (
+                _preferred_time_penalty(start_at, policy),
                 start_at,
                 0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
             )
         else:
             day_load = used_by_day[day] / max(capacity_by_day.get(day, 1), 1)
-            score = (item_dates[(session.item.id, day)], day_load, start_at)
+            score = (
+                _preferred_time_penalty(start_at, policy),
+                item_dates[(session.item.id, day)],
+                day_load,
+                start_at,
+            )
         choices.append((score, index, start_at))
     if not choices:
         return None
@@ -255,6 +289,7 @@ def _optimize_sessions(
     minimum_break_minutes: int,
     baseline: SchedulingResult,
     time_limit_seconds: float,
+    policy: SchedulingPolicy | None,
 ) -> SchedulingResult | None:
     if not sessions or not windows:
         return baseline
@@ -305,6 +340,10 @@ def _optimize_sessions(
             sum(choice * duration for choice, duration in daily_choices)
             <= capacity_by_day.get(day, 0)
         )
+        if policy is not None and policy.max_blocks_per_day is not None:
+            model.add(
+                sum(choice for choice, _duration in daily_choices) <= policy.max_blocks_per_day
+            )
     for item in items:
         item_sessions = [session for session in sessions if session.item.id == item.id]
         for previous, current in zip(item_sessions, item_sessions[1:], strict=False):
@@ -550,6 +589,18 @@ def _energy_matches(intensity: str, energy_level: str) -> bool:
     if intensity in {"light", "administrative", "passive"}:
         return energy_level == "low"
     return energy_level == "medium"
+
+
+def _preferred_time_penalty(start_at: datetime, policy: SchedulingPolicy | None) -> int:
+    if policy is None or not policy.preferred_time_ranges:
+        return 0
+    local_time = start_at.timetz().replace(tzinfo=None)
+    for weekday, start, end in policy.preferred_time_ranges:
+        if weekday is not None and weekday != start_at.weekday():
+            continue
+        if start <= local_time < end:
+            return 0
+    return 1
 
 
 def _ticks_from(epoch: datetime, value: datetime) -> int:
