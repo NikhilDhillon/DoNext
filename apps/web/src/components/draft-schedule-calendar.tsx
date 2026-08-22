@@ -49,10 +49,11 @@ export function DraftScheduleCalendar({
   onMoved,
 }: DraftScheduleCalendarProps) {
   const weekStarts = useMemo(() => {
-    const dayCount = Math.max(dateDifference(horizonStart, horizonEnd) + 1, 1);
+    const firstMonday = mondayOnOrBefore(horizonStart);
+    const lastMonday = mondayOnOrBefore(horizonEnd);
     return Array.from(
-      { length: Math.ceil(dayCount / 7) },
-      (_, index) => addDays(horizonStart, index * 7),
+      { length: Math.floor(dateDifference(firstMonday, lastMonday) / 7) + 1 },
+      (_, index) => addDays(firstMonday, index * 7),
     );
   }, [horizonEnd, horizonStart]);
   const [weekIndex, setWeekIndex] = useState(0);
@@ -67,21 +68,23 @@ export function DraftScheduleCalendar({
   const suppressClickRef = useRef<string | null>(null);
 
   const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
-  const selectedWeekEnd = earlierDate(addDays(selectedWeek, 6), horizonEnd);
+  const selectedWeekEnd = addDays(selectedWeek, 6);
   const fixedPlan = useApiResource<PlanningView>(`/planning/week?start=${selectedWeek}`);
   const availability = useApiResource<AvailabilityWindow[]>("/availability");
-  const days = Array.from(
-    { length: dateDifference(selectedWeek, selectedWeekEnd) + 1 },
-    (_, index) => addDays(selectedWeek, index),
-  );
+  const days = Array.from({ length: 7 }, (_, index) => addDays(selectedWeek, index));
   const visibleBlocks = blocks.filter((block) => {
     const date = dateInTimezone(block.start_at, timezone);
-    return date >= selectedWeek && date <= selectedWeekEnd;
+    return date >= selectedWeek
+      && date <= selectedWeekEnd
+      && date >= horizonStart
+      && date <= horizonEnd;
   });
   const visibleFixedEvents = (fixedPlan.data?.entries ?? []).filter((entry) => (
     entry.kind === "fixed_event"
       && dateInTimezone(entry.start_at, timezone) >= selectedWeek
       && dateInTimezone(entry.start_at, timezone) <= selectedWeekEnd
+      && dateInTimezone(entry.start_at, timezone) >= horizonStart
+      && dateInTimezone(entry.start_at, timezone) <= horizonEnd
   ));
   const focusBoundary = availability.data?.length
     ? focusBounds(availability.data)
@@ -138,6 +141,8 @@ export function DraftScheduleCalendar({
       endHour,
       timezone,
       availability.data ?? [],
+      horizonStart,
+      horizonEnd,
     );
     if (!placement) {
       dragPreviewRef.current = null;
@@ -240,7 +245,7 @@ export function DraftScheduleCalendar({
             <ChevronLeft size={16} />
           </button>
           {weekStarts.map((weekStart, index) => {
-            const weekEnd = earlierDate(addDays(weekStart, 6), horizonEnd);
+            const weekEnd = addDays(weekStart, 6);
             return (
               <button
                 aria-pressed={weekIndex === index}
@@ -268,10 +273,12 @@ export function DraftScheduleCalendar({
         <div className="calendar-header live-calendar-header">
           <div className="timezone">{timezoneName(timezone, selectedWeek)}</div>
           {days.map((day) => (
-            <div key={day}>
+            <div className={isDraftDay(day, horizonStart, horizonEnd) ? undefined : "outside-draft"} key={day}>
               <span>{weekday(day)}</span>
               <strong>{dayNumber(day)}</strong>
-              <small>{dayEntryLabel(displayedBlocks, displayedFixedEvents, day, timezone)}</small>
+              <small>{isDraftDay(day, horizonStart, horizonEnd)
+                ? dayEntryLabel(displayedBlocks, displayedFixedEvents, day, timezone)
+                : "Outside draft"}</small>
             </div>
           ))}
         </div>
@@ -289,11 +296,14 @@ export function DraftScheduleCalendar({
           >
             {days.map((day) => (
               <button
-                aria-label={hasFocusTime(day, availability.data ?? [])
+                aria-label={!isDraftDay(day, horizonStart, horizonEnd)
+                  ? `${formatCalendarDate(day)} is outside this 14-day draft`
+                  : hasFocusTime(day, availability.data ?? [])
                   ? `Add a draft block on ${formatCalendarDate(day)}`
                   : `${formatCalendarDate(day)} is outside your saved focus days`}
                 className="day-column"
-                disabled={!hasFocusTime(day, availability.data ?? [])}
+                disabled={!isDraftDay(day, horizonStart, horizonEnd)
+                  || !hasFocusTime(day, availability.data ?? [])}
                 key={day}
                 type="button"
                 onClick={() => onAdd(day)}
@@ -473,6 +483,8 @@ function placementFromPointer(
   endHour: number,
   timezone: string,
   availability: AvailabilityWindow[],
+  horizonStart: string,
+  horizonEnd: string,
 ): DragPreview | null {
   if (!grid || !days.length) return null;
   const bounds = grid.getBoundingClientRect();
@@ -487,6 +499,8 @@ function placementFromPointer(
     0,
     days.length - 1,
   );
+  const targetDate = days[dayIndex];
+  if (!isDraftDay(targetDate, horizonStart, horizonEnd)) return null;
   const durationMinutes = Math.max(
     Math.round((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000),
     15,
@@ -506,12 +520,12 @@ function placementFromPointer(
   const targetMinuteOfDay = closestAvailableStart(
     requestedMinuteOfDay,
     durationMinutes,
-    focusIntervalsForDate(days[dayIndex], availability),
+    focusIntervalsForDate(targetDate, availability),
   );
   if (targetMinuteOfDay === null) return null;
   const targetHour = Math.floor(targetMinuteOfDay / 60);
   const targetMinute = targetMinuteOfDay % 60;
-  const startAt = zonedDateTimeToIso(days[dayIndex], targetHour, targetMinute, timezone);
+  const startAt = zonedDateTimeToIso(targetDate, targetHour, targetMinute, timezone);
   return {
     blockId: block.id,
     startAt,
@@ -815,8 +829,13 @@ function addDays(value: string, days: number) {
   return date.toISOString().slice(0, 10);
 }
 
-function earlierDate(first: string, second: string) {
-  return first < second ? first : second;
+function mondayOnOrBefore(value: string) {
+  const day = new Date(`${value}T12:00:00Z`).getUTCDay();
+  return addDays(value, -((day + 6) % 7));
+}
+
+function isDraftDay(value: string, horizonStart: string, horizonEnd: string) {
+  return value >= horizonStart && value <= horizonEnd;
 }
 
 function weekday(value: string) {
