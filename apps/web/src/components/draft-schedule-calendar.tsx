@@ -1,7 +1,7 @@
 "use client";
 
 import { ChevronLeft, ChevronRight, LoaderCircle, Lock, Pencil } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
@@ -60,12 +60,18 @@ export function DraftScheduleCalendar({
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
   const [savingBlockId, setSavingBlockId] = useState<string | null>(null);
+  const [revertingBlockId, setRevertingBlockId] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [moveStatus, setMoveStatus] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const dragPreviewRef = useRef<DragPreview | null>(null);
   const suppressClickRef = useRef<string | null>(null);
+  const revertTimerRef = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (revertTimerRef.current) window.clearTimeout(revertTimerRef.current);
+  }, []);
 
   const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
   const selectedWeekEnd = addDays(selectedWeek, 6);
@@ -109,6 +115,8 @@ export function DraftScheduleCalendar({
 
   function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLButtonElement>) {
     if (savingBlockId) return;
+    if (revertTimerRef.current) window.clearTimeout(revertTimerRef.current);
+    setRevertingBlockId(null);
     setMoveError(null);
     setMoveStatus(null);
     dragSessionRef.current = {
@@ -163,7 +171,10 @@ export function DraftScheduleCalendar({
     if (!session.moved || !placement) {
       setDragPreview(null);
       if (session.moved && !placement) {
-        setMoveError("That block does not fit inside your saved focus hours for that day.");
+        revertBlock(
+          session.block,
+          `${session.block.title} returned to its previous time because the new time is outside your focus hours.`,
+        );
       }
       return;
     }
@@ -194,10 +205,11 @@ export function DraftScheduleCalendar({
       await onMoved();
       setMoveStatus(`${session.block.title} moved to ${formatMoveTime(placement.startAt, timezone)}`);
     } catch (requestError) {
-      setMoveError(
+      revertBlock(
+        session.block,
         requestError instanceof ApiRequestError
-          ? requestError.message
-          : "DoNext could not move that block.",
+          ? `${requestError.message} ${session.block.title} returned to its previous time.`
+          : `${session.block.title} returned to its previous time because DoNext could not save the move.`,
       );
       setMoveStatus(null);
     } finally {
@@ -213,6 +225,17 @@ export function DraftScheduleCalendar({
     dragPreviewRef.current = null;
     setDraggingBlockId(null);
     setDragPreview(null);
+  }
+
+  function revertBlock(block: ScheduleBlock, message: string) {
+    setDragPreview(null);
+    setRevertingBlockId(block.id);
+    setMoveError(message);
+    if (revertTimerRef.current) window.clearTimeout(revertTimerRef.current);
+    revertTimerRef.current = window.setTimeout(() => {
+      setRevertingBlockId((current) => current === block.id ? null : current);
+      revertTimerRef.current = null;
+    }, 420);
   }
 
   function openBlock(block: ScheduleBlock) {
@@ -315,6 +338,7 @@ export function DraftScheduleCalendar({
                 dragging={draggingBlockId === block.id}
                 key={block.id}
                 preview={dragPreview?.blockId === block.id ? dragPreview : null}
+                reverting={revertingBlockId === block.id}
                 saving={savingBlockId === block.id}
                 startHour={startHour}
                 timezone={timezone}
@@ -411,6 +435,7 @@ function DraftBlock({
   block,
   preview,
   dragging,
+  reverting,
   saving,
   timezone,
   weekStart,
@@ -424,6 +449,7 @@ function DraftBlock({
   block: ScheduleBlock;
   preview: DragPreview | null;
   dragging: boolean;
+  reverting: boolean;
   saving: boolean;
   timezone: string;
   weekStart: string;
@@ -454,7 +480,7 @@ function DraftBlock({
   return (
     <button
       aria-label={`Move or edit ${block.title}, ${formatBlockTime(displayedBlock, timezone)}`}
-      className={`week-block editable draft-block ${blockColor(block)}${dragging ? " dragging" : ""}${saving ? " saving" : ""}`}
+      className={`week-block editable draft-block ${blockColor(block)}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}`}
       disabled={saving}
       style={{ gridColumn: column, gridRow: `${row} / span ${duration}` }}
       type="button"
@@ -494,11 +520,8 @@ function placementFromPointer(
     0,
     days.length - 1,
   );
-  const dayIndex = clamp(
-    originalDayIndex + Math.round((clientX - originX) / (bounds.width / 7)),
-    0,
-    days.length - 1,
-  );
+  const dayIndex = originalDayIndex + Math.round((clientX - originX) / (bounds.width / 7));
+  if (dayIndex < 0 || dayIndex >= days.length) return null;
   const targetDate = days[dayIndex];
   if (!isDraftDay(targetDate, horizonStart, horizonEnd)) return null;
   const durationMinutes = Math.max(
@@ -511,18 +534,18 @@ function placementFromPointer(
   const minuteDelta = Math.round(
     ((clientY - originY) / (bounds.height / calendarMinutes)) / 15,
   ) * 15;
-  const requestedMinutesFromStart = clamp(
-    originalMinutes + minuteDelta,
-    0,
-    Math.max(calendarMinutes - durationMinutes, 0),
-  );
+  const requestedMinutesFromStart = originalMinutes + minuteDelta;
+  if (requestedMinutesFromStart < 0
+    || requestedMinutesFromStart > calendarMinutes - durationMinutes) return null;
   const requestedMinuteOfDay = startHour * 60 + requestedMinutesFromStart;
-  const targetMinuteOfDay = closestAvailableStart(
-    requestedMinuteOfDay,
-    durationMinutes,
-    focusIntervalsForDate(targetDate, availability),
+  const fitsFocusHours = focusIntervalsForDate(targetDate, availability).some(
+    ([windowStart, windowEnd]) => (
+      windowStart <= requestedMinuteOfDay
+      && requestedMinuteOfDay + durationMinutes <= windowEnd
+    ),
   );
-  if (targetMinuteOfDay === null) return null;
+  if (!fitsFocusHours) return null;
+  const targetMinuteOfDay = requestedMinuteOfDay;
   const targetHour = Math.floor(targetMinuteOfDay / 60);
   const targetMinute = targetMinuteOfDay % 60;
   const startAt = zonedDateTimeToIso(targetDate, targetHour, targetMinute, timezone);
@@ -612,9 +635,13 @@ function blockFitsFocusHours(
   windows: AvailabilityWindow[],
 ) {
   const startDate = dateInTimezone(block.start_at, timezone);
-  if (startDate !== dateInTimezone(block.end_at, timezone)) return false;
   const start = timeParts(block.start_at, timezone);
   const end = timeParts(block.end_at, timezone);
+  const endDate = dateInTimezone(block.end_at, timezone);
+  const endsAtMidnight = endDate === addDays(startDate, 1)
+    && end.hour === 0
+    && end.minute === 0;
+  if (startDate !== endDate && !endsAtMidnight) return false;
   const startMinute = start.hour * 60 + start.minute;
   const endMinute = endMinuteForBlock(block.start_at, block.end_at, timezone, end);
   return focusIntervalsForDate(startDate, windows).some(
@@ -674,16 +701,6 @@ function subtractMinuteInterval(interval: number[], exclusion: number[]) {
   if (excludedStart > start) remaining.push([start, Math.min(excludedStart, end)]);
   if (excludedEnd < end) remaining.push([Math.max(excludedEnd, start), end]);
   return remaining;
-}
-
-function closestAvailableStart(requested: number, duration: number, intervals: number[][]) {
-  const candidates = intervals
-    .filter(([start, end]) => end - start >= duration)
-    .map(([start, end]) => clamp(requested, start, end - duration));
-  if (!candidates.length) return null;
-  return candidates.reduce((closest, candidate) => (
-    Math.abs(candidate - requested) < Math.abs(closest - requested) ? candidate : closest
-  ));
 }
 
 function hasFocusTime(date: string, windows: AvailabilityWindow[]) {
