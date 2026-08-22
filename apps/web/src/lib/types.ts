@@ -196,6 +196,11 @@ export type ScheduleProposal = Schedule & {
     note_applied: boolean;
     summary: string;
     policy: Record<string, unknown>;
+    changes?: {
+      blocks_changed: number;
+      block_count_delta: number;
+      scheduled_minutes_delta: number;
+    };
   } | null;
 };
 

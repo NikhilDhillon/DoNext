@@ -3,6 +3,7 @@ import json
 import logging
 import math
 import uuid
+from collections import Counter
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Protocol, cast
@@ -531,6 +532,9 @@ def revise_proposal(
         revision_of=previous,
         interpretation=interpretation,
     )
+    revised_feedback = dict(revised.revision_feedback or {})
+    revised_feedback["changes"] = _revision_change_summary(previous, revised)
+    revised.revision_feedback = revised_feedback
     previous.status = ScheduleStatus.rejected
     db.commit()
     return proposal_read(db, current_user, owned_proposal(db, current_user.id, revised.id))
@@ -592,6 +596,46 @@ def _revision_activities(
         )
         entry["remaining_minutes"] = unresolved.get("remaining_minutes", 0)
     return sorted(activities.values(), key=lambda activity: str(activity["source_id"]))
+
+
+def _revision_change_summary(previous: ScheduleVersion, revised: ScheduleVersion) -> dict[str, int]:
+    previous_generated = [block for block in previous.blocks if block.source != "preserved"]
+    revised_generated = [block for block in revised.blocks if block.source != "preserved"]
+    previous_minutes = sum(
+        round((aware(block.end_at) - aware(block.start_at)).total_seconds() / 60)
+        for block in previous_generated
+    )
+    revised_minutes = sum(
+        round((aware(block.end_at) - aware(block.start_at)).total_seconds() / 60)
+        for block in revised_generated
+    )
+    previous_signatures = Counter(
+        (
+            block.task_id,
+            block.goal_id,
+            block.title,
+            aware(block.start_at),
+            aware(block.end_at),
+        )
+        for block in previous_generated
+    )
+    revised_signatures = Counter(
+        (
+            block.task_id,
+            block.goal_id,
+            block.title,
+            aware(block.start_at),
+            aware(block.end_at),
+        )
+        for block in revised_generated
+    )
+    removed_placements = previous_signatures - revised_signatures
+    added_placements = revised_signatures - previous_signatures
+    return {
+        "blocks_changed": max(removed_placements.total(), added_placements.total()),
+        "block_count_delta": len(revised_generated) - len(previous_generated),
+        "scheduled_minutes_delta": revised_minutes - previous_minutes,
+    }
 
 
 def input_fingerprint(db: DbSession, user: User, semester_id: uuid.UUID) -> str:

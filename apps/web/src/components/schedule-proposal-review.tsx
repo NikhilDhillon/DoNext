@@ -217,7 +217,15 @@ export function ScheduleProposalReview({
       {draft.revision_feedback ? (
         <div className="revision-applied" role="status">
           <Sparkles size={17} />
-          <span><strong>Applied your feedback</strong><small>{draft.revision_feedback.summary}</small></span>
+          <span>
+            <strong>Applied your feedback</strong>
+            <small>
+              {draft.revision_feedback.summary}
+              {draft.revision_feedback.changes
+                ? formatRevisionChanges(draft.revision_feedback.changes)
+                : ""}
+            </small>
+          </span>
           <em>{draft.revision_feedback.interpreter === "openai" ? "AI interpreted" : "Quick preferences"}</em>
         </div>
       ) : null}
@@ -344,6 +352,18 @@ function formatMinutes(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+}
+
+function formatRevisionChanges(changes: NonNullable<ScheduleProposal["revision_feedback"]>["changes"]) {
+  if (!changes) return "";
+  const details = [`${changes.blocks_changed} placement changes`];
+  if (changes.block_count_delta !== 0) {
+    details.push(`${Math.abs(changes.block_count_delta)} ${changes.block_count_delta > 0 ? "more" : "fewer"} blocks`);
+  }
+  if (changes.scheduled_minutes_delta !== 0) {
+    details.push(`${formatMinutes(Math.abs(changes.scheduled_minutes_delta))} ${changes.scheduled_minutes_delta > 0 ? "more" : "less"} scheduled`);
+  }
+  return ` · ${details.join(" · ")}`;
 }
 
 function formatRange(start: string, end: string) {

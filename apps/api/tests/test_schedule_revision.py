@@ -34,6 +34,9 @@ def test_reject_with_feedback_atomically_creates_a_linked_revision(
     assert revised["revision_of_proposal_id"] == original["id"]
     assert revised["revision_feedback"]["interpreter"] == "fallback"
     assert revised["revision_feedback"]["policy"]["max_blocks_per_day"] == 3
+    changes = revised["revision_feedback"]["changes"]
+    assert set(changes) == {"blocks_changed", "block_count_delta", "scheduled_minutes_delta"}
+    assert changes["blocks_changed"] >= 0
     assert "Please make this calmer" not in str(revised["revision_feedback"])
     stored_original = db_session.get(ScheduleVersion, UUID(original["id"]))
     assert stored_original is not None
