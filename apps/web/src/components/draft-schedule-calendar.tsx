@@ -68,7 +68,7 @@ export function DraftScheduleCalendar({
 
   const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
   const selectedWeekEnd = earlierDate(addDays(selectedWeek, 6), horizonEnd);
-  const classPlan = useApiResource<PlanningView>(`/planning/week?start=${selectedWeek}`);
+  const fixedPlan = useApiResource<PlanningView>(`/planning/week?start=${selectedWeek}`);
   const availability = useApiResource<AvailabilityWindow[]>("/availability");
   const days = Array.from(
     { length: dateDifference(selectedWeek, selectedWeekEnd) + 1 },
@@ -78,22 +78,26 @@ export function DraftScheduleCalendar({
     const date = dateInTimezone(block.start_at, timezone);
     return date >= selectedWeek && date <= selectedWeekEnd;
   });
-  const visibleClasses = (classPlan.data?.entries ?? []).filter((entry) => (
+  const visibleFixedEvents = (fixedPlan.data?.entries ?? []).filter((entry) => (
     entry.kind === "fixed_event"
-      && entry.category === "class"
       && dateInTimezone(entry.start_at, timezone) >= selectedWeek
       && dateInTimezone(entry.start_at, timezone) <= selectedWeekEnd
   ));
-  const { startHour, endHour } = availability.data?.length
+  const focusBoundary = availability.data?.length
     ? focusBounds(availability.data)
-    : calendarBounds([...blocks, ...visibleClasses], timezone);
+    : calendarBounds(blocks, timezone);
+  const { startHour, endHour } = calendarBounds(
+    visibleFixedEvents,
+    timezone,
+    focusBoundary,
+  );
   const displayedBlocks = availability.data?.length
     ? visibleBlocks.filter((block) => blockFitsFocusHours(block, timezone, availability.data ?? []))
     : visibleBlocks;
   const outsideFocusBlocks = visibleBlocks.filter((block) => !displayedBlocks.includes(block));
-  const displayedClasses = availability.data?.length
-    ? visibleClasses.filter((entry) => entryFitsCalendar(entry, timezone, startHour, endHour))
-    : visibleClasses;
+  const displayedFixedEvents = visibleFixedEvents.filter((entry) => (
+    entryFitsCalendar(entry, timezone, startHour, endHour)
+  ));
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
   const rows = (endHour - startHour) * 2;
   const focusHours = availability.data?.length
@@ -267,7 +271,7 @@ export function DraftScheduleCalendar({
             <div key={day}>
               <span>{weekday(day)}</span>
               <strong>{dayNumber(day)}</strong>
-              <small>{dayEntryLabel(displayedBlocks, displayedClasses, day, timezone)}</small>
+              <small>{dayEntryLabel(displayedBlocks, displayedFixedEvents, day, timezone)}</small>
             </div>
           ))}
         </div>
@@ -312,8 +316,8 @@ export function DraftScheduleCalendar({
                 onPointerUp={(event) => void finishDrag(event.pointerId)}
               />
             ))}
-            {displayedClasses.map((entry) => (
-              <DraftClassBlock
+            {displayedFixedEvents.map((entry) => (
+              <DraftFixedBlock
                 entry={entry}
                 key={entry.id}
                 startHour={startHour}
@@ -339,23 +343,23 @@ export function DraftScheduleCalendar({
           </div>
         </div>
       ) : null}
-      {classPlan.error ? (
-        <p className="draft-calendar-notice error">Classes could not be loaded into this preview.</p>
+      {fixedPlan.error ? (
+        <p className="draft-calendar-notice error">Saved classes and commitments could not be loaded into this preview.</p>
       ) : availability.error ? (
         <p className="draft-calendar-notice error">Focus hours could not be loaded into this preview.</p>
-      ) : classPlan.loading ? (
-        <p className="draft-calendar-notice">Loading classes into the draft calendar…</p>
+      ) : fixedPlan.loading ? (
+        <p className="draft-calendar-notice">Loading classes and commitments into the draft calendar…</p>
       ) : availability.loading ? (
         <p className="draft-calendar-notice">Loading your focus hours…</p>
       ) : null}
-      {!displayedBlocks.length && !displayedClasses.length && !classPlan.loading ? (
-        <p className="draft-calendar-empty">No classes or draft blocks appear in this week. Click any day column to add a block.</p>
+      {!displayedBlocks.length && !displayedFixedEvents.length && !fixedPlan.loading ? (
+        <p className="draft-calendar-empty">No saved commitments or draft blocks appear in this week. Click any day column to add a block.</p>
       ) : null}
     </div>
   );
 }
 
-function DraftClassBlock({
+function DraftFixedBlock({
   entry,
   timezone,
   weekStart,
@@ -382,12 +386,13 @@ function DraftClassBlock({
 
   return (
     <article
-      aria-label={`${entry.title}, fixed class, ${formatEntryTime(entry, timezone)}`}
-      className="week-block violet draft-class-block"
+      aria-label={`${entry.title}, fixed ${fixedEventLabel(entry).toLowerCase()}, ${formatEntryTime(entry, timezone)}`}
+      className={`week-block ${fixedEventColor(entry)} draft-fixed-block`}
       style={{ gridColumn: column, gridRow: `${row} / span ${duration}` }}
     >
       <strong>{entry.title}</strong>
       <span>{formatEntryTime(entry, timezone)}{entry.location ? ` · ${entry.location}` : ""}</span>
+      <small className="draft-fixed-badge">{fixedEventLabel(entry)}</small>
     </article>
   );
 }
@@ -558,16 +563,21 @@ function formatMoveTime(value: string, timezone: string) {
   }).format(new Date(value));
 }
 
-function calendarBounds(entries: Array<{ start_at: string; end_at: string }>, timezone: string) {
-  if (!entries.length) return { startHour: 8, endHour: 18 };
+function calendarBounds(
+  entries: Array<{ start_at: string; end_at: string }>,
+  timezone: string,
+  baseline = { startHour: 8, endHour: 18 },
+) {
+  if (!entries.length) return baseline;
   const starts = entries.map((entry) => timeParts(entry.start_at, timezone).hour);
   const ends = entries.map((entry) => {
     const end = timeParts(entry.end_at, timezone);
-    return end.hour + (end.minute ? 1 : 0);
+    const endMinute = endMinuteForBlock(entry.start_at, entry.end_at, timezone, end);
+    return Math.ceil(endMinute / 60);
   });
   return {
-    startHour: Math.max(Math.min(8, ...starts), 0),
-    endHour: Math.min(Math.max(18, ...ends), 24),
+    startHour: Math.max(Math.min(baseline.startHour, ...starts), 0),
+    endHour: Math.min(Math.max(baseline.endHour, ...ends), 24),
   };
 }
 
@@ -707,16 +717,41 @@ function formatClockMinutes(value: number) {
 
 function dayEntryLabel(
   blocks: ScheduleBlock[],
-  classes: PlanningEntry[],
+  fixedEvents: PlanningEntry[],
   date: string,
   timezone: string,
 ) {
   const draftCount = blocks.filter((block) => dateInTimezone(block.start_at, timezone) === date).length;
-  const classCount = classes.filter((entry) => dateInTimezone(entry.start_at, timezone) === date).length;
+  const fixedCount = fixedEvents.filter((entry) => dateInTimezone(entry.start_at, timezone) === date).length;
   const labels = [];
   if (draftCount) labels.push(`${draftCount} draft${draftCount === 1 ? "" : "s"}`);
-  if (classCount) labels.push(`${classCount} class${classCount === 1 ? "" : "es"}`);
+  if (fixedCount) labels.push(`${fixedCount} fixed item${fixedCount === 1 ? "" : "s"}`);
   return labels.length ? labels.join(" · ") : "Open";
+}
+
+function fixedEventLabel(entry: PlanningEntry) {
+  const labels: Record<string, string> = {
+    appointment: "Appointment",
+    career: "Career",
+    class: "Class",
+    club: "Club",
+    commute: "Commute",
+    creative: "Creative",
+    gym: "Gym",
+    health: "Health",
+    learning: "Learning",
+    personal: "Personal",
+    work: "Work",
+  };
+  return labels[entry.category] ?? "Commitment";
+}
+
+function fixedEventColor(entry: PlanningEntry) {
+  if (entry.category === "class") return "violet";
+  if (entry.category === "work") return "slate";
+  if (entry.category === "appointment" || entry.category === "health") return "blue";
+  if (entry.category === "gym") return "mint";
+  return "amber";
 }
 
 function blockColor(block: ScheduleBlock) {
