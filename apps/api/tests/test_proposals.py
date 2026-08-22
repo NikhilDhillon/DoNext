@@ -97,6 +97,40 @@ def test_proposal_blocks_stay_inside_saved_focus_hours(client: TestClient) -> No
     )
 
 
+def test_proposal_block_may_end_at_midnight(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    availability = client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": 2,
+                    "start_time": "10:00:00",
+                    "end_time": "00:00:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+            ]
+        },
+    )
+    assert availability.status_code == 200
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    created = client.post(
+        f"/api/v1/schedule-proposals/{proposal['id']}/blocks",
+        json={
+            "title": "Late study session",
+            "start_at": "2026-09-02T23:00:00-07:00",
+            "end_at": "2026-09-03T00:00:00-07:00",
+            "block_type": "focus",
+        },
+    )
+
+    assert created.status_code == 201
+    assert created.json()["title"] == "Late study session"
+
+
 def test_stale_and_rejected_proposals_never_replace_the_accepted_plan(
     client: TestClient,
 ) -> None:

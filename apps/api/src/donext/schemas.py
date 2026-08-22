@@ -619,7 +619,7 @@ class AvailabilityInput(ApiModel):
 
     @model_validator(mode="after")
     def validate_times(self) -> "AvailabilityInput":
-        if self.end_time <= self.start_time:
+        if self.end_time != time.min and self.end_time <= self.start_time:
             raise ValueError("end_time must be after start_time")
         return self
 

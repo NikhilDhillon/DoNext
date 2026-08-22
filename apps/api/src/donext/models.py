@@ -560,7 +560,10 @@ class AvailabilityWindow(UuidTimestampMixin, Base):
     __tablename__ = "availability_windows"
     __table_args__ = (
         CheckConstraint("day_of_week BETWEEN 0 AND 6", name="ck_availability_day"),
-        CheckConstraint("end_time > start_time", name="ck_availability_times"),
+        CheckConstraint(
+            "end_time > start_time OR end_time = '00:00:00' OR end_time = '00:00:00.000000'",
+            name="ck_availability_times",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(

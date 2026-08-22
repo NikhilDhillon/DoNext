@@ -23,6 +23,30 @@ def replace_weekday_availability(client: TestClient) -> None:
     assert response.status_code == 200
 
 
+def test_midnight_end_time_means_end_of_selected_day(client: TestClient) -> None:
+    register(client)
+    response = client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": 0,
+                    "start_time": "10:00:00",
+                    "end_time": "00:00:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()[0]["end_time"] == "00:00:00"
+    monday = client.get("/api/v1/planning/day?date=2026-09-07")
+    assert monday.status_code == 200
+    assert monday.json()["days"][0]["capacity"]["available_minutes"] == 14 * 60
+
+
 def test_day_plan_combines_real_blocks_events_capacity_and_unscheduled_work(
     client: TestClient,
 ) -> None:

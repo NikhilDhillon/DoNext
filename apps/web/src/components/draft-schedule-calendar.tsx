@@ -575,7 +575,7 @@ function focusBounds(windows: AvailabilityWindow[]) {
   const positive = windows.filter((window) => window.type !== "unavailable");
   if (!positive.length) return { startHour: 8, endHour: 18 };
   const starts = positive.map((window) => clockMinutes(window.start_time));
-  const ends = positive.map((window) => clockMinutes(window.end_time));
+  const ends = positive.map((window) => endClockMinutes(window.end_time));
   return {
     startHour: Math.floor(Math.min(...starts) / 60),
     endHour: Math.ceil(Math.max(...ends) / 60),
@@ -592,7 +592,7 @@ function blockFitsFocusHours(
   const start = timeParts(block.start_at, timezone);
   const end = timeParts(block.end_at, timezone);
   const startMinute = start.hour * 60 + start.minute;
-  const endMinute = end.hour * 60 + end.minute;
+  const endMinute = endMinuteForBlock(block.start_at, block.end_at, timezone, end);
   return focusIntervalsForDate(startDate, windows).some(
     ([windowStart, windowEnd]) => windowStart <= startMinute && endMinute <= windowEnd,
   );
@@ -607,7 +607,7 @@ function entryFitsCalendar(
   const start = timeParts(entry.start_at, timezone);
   const end = timeParts(entry.end_at, timezone);
   return start.hour * 60 + start.minute >= startHour * 60
-    && end.hour * 60 + end.minute <= endHour * 60;
+    && endMinuteForBlock(entry.start_at, entry.end_at, timezone, end) <= endHour * 60;
 }
 
 function focusIntervalsForDate(date: string, windows: AvailabilityWindow[]) {
@@ -616,12 +616,12 @@ function focusIntervalsForDate(date: string, windows: AvailabilityWindow[]) {
   const positive = mergeMinuteIntervals(
     matching
       .filter((window) => window.type !== "unavailable")
-      .map((window) => [clockMinutes(window.start_time), clockMinutes(window.end_time)]),
+      .map((window) => [clockMinutes(window.start_time), endClockMinutes(window.end_time)]),
   );
   const unavailable = mergeMinuteIntervals(
     matching
       .filter((window) => window.type === "unavailable")
-      .map((window) => [clockMinutes(window.start_time), clockMinutes(window.end_time)]),
+      .map((window) => [clockMinutes(window.start_time), endClockMinutes(window.end_time)]),
   );
   return unavailable.reduce(
     (remaining, exclusion) => remaining.flatMap((interval) => subtractMinuteInterval(interval, exclusion)),
@@ -671,16 +671,34 @@ function clockMinutes(value: string) {
   return hours * 60 + minutes;
 }
 
+function endClockMinutes(value: string) {
+  const minutes = clockMinutes(value);
+  return minutes === 0 ? 24 * 60 : minutes;
+}
+
+function endMinuteForBlock(
+  startAt: string,
+  endAt: string,
+  timezone: string,
+  end: { hour: number; minute: number },
+) {
+  return dateInTimezone(startAt, timezone) !== dateInTimezone(endAt, timezone)
+    && end.hour === 0
+    && end.minute === 0
+    ? 24 * 60
+    : end.hour * 60 + end.minute;
+}
+
 function formatFocusHours(windows: AvailabilityWindow[]) {
   const positive = windows.filter((window) => window.type !== "unavailable");
   if (!positive.length) return "No focus time saved";
   const start = Math.min(...positive.map((window) => clockMinutes(window.start_time)));
-  const end = Math.max(...positive.map((window) => clockMinutes(window.end_time)));
+  const end = Math.max(...positive.map((window) => endClockMinutes(window.end_time)));
   return `${formatClockMinutes(start)}–${formatClockMinutes(end)}`;
 }
 
 function formatClockMinutes(value: number) {
-  const hour = Math.floor(value / 60);
+  const hour = Math.floor(value / 60) % 24;
   const minute = value % 60;
   const suffix = hour >= 12 ? "PM" : "AM";
   const displayHour = hour % 12 || 12;

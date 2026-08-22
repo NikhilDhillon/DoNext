@@ -176,9 +176,10 @@ def availability_intervals(
     for window in windows:
         if window.day_of_week != day.weekday():
             continue
+        end_date = day + timedelta(days=1) if window.end_time == time.min else day
         interval = (
             datetime.combine(day, window.start_time, tzinfo=timezone),
-            datetime.combine(day, window.end_time, tzinfo=timezone),
+            datetime.combine(end_date, window.end_time, tzinfo=timezone),
         )
         if window.type == AvailabilityType.unavailable:
             unavailable.append(interval)

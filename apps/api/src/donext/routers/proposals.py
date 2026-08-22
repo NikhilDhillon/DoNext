@@ -342,7 +342,11 @@ def validate_focus_hours(
     timezone = resolve_timezone(user.timezone)
     local_start = start_at.astimezone(timezone)
     local_end = end_at.astimezone(timezone)
-    if local_start.date() != local_end.date():
+    ends_at_midnight = (
+        local_end.date() == local_start.date() + timedelta(days=1)
+        and local_end.timetz().replace(tzinfo=None) == time.min
+    )
+    if local_start.date() != local_end.date() and not ends_at_midnight:
         raise ApiError(
             "OUTSIDE_FOCUS_HOURS",
             "Choose a time inside your saved focus hours for one day.",

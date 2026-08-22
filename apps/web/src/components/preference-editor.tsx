@@ -47,7 +47,7 @@ export function PreferenceEditor() {
       setSubmitting(false);
       return;
     }
-    if (availableUntil <= availableFrom) {
+    if (availableUntil !== "00:00" && availableUntil <= availableFrom) {
       setActionError("Focus availability must end after it starts.");
       setSubmitting(false);
       return;
