@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, Bell, Check, Clock3, LoaderCircle, MoonStar, ShieldCheck, Trash2 } from "lucide-react";
+import { AlertTriangle, Bell, CalendarDays, Check, Clock3, LoaderCircle, MoonStar, ShieldCheck, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
@@ -8,11 +8,14 @@ import type { FormEvent } from "react";
 import { FormDialog } from "@/components/form-dialog";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { Preferences } from "@/lib/types";
+import type { AvailabilityWindow, Preferences } from "@/lib/types";
+
+const weekDays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 
 export function PreferenceEditor() {
   const router = useRouter();
   const preferences = useApiResource<Preferences>("/preferences");
+  const availability = useApiResource<AvailabilityWindow[]>("/availability");
   const [saved, setSaved] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -34,8 +37,30 @@ export function PreferenceEditor() {
     setSaved(false);
     setActionError(null);
     const form = new FormData(event.currentTarget);
+    const selectedDays = weekDays
+      .map((_, index) => index)
+      .filter((index) => form.get(`focus_day_${index}`) === "on");
+    const availableFrom = String(form.get("available_from"));
+    const availableUntil = String(form.get("available_until"));
+    if (!selectedDays.length) {
+      setActionError("Select at least one day when DoNext may schedule flexible work.");
+      setSubmitting(false);
+      return;
+    }
+    if (availableUntil <= availableFrom) {
+      setActionError("Focus availability must end after it starts.");
+      setSubmitting(false);
+      return;
+    }
+    const windows = selectedDays.map((day) => ({
+      day_of_week: day,
+      start_time: availableFrom,
+      end_time: availableUntil,
+      type: "available" as const,
+      energy_level: "medium" as const,
+    }));
     try {
-      const updated = await apiRequest<Preferences>("/preferences", {
+      const preferenceRequest = apiRequest<Preferences>("/preferences", {
         method: "PATCH",
         body: JSON.stringify({
           minimum_sleep_minutes: Number(form.get("minimum_sleep_hours")) * 60,
@@ -50,7 +75,17 @@ export function PreferenceEditor() {
           auto_apply_low_impact_changes: form.get("auto_apply_low_impact_changes") === "on",
         }),
       });
-      preferences.setData(updated);
+      const availabilityRequest = apiRequest<AvailabilityWindow[]>("/availability", {
+        method: "PUT",
+        body: JSON.stringify({ windows }),
+      });
+      const [updatedPreferences, updatedAvailability] = await Promise.all([
+        preferenceRequest,
+        availabilityRequest,
+      ]);
+      preferences.setData(updatedPreferences);
+      availability.setData(updatedAvailability);
+      window.dispatchEvent(new Event("donext:planning-updated"));
       setSaved(true);
     } catch (error) {
       setActionError(error instanceof ApiRequestError ? error.message : "Could not save your preferences.");
@@ -85,11 +120,14 @@ export function PreferenceEditor() {
     }
   }
 
-  if (preferences.loading) return <main className="page-shell narrow-page"><div className="page-status" role="status"><LoaderCircle className="spin" size={20} /><span>Loading your boundaries</span></div></main>;
-  if (preferences.error) return <main className="page-shell narrow-page"><section className="empty-state error-state"><h2>DoNext couldn’t load your settings.</h2><p>{preferences.error}</p><button className="secondary-button" type="button" onClick={() => void preferences.reload()}>Try again</button></section></main>;
-  if (!preferences.data) return null;
+  if (preferences.loading || availability.loading) return <main className="page-shell narrow-page"><div className="page-status" role="status"><LoaderCircle className="spin" size={20} /><span>Loading your boundaries</span></div></main>;
+  if (preferences.error || availability.error) return <main className="page-shell narrow-page"><section className="empty-state error-state"><h2>DoNext couldn’t load your settings.</h2><p>{preferences.error ?? availability.error}</p><button className="secondary-button" type="button" onClick={() => { void preferences.reload(); void availability.reload(); }}>Try again</button></section></main>;
+  if (!preferences.data || !availability.data) return null;
 
   const value = preferences.data;
+  const positiveAvailability = availability.data.filter((window) => window.type !== "unavailable");
+  const selectedFocusDays = new Set(positiveAvailability.map((window) => window.day_of_week));
+  const firstFocusWindow = positiveAvailability[0];
 
   return (
     <main className="page-shell narrow-page">
@@ -105,6 +143,24 @@ export function PreferenceEditor() {
           <div className="preference-heading"><span><Clock3 size={20} /></span><div><h2>Focus rhythm</h2><p>Shape sessions around how you can actually concentrate.</p></div></div>
           <div className="form-row"><label><span>Preferred session</span><select name="preferred_session_minutes" defaultValue={value.preferred_session_minutes}><option value="25">25 minutes</option><option value="40">40 minutes</option><option value="45">45 minutes</option><option value="50">50 minutes</option><option value="60">60 minutes</option><option value="75">75 minutes</option><option value="90">90 minutes</option></select></label><label><span>Minimum break</span><select name="minimum_break_minutes" defaultValue={value.minimum_break_minutes}><option value="5">5 minutes</option><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option><option value="30">30 minutes</option></select></label></div>
           <label><span>Maximum focus per day</span><select name="maximum_daily_focus_minutes" defaultValue={value.maximum_daily_focus_minutes}><option value="180">3 hours</option><option value="240">4 hours</option><option value="300">5 hours</option><option value="360">6 hours</option><option value="420">7 hours</option><option value="480">8 hours</option><option value="600">10 hours</option></select></label>
+        </section>
+
+        <section className="preference-section">
+          <div className="preference-heading"><span><CalendarDays size={20} /></span><div><h2>Focus availability</h2><p>Choose the days and times when DoNext may schedule flexible work.</p></div></div>
+          <fieldset className="day-picker settings-day-picker">
+            <legend>Available days</legend>
+            {weekDays.map((day, index) => (
+              <label key={day}>
+                <input name={`focus_day_${index}`} type="checkbox" defaultChecked={selectedFocusDays.has(index)} />
+                <span>{day.slice(0, 3)}</span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="form-row">
+            <label><span>Available from</span><input name="available_from" type="time" defaultValue={firstFocusWindow?.start_time.slice(0, 5) ?? "08:00"} step="900" required /></label>
+            <label><span>Available until</span><input name="available_until" type="time" defaultValue={firstFocusWindow?.end_time.slice(0, 5) ?? "20:00"} step="900" required /></label>
+          </div>
+          <p className="preference-help">Generated and dragged draft blocks must stay inside these hours. Regenerate an existing draft after changing them.</p>
         </section>
 
         <section className="preference-section">
