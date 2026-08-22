@@ -703,8 +703,14 @@ class ScheduleRead(ApiModel):
 
 class ProposalSummaryRead(ApiModel):
     solve_status: Literal["optimal", "feasible", "infeasible"]
+    coverage_status: Literal["complete", "partial"] = "complete"
+    timed_out: bool = False
+    used_baseline: bool = False
     scheduled_minutes: int
     requested_minutes: int
+    eligible_capacity_minutes: int = 0
+    protected_free_minutes: int = 0
+    solver_runtime_ms: int = 0
     preserved_blocks: int
     generated_blocks: int
     moved_blocks: int = 0

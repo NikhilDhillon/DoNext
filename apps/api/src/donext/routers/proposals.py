@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import math
 import uuid
 from datetime import UTC, date, datetime, time, timedelta
@@ -51,6 +52,7 @@ from donext.schemas import (
 )
 
 router = APIRouter(tags=["schedule proposals"])
+logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"optional": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 PLANNING_LEAD_DAYS = {
     AcademicItemType.final_exam: 28,
@@ -228,20 +230,37 @@ def generate_proposal(
             )
         )
     scheduled_total = sum(result.scheduled_minutes.values())
-    unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links)
+    unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links, windows)
     if result.timed_out:
         warnings.append(
             "The solver reached its time limit; this feasible draft may not be optimal."
         )
     proposal.generation_summary = ProposalSummaryRead(
         solve_status=result.status,
+        coverage_status="partial" if unscheduled else "complete",
+        timed_out=result.timed_out,
+        used_baseline=result.used_baseline,
         scheduled_minutes=scheduled_total,
         requested_minutes=sum(item.target_minutes for item in items),
+        eligible_capacity_minutes=result.eligible_capacity_minutes,
+        protected_free_minutes=result.protected_free_minutes,
+        solver_runtime_ms=result.runtime_ms,
         preserved_blocks=len(preserved),
         generated_blocks=len(result.placements),
         warnings=warnings,
         unscheduled=unscheduled,
     ).model_dump(mode="json")
+    logger.info(
+        "schedule proposal generated requested=%s scheduled=%s capacity=%s blocks=%s "
+        "runtime_ms=%s timed_out=%s baseline=%s",
+        sum(item.target_minutes for item in items),
+        scheduled_total,
+        result.eligible_capacity_minutes,
+        len(result.placements),
+        result.runtime_ms,
+        result.timed_out,
+        result.used_baseline,
+    )
     db.commit()
     return proposal_read(db, current_user, owned_proposal(db, current_user.id, proposal.id))
 
@@ -553,15 +572,15 @@ def _scheduling_windows(
             ]
         )
         open_intervals = subtract_intervals(available, exclusions)
-        open_minutes = min(
-            interval_minutes(open_intervals), preferences.maximum_daily_focus_minutes
+        open_minutes = interval_minutes(open_intervals)
+        focus_limited_minutes = min(open_minutes, preferences.maximum_daily_focus_minutes)
+        usable = math.floor(
+            focus_limited_minutes * (100 - preferences.preserve_free_time_percent) / 100
         )
-        usable = math.floor(open_minutes * (100 - preferences.preserve_free_time_percent) / 100)
-        remaining = usable
+        usable -= usable % 5
+        protected_free = focus_limited_minutes - usable
         for start_at, end_at in open_intervals:
-            if remaining <= 0:
-                break
-            duration = min(round((end_at - start_at).total_seconds() / 60), remaining)
+            duration = round((end_at - start_at).total_seconds() / 60)
             duration -= duration % 5
             if duration >= 5:
                 energy = next(
@@ -581,9 +600,14 @@ def _scheduling_windows(
                     "medium",
                 )
                 windows.append(
-                    SchedulingWindow(start_at, start_at + timedelta(minutes=duration), energy)
+                    SchedulingWindow(
+                        start_at,
+                        start_at + timedelta(minutes=duration),
+                        energy,
+                        usable,
+                        protected_free,
+                    )
                 )
-                remaining -= duration
     return windows
 
 
@@ -841,21 +865,14 @@ def _scheduling_items(
 
 
 def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[frozenset[date]]:
-    """Return the two calendar weeks owned by this rolling planning pass.
-
-    A 14-day horizon can touch three Monday-to-Sunday weeks when it begins midweek. The
-    trailing partial week belongs to the next rolling pass; including it here would request
-    three weekly targets inside a two-week proposal. The current partial week still receives
-    its full remaining target, followed by the next complete calendar week.
-    """
-    first_monday = horizon_start - timedelta(days=horizon_start.weekday())
+    """Split the rolling horizon into consecutive seven-day target buckets."""
     date_sets: list[frozenset[date]] = []
-    week_start = first_monday
-    while week_start <= horizon_end and len(date_sets) < 2:
+    week_start = horizon_start
+    while week_start <= horizon_end:
         eligible_dates = frozenset(
-            current
+            week_start + timedelta(days=offset)
             for offset in range(7)
-            if horizon_start <= (current := week_start + timedelta(days=offset)) <= horizon_end
+            if week_start + timedelta(days=offset) <= horizon_end
         )
         if eligible_dates:
             date_sets.append(eligible_dates)
@@ -880,6 +897,7 @@ def _unscheduled_summary(
     items: list[SchedulingItem],
     scheduled_minutes: dict[str, int],
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
+    windows: list[SchedulingWindow],
 ) -> list[dict[str, object]]:
     unresolved: list[dict[str, object]] = []
     flexible: dict[uuid.UUID, dict[str, object]] = {}
@@ -907,25 +925,55 @@ def _unscheduled_summary(
                 dates.extend(value.isoformat() for value in sorted(item.eligible_dates))
             continue
         if remaining > 0:
+            reason_code, reason = _shortfall_reason(item, windows)
             unresolved.append(
                 {
                     "id": item.id,
                     "name": item.title,
                     "remaining_minutes": remaining,
-                    "reason": "Not enough eligible capacity inside this proposal.",
+                    "reason_code": reason_code,
+                    "reason": reason,
                 }
             )
     for entry in flexible.values():
         dates = cast(list[str], entry.pop("dates"))
         if cast(int, entry["remaining_minutes"]) <= 0:
             continue
+        entry["reason_code"] = "DAILY_CAPACITY_LIMIT"
         entry["reason"] = (
-            f"Not enough eligible capacity on {', '.join(dates)}."
+            f"The selected days reached their focus or protected free-time limit: "
+            f"{', '.join(sorted(set(dates)))}."
             if dates
-            else "Not enough eligible capacity inside this proposal."
+            else "Higher-priority work used the remaining focus capacity."
         )
         unresolved.append(entry)
     return unresolved
+
+
+def _shortfall_reason(item: SchedulingItem, windows: list[SchedulingWindow]) -> tuple[str, str]:
+    if item.latest_end_at is not None and windows:
+        earliest_window = min(window.start_at for window in windows)
+        if item.latest_end_at <= earliest_window:
+            return "DEADLINE_PASSED", "Its confirmed deadline has already passed."
+    compatible_dates = {
+        window.start_at.date()
+        for window in windows
+        if item.eligible_dates is None or window.start_at.date() in item.eligible_dates
+    }
+    if item.eligible_dates is not None and not compatible_dates:
+        return (
+            "NO_ELIGIBLE_DAY",
+            "Its selected weekdays have no opening inside the current focus hours.",
+        )
+    if item.kind == "task":
+        return (
+            "ACADEMIC_CAPACITY_LIMIT",
+            "Earlier or higher-impact deadlines used the remaining eligible focus capacity.",
+        )
+    return (
+        "DAILY_CAPACITY_LIMIT",
+        "The available days reached their focus or protected free-time limit.",
+    )
 
 
 def _record_edit(proposal: ScheduleVersion) -> None:

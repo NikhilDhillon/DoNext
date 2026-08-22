@@ -1,5 +1,9 @@
-from datetime import UTC, date, datetime
+import time
+from datetime import UTC, date, datetime, timedelta
 
+import pytest
+
+import donext.scheduler as scheduler
 from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
 
 
@@ -165,3 +169,95 @@ def test_solver_respects_task_start_and_deadline_boundaries() -> None:
     assert result.placements
     assert all(placement.start_at >= earliest for placement in result.placements)
     assert all(placement.end_at <= deadline for placement in result.placements)
+
+
+def test_daily_capacity_is_a_budget_instead_of_an_early_day_cutoff() -> None:
+    current = date(2026, 9, 9)
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, 9, 10, 0, tzinfo=UTC),
+            datetime(2026, 9, 9, 12, 0, tzinfo=UTC),
+            daily_capacity_minutes=60,
+        ),
+        SchedulingWindow(
+            datetime(2026, 9, 9, 20, 0, tzinfo=UTC),
+            datetime(2026, 9, 10, 0, 0, tzinfo=UTC),
+            daily_capacity_minutes=60,
+        ),
+    ]
+    evening = SchedulingItem(
+        id="evening",
+        title="Evening session",
+        target_minutes=60,
+        minimum_session_minutes=30,
+        preferred_session_minutes=60,
+        maximum_session_minutes=60,
+        priority_rank=2,
+        intensity="moderate",
+        eligible_dates=frozenset({current}),
+        earliest_start_at=datetime(2026, 9, 9, 19, 0, tzinfo=UTC),
+    )
+
+    result = solve_schedule([evening], windows, minimum_break_minutes=0)
+
+    assert result.scheduled_minutes[evening.id] == 60
+    assert result.placements[0].start_at.hour >= 20
+    assert result.eligible_capacity_minutes == 60
+
+
+def test_optimizer_failure_returns_the_valid_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 18, 0, tzinfo=UTC),
+        )
+    ]
+
+    result = solve_schedule([task("baseline")], windows, minimum_break_minutes=10)
+
+    assert result.placements
+    assert result.used_baseline is True
+    assert result.timed_out is True
+    assert result.status != "infeasible"
+
+
+def test_large_14_day_request_returns_a_non_empty_draft_within_five_seconds() -> None:
+    horizon_start = datetime(2026, 9, 9, 10, 0, tzinfo=UTC)
+    windows = [
+        SchedulingWindow(
+            horizon_start + timedelta(days=offset),
+            horizon_start + timedelta(days=offset, hours=9),
+            daily_capacity_minutes=365,
+            protected_free_minutes=75,
+        )
+        for offset in range(14)
+    ]
+    requested = [
+        task(f"academic-{index}", minutes=minutes, importance=100 - index)
+        for index, minutes in enumerate((240, 240, 420, 125, 185))
+    ]
+    requested.extend(
+        SchedulingItem(
+            id=f"flex-{index}",
+            title=f"Flexible {index}",
+            target_minutes=minutes,
+            minimum_session_minutes=15,
+            preferred_session_minutes=60,
+            maximum_session_minutes=120,
+            priority_rank=2,
+            intensity="moderate",
+            kind="flexible_commitment",
+        )
+        for index, minutes in enumerate((720, 720, 840, 840))
+    )
+
+    started = time.monotonic()
+    result = solve_schedule(requested, windows, minimum_break_minutes=10)
+
+    assert time.monotonic() - started < 5.5
+    assert result.placements
+    assert sum(result.scheduled_minutes.values()) > 0
+    assert result.status != "infeasible"
