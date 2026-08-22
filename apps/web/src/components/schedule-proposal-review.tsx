@@ -9,7 +9,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { DraftScheduleCalendar } from "@/components/draft-schedule-calendar";
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
@@ -42,14 +42,24 @@ export function ScheduleProposalReview({
   );
   const availability = useApiResource<AvailabilityWindow[]>("/availability");
   const [busy, setBusy] = useState(false);
+  const [generationState, setGenerationState] = useState<"idle" | "running" | "success">(
+    "idle",
+  );
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<"accept" | "reject" | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
   const [editorDate, setEditorDate] = useState(semester.start_date);
+  const generationSuccessTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (generationSuccessTimer.current) clearTimeout(generationSuccessTimer.current);
+  }, []);
 
   async function generate() {
+    if (generationSuccessTimer.current) clearTimeout(generationSuccessTimer.current);
     setBusy(true);
+    setGenerationState("running");
     setError(null);
     try {
       proposal.setData(
@@ -58,7 +68,13 @@ export function ScheduleProposalReview({
           { method: "POST" },
         ),
       );
+      setGenerationState("success");
+      generationSuccessTimer.current = setTimeout(() => {
+        setGenerationState("idle");
+        generationSuccessTimer.current = null;
+      }, 1800);
     } catch (requestError) {
+      setGenerationState("idle");
       setError(errorMessage(requestError, "DoNext could not generate a schedule draft."));
     } finally {
       setBusy(false);
@@ -134,8 +150,27 @@ export function ScheduleProposalReview({
           <h2>Review every placement before it becomes active.</h2>
           <p>The accepted calendar remains below. These blocks are a separate editable version.</p>
         </div>
-        <button className="secondary-button" disabled={busy} type="button" onClick={() => void generate()}>
-          <RefreshCw size={16} /> Regenerate
+        <button
+          aria-busy={generationState === "running"}
+          className={`secondary-button regeneration-button ${generationState}`}
+          disabled={busy}
+          type="button"
+          onClick={() => void generate()}
+        >
+          {generationState === "running" ? (
+            <LoaderCircle className="spin" size={16} />
+          ) : generationState === "success" ? (
+            <Check className="regeneration-success-icon" size={16} />
+          ) : (
+            <RefreshCw size={16} />
+          )}
+          <span aria-live="polite">
+            {generationState === "running"
+              ? "Regenerating…"
+              : generationState === "success"
+                ? "Draft updated"
+                : "Regenerate"}
+          </span>
         </button>
       </header>
 

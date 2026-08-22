@@ -38,6 +38,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .primary-button:hover { background: #263b38; transform: translateY(-1px); }
 .secondary-button { border-color: var(--line); background: rgba(255, 255, 255, .78); color: var(--ink); }
 .secondary-button:hover { background: #fff; transform: translateY(-1px); }
+.regeneration-button { min-width: 136px; transition: transform .18s ease, border-color .18s ease, background .18s ease, color .18s ease, box-shadow .18s ease; }
+.regeneration-button.running { border-color: #bcd8c6; background: #edf6f0; color: var(--mint-deep); cursor: wait; }
+.regeneration-button.success { border-color: #8fc4a5; background: #e4f3e9; color: var(--mint-deep); animation: regeneration-complete .55s ease both; }
+.regeneration-success-icon { animation: regeneration-check .45s cubic-bezier(.2, .9, .25, 1.25) both; }
+@keyframes regeneration-complete { 0% { box-shadow: 0 0 0 0 rgba(42, 132, 96, .28); transform: scale(.98); } 55% { box-shadow: 0 0 0 7px rgba(42, 132, 96, .12); transform: scale(1.025); } 100% { box-shadow: 0 0 0 0 rgba(42, 132, 96, 0); transform: scale(1); } }
+@keyframes regeneration-check { 0% { opacity: 0; transform: scale(.35) rotate(-18deg); } 100% { opacity: 1; transform: scale(1) rotate(0); } }
 .text-button { border: 0; background: none; color: var(--mint-deep); font-size: 13px; font-weight: 700; cursor: pointer; }
 .icon-button { display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
 

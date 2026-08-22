@@ -96,3 +96,67 @@ final result: passed
 4. The mobile pass confirmed clean one-column mode cards, a wrapping weekday grid, sticky actions, and no horizontal overflow.
 
 final result: passed
+
+---
+
+# Regeneration feedback design QA
+
+## Evidence
+
+- Source visual truth: `artifacts/design-qa/regeneration-source-reference.png`
+- Rendered implementation: `artifacts/design-qa/regeneration-success.png`
+- Focused idle state: `artifacts/design-qa/regeneration-idle-button.png`
+- Focused completed state: `artifacts/design-qa/regeneration-success-button.png`
+- Browser viewport: 1280 x 720 CSS pixels at the in-app browser's default density
+- Source pixels: 470 x 182; the Retina-style source was judged at its apparent 2x density
+- Implementation pixels: 1280 x 720 full view, 138 x 44 idle control, and 158 x 44 completed control
+- State: authenticated Week view with an existing schedule proposal
+
+## Comparison
+
+The full view keeps the regeneration control in the source position at the top-right of the
+draft card. The focused comparison confirms that the idle control preserves the existing white
+surface, border, radius, icon, typography, and spacing. The completed state uses the same control
+shape and hierarchy, then adds a restrained mint success treatment, check icon, and short pulse.
+No image assets are present or required for this control.
+
+Important details were readable in the focused captures, so no additional crop was needed.
+
+## Required fidelity surfaces
+
+- Fonts and typography: existing application font, weight, size, and one-line label are preserved.
+- Spacing and layout rhythm: 44px control height and top-right alignment remain stable; the success
+  label grows leftward without moving surrounding content.
+- Colors and visual tokens: the idle state retains the source tokens; progress and completion use
+  existing mint semantic colors with sufficient contrast.
+- Image quality and assets: not applicable; the interface uses the existing Lucide icon set.
+- Copy and content: `Regenerate`, `Regenerating…`, and `Draft updated` clearly describe each state.
+
+## Interaction and accessibility checks
+
+- Clicking Regenerate showed the disabled `Regenerating…` state with a spinning progress icon.
+- Completion showed `Draft updated` with a check and success pulse before returning to idle.
+- The changing label is exposed through `aria-live="polite"`; progress exposes `aria-busy`.
+- The global reduced-motion preference collapses the new animations.
+- The browser console showed no application errors during repeated regeneration.
+
+## Findings
+
+No actionable P0, P1, or P2 differences remain. The completion treatment is intentionally distinct
+from the source idle state while preserving its component design language.
+
+## Comparison history
+
+- Initial implementation: no P0/P1/P2 findings.
+- Post-interaction evidence: confirmed running and completed states, stable layout, accessible copy,
+  and no browser errors; no corrective visual iteration was required.
+
+## Implementation checklist
+
+- [x] Visible progress state
+- [x] Animated completion confirmation
+- [x] Automatic return to the idle label
+- [x] Reduced-motion and accessible status support
+- [x] Desktop browser interaction and console verification
+
+final result: passed
