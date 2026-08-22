@@ -11,21 +11,16 @@ type ClassScheduleStepProps = {
   semester: Semester;
   courses: Course[];
   events: FixedEvent[];
+  timezone: string;
   busy: boolean;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRemove: (id: string) => void;
 };
 
-export function ClassScheduleStep({ semester, courses, events, busy, onSubmit, onRemove }: ClassScheduleStepProps) {
+export function ClassScheduleStep({ semester, courses, events, timezone, busy, onSubmit, onRemove }: ClassScheduleStepProps) {
   const classEvents = events
     .filter((event) => event.category === "class")
-    .sort((left, right) => {
-      const leftStart = new Date(left.start_at);
-      const rightStart = new Date(right.start_at);
-      const leftDay = (leftStart.getDay() + 6) % 7;
-      const rightDay = (rightStart.getDay() + 6) % 7;
-      return leftDay - rightDay || leftStart.getHours() - rightStart.getHours() || leftStart.getMinutes() - rightStart.getMinutes();
-    });
+    .sort((left, right) => eventSortKey(left, timezone).localeCompare(eventSortKey(right, timezone)));
 
   return (
     <>
@@ -37,7 +32,7 @@ export function ClassScheduleStep({ semester, courses, events, busy, onSubmit, o
 
       {classEvents.length ? <section className="class-schedule-list">
         <div className="proposal-section-title"><strong>Weekly classes</strong><small>{classEvents.length} recurring meetings</small></div>
-        {classEvents.map((event) => <article key={event.id}><span><GraduationCap size={17} /></span><div><strong>{event.title}</strong><small>{formatEvent(event)}{event.location ? ` · ${event.location}` : ""}</small></div><button aria-label={`Remove ${event.title}`} type="button" onClick={() => onRemove(event.id)}><Trash2 size={16} /></button></article>)}
+        {classEvents.map((event) => <article key={event.id}><span><GraduationCap size={17} /></span><div><strong>{event.title}</strong><small>{formatEvent(event, timezone)}{event.location ? ` · ${event.location}` : ""}</small></div><button aria-label={`Remove ${event.title}`} type="button" onClick={() => onRemove(event.id)}><Trash2 size={16} /></button></article>)}
       </section> : <div className="class-schedule-empty"><CalendarDays size={21} /><div><strong>No class times added yet</strong><p>Add your lectures, labs, or tutorials below. Asynchronous courses can be left without a fixed time.</p></div></div>}
 
       <form className="onboarding-form class-schedule-form" onSubmit={onSubmit}>
@@ -56,10 +51,6 @@ export function ClassScheduleStep({ semester, courses, events, busy, onSubmit, o
           <label><span>Ends</span><input name="end_time" type="time" required /></label>
         </div>
         <label><span>Location <small>Optional</small></span><input name="location" placeholder="ECS 125 or online" /></label>
-        <div className="form-row">
-          <label><span>Travel before</span><select name="commute_before" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label>
-          <label><span>Travel after</span><select name="commute_after" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label>
-        </div>
         <button className="secondary-button form-submit" disabled={busy || !courses.length} type="submit"><Plus size={17} /> Add weekly classes</button>
       </form>
 
@@ -68,11 +59,24 @@ export function ClassScheduleStep({ semester, courses, events, busy, onSubmit, o
   );
 }
 
-function formatEvent(event: FixedEvent) {
+function formatEvent(event: FixedEvent, timezone: string) {
   const starts = new Date(event.start_at);
   const ends = new Date(event.end_at);
-  const day = starts.toLocaleDateString("en-CA", { weekday: "long" });
-  const start = starts.toLocaleTimeString("en-CA", { hour: "numeric", minute: "2-digit" });
-  const end = ends.toLocaleTimeString("en-CA", { hour: "numeric", minute: "2-digit" });
+  const day = starts.toLocaleDateString("en-CA", { weekday: "long", timeZone: timezone });
+  const start = starts.toLocaleTimeString("en-CA", { hour: "numeric", minute: "2-digit", timeZone: timezone });
+  const end = ends.toLocaleTimeString("en-CA", { hour: "numeric", minute: "2-digit", timeZone: timezone });
   return `${day} · ${start}–${end}${event.recurrence_rule ? " · Weekly" : ""}`;
+}
+
+function eventSortKey(event: FixedEvent, timezone: string) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    weekday: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: timezone,
+  }).formatToParts(new Date(event.start_at));
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  const day = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].indexOf(value("weekday"));
+  return `${String(day).padStart(2, "0")}:${value("hour")}:${value("minute")}`;
 }

@@ -85,3 +85,69 @@ def test_undated_work_is_reported_without_an_invented_deadline(client: TestClien
     proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
     assert proposal["blocks"] == []
     assert "no confirmed deadline" in proposal["generation_summary"]["warnings"][0]
+
+
+def test_weekly_flexible_commitment_is_proposed_as_commitment_time(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    response = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Gym",
+            "semester_id": semester["id"],
+            "category": "gym",
+            "start_date": semester["start_date"],
+            "planning_kind": "flexible_commitment",
+            "schedule_rule": {"cadence": "weekly", "target_minutes": 180},
+        },
+    )
+    assert response.status_code == 201
+    flexible = response.json()
+    assert flexible["preferred_weekly_minutes"] == 180
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert proposal["generation_summary"]["requested_minutes"] == 360
+    assert proposal["generation_summary"]["scheduled_minutes"] == 360
+    assert {block["block_type"] for block in proposal["blocks"]} == {"commitment"}
+    assert {block["goal_id"] for block in proposal["blocks"]} == {flexible["id"]}
+    assert client.get(f"/api/v1/semesters/{semester['id']}/schedule").json() is None
+
+
+def test_selected_day_flexible_commitment_reports_one_aggregate_shortfall(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    response = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Weekend practice",
+            "semester_id": semester["id"],
+            "category": "personal",
+            "start_date": semester["start_date"],
+            "planning_kind": "flexible_commitment",
+            "schedule_rule": {
+                "cadence": "selected_days",
+                "target_minutes": 60,
+                "days_of_week": [5],
+            },
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["preferred_weekly_minutes"] == 60
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert proposal["generation_summary"]["requested_minutes"] == 120
+    assert proposal["generation_summary"]["scheduled_minutes"] == 0
+    assert len(proposal["generation_summary"]["unscheduled"]) == 1
+    unresolved = proposal["generation_summary"]["unscheduled"][0]
+    assert unresolved["name"] == "Weekend practice"
+    assert unresolved["requested_minutes"] == 120
+    assert unresolved["remaining_minutes"] == 120
+    assert "2026-09-05" in unresolved["reason"]

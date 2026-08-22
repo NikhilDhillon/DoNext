@@ -184,11 +184,18 @@ def generate_proposal(
         timezone,
     )
     items, item_links, warnings = _scheduling_items(
-        db, current_user.id, semester, horizon_start, horizon_end, preserved
+        db,
+        current_user.id,
+        semester,
+        horizon_start,
+        horizon_end,
+        preserved,
+        preferences.preferred_session_minutes,
+        timezone,
     )
     result = solve_schedule(items, windows, preferences.minimum_break_minutes)
     for placement in result.placements:
-        task_id, goal_id = item_links[placement.item_id]
+        task_id, goal_id, block_type = item_links[placement.item_id]
         db.add(
             ScheduledBlock(
                 schedule_version_id=proposal.id,
@@ -198,7 +205,7 @@ def generate_proposal(
                 title=placement.title,
                 start_at=placement.start_at,
                 end_at=placement.end_at,
-                block_type="goal" if goal_id else "focus",
+                block_type=block_type,
                 locked=False,
                 source="generated",
                 stability_weight=0.5,
@@ -207,16 +214,7 @@ def generate_proposal(
             )
         )
     scheduled_total = sum(result.scheduled_minutes.values())
-    unscheduled = [
-        {
-            "id": item.id,
-            "name": item.title,
-            "remaining_minutes": item.target_minutes - result.scheduled_minutes[item.id],
-            "reason": "Not enough eligible capacity inside this proposal.",
-        }
-        for item in items
-        if result.scheduled_minutes[item.id] < item.target_minutes
-    ]
+    unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links)
     if result.timed_out:
         warnings.append(
             "The solver reached its time limit; this feasible draft may not be optimal."
@@ -528,7 +526,13 @@ def _scheduling_items(
     horizon_start: date,
     horizon_end: date,
     preserved: list[ScheduledBlock],
-) -> tuple[list[SchedulingItem], dict[str, tuple[uuid.UUID | None, uuid.UUID | None]], list[str]]:
+    preferred_session_minutes: int,
+    timezone: ZoneInfo,
+) -> tuple[
+    list[SchedulingItem],
+    dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
+    list[str],
+]:
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
     course_ids = {course.id for course in courses}
     goals = list(
@@ -550,13 +554,23 @@ def _scheduling_items(
         )
     )
     preserved_minutes: dict[uuid.UUID, int] = {}
+    preserved_goal_minutes: dict[uuid.UUID, int] = {}
+    preserved_goal_minutes_by_date: dict[tuple[uuid.UUID, date], int] = {}
     for block in preserved:
+        minutes = round((block.end_at - block.start_at).total_seconds() / 60)
         if block.task_id:
-            preserved_minutes[block.task_id] = preserved_minutes.get(block.task_id, 0) + round(
-                (block.end_at - block.start_at).total_seconds() / 60
+            preserved_minutes[block.task_id] = preserved_minutes.get(block.task_id, 0) + minutes
+        if block.goal_id:
+            preserved_goal_minutes[block.goal_id] = (
+                preserved_goal_minutes.get(block.goal_id, 0) + minutes
+            )
+            local_date = aware(block.start_at).astimezone(timezone).date()
+            key = (block.goal_id, local_date)
+            preserved_goal_minutes_by_date[key] = (
+                preserved_goal_minutes_by_date.get(key, 0) + minutes
             )
     items: list[SchedulingItem] = []
-    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None]] = {}
+    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
     for task in tasks:
         if task.course_id not in course_ids and task.goal_id not in goal_ids:
@@ -590,12 +604,70 @@ def _scheduling_items(
                 task.intensity.value,
             )
         )
-        links[identifier] = (task.id, None)
+        links[identifier] = (task.id, None, "focus")
     for goal in goals:
         if goal.id not in goal_ids:
             continue
+        if goal.planning_kind == "flexible_commitment":
+            rule = goal.schedule_rule or {}
+            cadence = rule.get("cadence")
+            target_minutes = rule.get("target_minutes")
+            if not isinstance(target_minutes, int) or target_minutes <= 0:
+                warnings.append(f'"{goal.name}" has an invalid flexible schedule target.')
+                continue
+            if cadence == "weekly":
+                flexible_dates: list[date | None] = [None]
+                targets = [max(target_minutes * 2 - preserved_goal_minutes.get(goal.id, 0), 0)]
+            elif cadence == "selected_days":
+                selected_days = rule.get("days_of_week")
+                if not isinstance(selected_days, list):
+                    warnings.append(f'"{goal.name}" has no selected scheduling days.')
+                    continue
+                matching_dates = [
+                    horizon_start + timedelta(days=offset)
+                    for offset in range((horizon_end - horizon_start).days + 1)
+                    if (horizon_start + timedelta(days=offset)).weekday() in selected_days
+                ]
+                flexible_dates = list(matching_dates)
+                targets = [
+                    max(
+                        target_minutes
+                        - preserved_goal_minutes_by_date.get((goal.id, matching_date), 0),
+                        0,
+                    )
+                    for matching_date in matching_dates
+                ]
+            else:
+                warnings.append(f'"{goal.name}" has an unsupported flexible schedule rule.')
+                continue
+            for eligible_date, target in zip(flexible_dates, targets, strict=True):
+                if target <= 0:
+                    continue
+                suffix = f":{eligible_date.isoformat()}" if eligible_date else ""
+                identifier = f"flex:{goal.id}{suffix}"
+                items.append(
+                    SchedulingItem(
+                        identifier,
+                        goal.name,
+                        target,
+                        min(15, preferred_session_minutes),
+                        preferred_session_minutes,
+                        max(120, preferred_session_minutes),
+                        PRIORITY_RANK[goal.priority.value],
+                        "moderate",
+                        "flexible_commitment",
+                        frozenset({eligible_date}) if eligible_date else None,
+                    )
+                )
+                links[identifier] = (None, goal.id, "commitment")
+            continue
         identifier = f"goal:{goal.id}"
-        target = goal.preferred_weekly_minutes * 2
+        target = max(
+            goal.preferred_weekly_minutes * 2 - preserved_goal_minutes.get(goal.id, 0),
+            0,
+        )
+        if target <= 0:
+            continue
         items.append(
             SchedulingItem(
                 identifier,
@@ -609,8 +681,60 @@ def _scheduling_items(
                 "goal",
             )
         )
-        links[identifier] = (None, goal.id)
+        links[identifier] = (None, goal.id, "goal")
     return items, links, warnings
+
+
+def _unscheduled_summary(
+    items: list[SchedulingItem],
+    scheduled_minutes: dict[str, int],
+    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
+) -> list[dict[str, object]]:
+    unresolved: list[dict[str, object]] = []
+    flexible: dict[uuid.UUID, dict[str, object]] = {}
+    for item in items:
+        scheduled = scheduled_minutes[item.id]
+        remaining = item.target_minutes - scheduled
+        _, goal_id, block_type = links[item.id]
+        if block_type == "commitment" and goal_id is not None:
+            entry = flexible.setdefault(
+                goal_id,
+                {
+                    "id": f"flex:{goal_id}",
+                    "name": item.title,
+                    "requested_minutes": 0,
+                    "scheduled_minutes": 0,
+                    "remaining_minutes": 0,
+                    "dates": [],
+                },
+            )
+            entry["requested_minutes"] = cast(int, entry["requested_minutes"]) + item.target_minutes
+            entry["scheduled_minutes"] = cast(int, entry["scheduled_minutes"]) + scheduled
+            entry["remaining_minutes"] = cast(int, entry["remaining_minutes"]) + remaining
+            if remaining > 0 and item.eligible_dates:
+                dates = cast(list[str], entry["dates"])
+                dates.extend(value.isoformat() for value in sorted(item.eligible_dates))
+            continue
+        if remaining > 0:
+            unresolved.append(
+                {
+                    "id": item.id,
+                    "name": item.title,
+                    "remaining_minutes": remaining,
+                    "reason": "Not enough eligible capacity inside this proposal.",
+                }
+            )
+    for entry in flexible.values():
+        dates = cast(list[str], entry.pop("dates"))
+        if cast(int, entry["remaining_minutes"]) <= 0:
+            continue
+        entry["reason"] = (
+            f"Not enough eligible capacity on {', '.join(dates)}."
+            if dates
+            else "Not enough eligible capacity inside this proposal."
+        )
+        unresolved.append(entry)
+    return unresolved
 
 
 def _record_edit(proposal: ScheduleVersion) -> None:

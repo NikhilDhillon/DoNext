@@ -1,5 +1,7 @@
 import json
 import uuid
+from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 from sqlalchemy import delete, select, update
@@ -18,6 +20,7 @@ from donext.models import (
     Priority,
     Task,
 )
+from donext.planning import aware, resolve_timezone
 from donext.routers.courses import owned_course
 from donext.routers.semesters import owned_semester
 from donext.schemas import (
@@ -27,6 +30,7 @@ from donext.schemas import (
     AssessmentGroupRead,
     CourseGradingRead,
     CourseGradingReplace,
+    CourseMeetingImport,
     CourseOutlineImport,
     CourseOutlineImportRead,
     CourseRead,
@@ -349,10 +353,12 @@ def replace_course_grading(
     return _grading_read(db, course_id)
 
 
-def _event_key(event: FixedEvent | FixedEventCreate) -> tuple[str, int, int, int, int, int]:
+def _event_key(
+    event: FixedEvent | FixedEventCreate, timezone: ZoneInfo
+) -> tuple[str, int, int, int, int, int]:
     title = event.title.strip().casefold()
-    start_at = event.start_at
-    end_at = event.end_at
+    start_at = aware(event.start_at).astimezone(timezone)
+    end_at = aware(event.end_at).astimezone(timezone)
     return (
         title,
         start_at.weekday(),
@@ -360,6 +366,36 @@ def _event_key(event: FixedEvent | FixedEventCreate) -> tuple[str, int, int, int
         start_at.minute,
         end_at.hour,
         end_at.minute,
+    )
+
+
+def _meeting_event(
+    meeting: CourseMeetingImport,
+    semester_id: uuid.UUID,
+    semester_start: date,
+    semester_end: date,
+    timezone: ZoneInfo,
+) -> FixedEventCreate:
+    first_date = semester_start + timedelta(
+        days=(meeting.day_of_week - semester_start.weekday()) % 7
+    )
+    start_at = datetime.combine(first_date, meeting.start_time, tzinfo=timezone)
+    end_at = datetime.combine(first_date, meeting.end_time, tzinfo=timezone)
+    until = datetime.combine(semester_end, time.max, tzinfo=timezone).astimezone(UTC)
+    return FixedEventCreate(
+        title=meeting.title,
+        semester_id=semester_id,
+        category="class",
+        start_at=start_at,
+        end_at=end_at,
+        recurrence_rule=(
+            f"FREQ=WEEKLY;BYDAY={('MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU')[meeting.day_of_week]};"
+            f"UNTIL={until.strftime('%Y%m%dT%H%M%SZ')}"
+        ),
+        location=meeting.location,
+        commute_before_minutes=0,
+        commute_after_minutes=0,
+        locked=True,
     )
 
 
@@ -373,7 +409,8 @@ def import_course_outline(
     db: DbSession,
     current_user: CurrentUser,
 ) -> CourseOutlineImportRead:
-    owned_semester(db, current_user.id, semester_id)
+    semester = owned_semester(db, current_user.id, semester_id)
+    timezone = resolve_timezone(current_user.timezone)
     normalized_code = payload.course.code.replace(" ", "").upper()
     existing_course = next(
         (
@@ -414,19 +451,32 @@ def import_course_outline(
             )
         )
     )
-    existing_keys = {_event_key(event) for event in existing_events}
+    existing_keys = {_event_key(event, timezone) for event in existing_events}
     meetings_created = 0
-    for meeting in payload.meetings:
+    meetings = [
+        *payload.meetings,
+        *(
+            _meeting_event(
+                meeting,
+                semester_id,
+                semester.start_date,
+                semester.end_date,
+                timezone,
+            )
+            for meeting in payload.meeting_proposals
+        ),
+    ]
+    for meeting in meetings:
         if meeting.semester_id != semester_id or meeting.category != "class":
             raise ApiError(
                 "VALIDATION_ERROR",
                 "Imported meetings must be classes in the selected semester.",
                 422,
             )
-        if _event_key(meeting) in existing_keys:
+        if _event_key(meeting, timezone) in existing_keys:
             continue
         db.add(FixedEvent(user_id=current_user.id, **meeting.model_dump()))
-        existing_keys.add(_event_key(meeting))
+        existing_keys.add(_event_key(meeting, timezone))
         meetings_created += 1
 
     db.commit()

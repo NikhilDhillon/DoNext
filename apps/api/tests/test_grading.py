@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from test_api import create_semester, register
@@ -183,8 +184,8 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
                 "title": "CSC 349A lecture",
                 "semester_id": semester["id"],
                 "category": "class",
-                "start_at": "2026-09-07T10:00:00-07:00",
-                "end_at": "2026-09-07T11:20:00-07:00",
+                "start_at": "2026-09-07T17:00:00Z",
+                "end_at": "2026-09-07T18:20:00Z",
                 "recurrence_rule": "FREQ=WEEKLY;BYDAY=MO",
             }
         ],
@@ -206,6 +207,18 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
 
     payload["replace_existing"] = True
     payload["course"]["name"] = "Numerical Methods"  # type: ignore[index]
+    payload["meetings"] = []
+    payload["meeting_proposals"] = [
+        {
+            "title": "CSC 349A lecture",
+            "day_of_week": 0,
+            "start_time": "10:00:00",
+            "end_time": "11:20:00",
+            "location": None,
+            "confidence": 0.97,
+            "source_text": "A01 | Lecture | Monday | 10:00-11:20",
+        }
+    ]
     updated = client.post(
         f"/api/v1/semesters/{semester['id']}/courses/import-outline", json=payload
     )
@@ -213,6 +226,9 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
     assert updated.json()["updated_existing"] is True
     assert updated.json()["course"]["name"] == "Numerical Methods"
     assert updated.json()["meetings_created"] == 0
+    events = client.get("/api/v1/events").json()
+    assert len(events) == 1
+    assert events[0]["start_at"].startswith("2026-09-07T17:00:00")
 
     invalid_payload = {
         **payload,
@@ -228,6 +244,43 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
     assert failed.status_code == 422
     courses = client.get(f"/api/v1/semesters/{semester['id']}/courses").json()
     assert {course["code"] for course in courses} == {"CSC 349A"}
+
+
+def test_outline_meeting_proposals_use_the_account_timezone(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    deadline = datetime.now(UTC) + timedelta(days=10)
+    response = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline",
+        json={
+            "course": {"code": "CSC 370", "name": "Database Systems"},
+            "grading": grading_payload(deadline),
+            "meeting_proposals": [
+                {
+                    "title": "CSC 370 lecture",
+                    "day_of_week": 0,
+                    "start_time": "12:30:00",
+                    "end_time": "14:20:00",
+                    "location": "MAC D283",
+                    "confidence": 0.97,
+                    "source_text": "A01 | Lecture | M | 12:30-14:20 | MAC D283",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["meetings_created"] == 1
+    events = client.get("/api/v1/events").json()
+    assert len(events) == 1
+    start_at = datetime.fromisoformat(events[0]["start_at"])
+    end_at = datetime.fromisoformat(events[0]["end_at"])
+    if start_at.tzinfo is not None:
+        start_at = start_at.astimezone(ZoneInfo("America/Vancouver"))
+        end_at = end_at.astimezone(ZoneInfo("America/Vancouver"))
+    assert (start_at.weekday(), start_at.hour, start_at.minute) == (0, 12, 30)
+    assert (end_at.hour, end_at.minute) == (14, 20)
+    assert events[0]["recurrence_rule"].startswith("FREQ=WEEKLY;BYDAY=MO;UNTIL=")
 
 
 def test_academic_items_are_user_scoped(client: TestClient) -> None:

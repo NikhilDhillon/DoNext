@@ -27,6 +27,7 @@ import { ClassScheduleStep } from "@/components/class-schedule-step";
 import { CourseOutlineStep } from "@/components/course-outline-step";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
+import { zonedDateTimeToIso } from "@/lib/date-time";
 import type {
   AvailabilityWindow,
   Course,
@@ -36,6 +37,7 @@ import type {
   OutlineExtraction,
   PlanningTask,
   Preferences,
+  ScheduleProposal,
   Semester,
   User,
 } from "@/lib/types";
@@ -44,14 +46,24 @@ const steps = [
   { label: "Semester", icon: GraduationCap },
   { label: "Course outlines", icon: FileText },
   { label: "Class schedule", icon: CalendarCheck },
-  { label: "Commitments", icon: CalendarCheck },
-  { label: "Goals", icon: Flag },
+  { label: "Commitments & goals", icon: Flag },
   { label: "Boundaries", icon: MoonStar },
   { label: "Review", icon: CheckCircle2 },
 ];
 
 const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const rruleDays = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
+const commitmentDurations = [
+  ["30", "30 min"],
+  ["45", "45 min"],
+  ["60", "1 hour"],
+  ["75", "1h 15m"],
+  ["90", "1h 30m"],
+  ["120", "2 hours"],
+  ["180", "3 hours"],
+  ["240", "4 hours"],
+  ["480", "8 hours"],
+] as const;
 
 export function OnboardingWizard() {
   const router = useRouter();
@@ -72,6 +84,7 @@ export function OnboardingWizard() {
   const [step, setStep] = useState(0);
   const [furthestStep, setFurthestStep] = useState(0);
   const [editingSemester, setEditingSemester] = useState(false);
+  const [outlineReviewActive, setOutlineReviewActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
 
@@ -198,22 +211,6 @@ export function OnboardingWizard() {
       const existingCourse = courses.data?.find(
         (item) => normalizeCourseCode(item.code) === normalizeCourseCode(courseCode),
       );
-      const meetings = proposal.meetings.map((meeting) => {
-        const firstDate = firstDayInSemester(currentSemester.start_date, meeting.day_of_week);
-        return {
-          title: meeting.title,
-          semester_id: currentSemester.id,
-          category: "class",
-          start_at: new Date(`${firstDate}T${meeting.start_time}`).toISOString(),
-          end_at: new Date(`${firstDate}T${meeting.end_time}`).toISOString(),
-          recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[meeting.day_of_week]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
-          location: meeting.location,
-          commute_before_minutes: 0,
-          commute_after_minutes: 0,
-          locked: true,
-        };
-      });
-
       await apiRequest<CourseOutlineImportResult>(
         `/semesters/${currentSemester.id}/courses/import-outline`, {
         method: "POST",
@@ -246,7 +243,7 @@ export function OnboardingWizard() {
             })),
             schemes: proposal.schemes,
           },
-          meetings,
+          meeting_proposals: proposal.meetings,
           replace_existing: Boolean(existingCourse),
         }),
       });
@@ -269,6 +266,7 @@ export function OnboardingWizard() {
     if (!course) return;
     const startTime = String(form.get("start_time"));
     const endTime = String(form.get("end_time"));
+    const timezone = user.data?.timezone ?? "UTC";
     if (endTime <= startTime) {
       setActionError("Class end time must be later than its start time.");
       return;
@@ -282,12 +280,12 @@ export function OnboardingWizard() {
             title: `${course.code} ${String(form.get("meeting_type"))}`,
             semester_id: currentSemester.id,
             category: "class",
-            start_at: new Date(`${firstDate}T${startTime}:00`).toISOString(),
-            end_at: new Date(`${firstDate}T${endTime}:00`).toISOString(),
+            start_at: zonedDateTimeToIso(firstDate, `${startTime}:00`, timezone),
+            end_at: zonedDateTimeToIso(firstDate, `${endTime}:00`, timezone),
             recurrence_rule: `FREQ=WEEKLY;BYDAY=${rruleDays[day]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z`,
             location: form.get("location") || null,
-            commute_before_minutes: Number(form.get("commute_before")),
-            commute_after_minutes: Number(form.get("commute_after")),
+            commute_before_minutes: 0,
+            commute_after_minutes: 0,
             locked: true,
           }),
         });
@@ -297,60 +295,84 @@ export function OnboardingWizard() {
     });
   }
 
-  async function createCommitment(event: FormEvent<HTMLFormElement>) {
+  async function createLifeItem(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!currentSemester) return;
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const day = Number(form.get("day"));
-    const firstDate = firstDayInSemester(currentSemester.start_date, day);
-    const start = new Date(`${firstDate}T${String(form.get("start_time"))}:00`);
-    const end = new Date(start.getTime() + Number(form.get("duration")) * 60_000);
+    const planningMode = form.get("planning_mode");
+    if (planningMode === "flexible") {
+      const cadence = form.get("schedule_cadence");
+      const targetMinutes = Math.round(Number(form.get("flexible_hours")) * 60);
+      const selectedFlexibleDays = days.flatMap((_, index) => form.get(`flexible_day_${index}`) === "on" ? [index] : []);
+      if (!targetMinutes || targetMinutes <= 0 || targetMinutes % 15 !== 0) {
+        setActionError("Enter flexible time in 15-minute increments.");
+        return;
+      }
+      if (cadence === "selected_days" && !selectedFlexibleDays.length) {
+        setActionError("Select at least one day for this flexible commitment.");
+        return;
+      }
+      await perform(async () => {
+        await apiRequest<Goal>("/goals", {
+          method: "POST",
+          body: JSON.stringify({
+            name: form.get("title"),
+            semester_id: currentSemester.id,
+            category: form.get("category"),
+            priority: form.get("priority"),
+            start_date: currentSemester.start_date,
+            planning_kind: "flexible_commitment",
+            schedule_rule: cadence === "selected_days"
+              ? { cadence: "selected_days", target_minutes: targetMinutes, days_of_week: selectedFlexibleDays }
+              : { cadence: "weekly", target_minutes: targetMinutes },
+          }),
+        });
+        formElement.reset();
+        await goals.reload();
+      });
+      return;
+    }
+    const selectedDays = days.flatMap((_, index) => form.get(`commitment_day_${index}`) === "on" ? [index] : []);
+    if (!selectedDays.length) {
+      setActionError("Select at least one day for this commitment.");
+      return;
+    }
+    const schedules = selectedDays.map((day) => ({
+      day,
+      startTime: String(form.get(`commitment_start_${day}`) ?? ""),
+      durationMinutes: Number(form.get(`commitment_duration_${day}`)),
+    }));
+    if (schedules.some((schedule) => !schedule.startTime || !schedule.durationMinutes)) {
+      setActionError("Add a start time and duration for every selected day.");
+      return;
+    }
+    const timezone = user.data?.timezone ?? "UTC";
     const repeats = form.get("repeats") === "on";
     await perform(async () => {
-      await apiRequest<FixedEvent>("/events", {
-        method: "POST",
-        body: JSON.stringify({
-          title: form.get("title"),
-          semester_id: currentSemester.id,
-          category: form.get("category"),
-          start_at: start.toISOString(),
-          end_at: end.toISOString(),
-          recurrence_rule: repeats ? `FREQ=WEEKLY;BYDAY=${rruleDays[day]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z` : null,
-          location: form.get("location") || null,
-          commute_before_minutes: Number(form.get("commute_before")),
-          commute_after_minutes: Number(form.get("commute_after")),
-          locked: true,
-        }),
-      });
+      await Promise.all(schedules.map(({ day, startTime, durationMinutes }) => {
+        const firstDate = firstDayInSemester(currentSemester.start_date, day);
+        const start = new Date(zonedDateTimeToIso(firstDate, `${startTime}:00`, timezone));
+        const end = new Date(start.getTime() + durationMinutes * 60_000);
+        return apiRequest<FixedEvent>("/events", {
+          method: "POST",
+          body: JSON.stringify({
+            title: form.get("title"),
+            semester_id: currentSemester.id,
+            category: form.get("category"),
+            priority: form.get("priority"),
+            start_at: start.toISOString(),
+            end_at: end.toISOString(),
+            recurrence_rule: repeats ? `FREQ=WEEKLY;BYDAY=${rruleDays[day]};UNTIL=${currentSemester.end_date.replaceAll("-", "")}T235959Z` : null,
+            location: form.get("location") || null,
+            commute_before_minutes: 0,
+            commute_after_minutes: 0,
+            locked: true,
+          }),
+        });
+      }));
       formElement.reset();
       await events.reload();
-    });
-  }
-
-  async function createGoal(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const formElement = event.currentTarget;
-    const form = new FormData(formElement);
-    const preferred = Number(form.get("weekly_minutes"));
-    await perform(async () => {
-      await apiRequest<Goal>("/goals", {
-        method: "POST",
-        body: JSON.stringify({
-          name: form.get("name"),
-          category: form.get("category"),
-          priority: form.get("priority"),
-          start_date: currentSemester?.start_date ?? new Date().toISOString().slice(0, 10),
-          target_description: form.get("target_description") || null,
-          minimum_weekly_minutes: Math.min(30, preferred),
-          preferred_weekly_minutes: preferred,
-          maximum_weekly_minutes: preferred * 2,
-          maintenance_weekly_minutes: Math.min(25, preferred),
-          reducible_during_busy_weeks: true,
-        }),
-      });
-      formElement.reset();
-      await goals.reload();
     });
   }
 
@@ -394,9 +416,16 @@ export function OnboardingWizard() {
   }
 
   async function finish() {
+    if (!currentSemester) {
+      setActionError("Add a semester before creating your first schedule draft.");
+      return;
+    }
     await perform(async () => {
+      await apiRequest<ScheduleProposal>(`/semesters/${currentSemester.id}/schedule/proposals`, {
+        method: "POST",
+      });
       await apiRequest<User>("/auth/onboarding/complete", { method: "POST" });
-      router.replace("/today");
+      router.replace("/week");
       router.refresh();
     });
   }
@@ -427,19 +456,18 @@ export function OnboardingWizard() {
       <section className="onboarding-main">
         <header className="onboarding-mobile-header"><Brand /><span>{step + 1} / {steps.length}</span></header>
         <div className="onboarding-progress"><span style={{ width: `${((step + 1) / steps.length) * 100}%` }} /></div>
-        <div className="onboarding-content">
+        <div className={`onboarding-content${step === 1 && outlineReviewActive ? " review-queue-content" : ""}`}>
           {step === 0 ? <SemesterStep semester={currentSemester} editing={editingSemester} onSubmit={saveSemester} /> : null}
-          {step === 1 && currentSemester ? <CourseOutlineStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} busy={busy} onImport={importOutline} onCreateCourse={createCourse} onCreateItem={createOutlineItem} onRemoveCourse={(id) => void remove(`/courses/${id}`, courses.reload)} onRemoveItem={(id) => void remove(`/tasks/${id}`, tasks.reload)} /> : null}
-          {step === 2 && currentSemester ? <ClassScheduleStep semester={currentSemester} courses={courses.data ?? []} events={events.data ?? []} busy={busy} onSubmit={createClassSchedule} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
-          {step === 3 ? <CommitmentsStep events={events.data ?? []} busy={busy} onSubmit={createCommitment} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
-          {step === 4 ? <GoalsStep goals={goals.data ?? []} busy={busy} onSubmit={createGoal} onRemove={(id) => void remove(`/goals/${id}`, goals.reload)} /> : null}
-          {step === 5 && preferences.data ? <BoundariesStep preferences={preferences.data} availability={availability.data ?? []} busy={busy} onSubmit={saveBoundaries} /> : null}
-          {step === 6 ? <ReviewStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} events={events.data ?? []} goals={goals.data ?? []} preferences={preferences.data} busy={busy} onFinish={() => void finish()} /> : null}
+          {step === 1 && currentSemester ? <CourseOutlineStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} busy={busy} onImport={importOutline} onCreateCourse={createCourse} onCreateItem={createOutlineItem} onRemoveCourse={(id) => void remove(`/courses/${id}`, courses.reload)} onRemoveItem={(id) => void remove(`/tasks/${id}`, tasks.reload)} onReviewActiveChange={setOutlineReviewActive} /> : null}
+          {step === 2 && currentSemester ? <ClassScheduleStep semester={currentSemester} courses={courses.data ?? []} events={events.data ?? []} timezone={user.data?.timezone ?? "UTC"} busy={busy} onSubmit={createClassSchedule} onRemove={(id) => void remove(`/events/${id}`, events.reload)} /> : null}
+          {step === 3 ? <CommitmentsAndGoalsStep events={events.data ?? []} goals={goals.data ?? []} busy={busy} onSubmit={createLifeItem} onRemoveEvent={(id) => void remove(`/events/${id}`, events.reload)} onRemoveGoal={(id) => void remove(`/goals/${id}`, goals.reload)} /> : null}
+          {step === 4 && preferences.data ? <BoundariesStep preferences={preferences.data} availability={availability.data ?? []} busy={busy} onSubmit={saveBoundaries} /> : null}
+          {step === 5 ? <ReviewStep semester={currentSemester} courses={courses.data ?? []} tasks={tasks.data ?? []} events={events.data ?? []} goals={goals.data ?? []} preferences={preferences.data} busy={busy} onFinish={() => void finish()} /> : null}
 
           {actionError ? <p className="onboarding-error" role="alert">{actionError}</p> : null}
-          {step !== 5 && step !== 6 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy || (step === 0 && !currentSemester)} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy} form={semesterFormVisible ? "semester-form" : undefined} type={semesterFormVisible ? "submit" : "button"} onClick={semesterFormVisible ? undefined : advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
-          {step === 5 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
-          {step === 6 ? <div className="onboarding-actions review-back"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
+          {step !== 4 && step !== 5 && !(step === 1 && outlineReviewActive) ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy || (step === 0 && !currentSemester)} type="button" onClick={back}><ArrowLeft size={17} /> Back</button><button className="primary-button" disabled={busy} form={semesterFormVisible ? "semester-form" : undefined} type={semesterFormVisible ? "submit" : "button"} onClick={semesterFormVisible ? undefined : advance}>{step >= 2 ? "Save and continue" : "Continue"}<ArrowRight size={17} /></button></div> : null}
+          {step === 4 ? <div className="onboarding-actions"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
+          {step === 5 ? <div className="onboarding-actions review-back"><button className="secondary-button" disabled={busy} type="button" onClick={back}><ArrowLeft size={17} /> Back</button></div> : null}
         </div>
       </section>
     </main>
@@ -455,13 +483,94 @@ function SemesterStep({ semester, editing, onSubmit }: { semester: Semester | nu
   return <><StepHeading eyebrow="Start with the calendar" title="When does this semester run?" copy="DoNext uses the term dates to understand what belongs in this planning season." /><form className="onboarding-form" id="semester-form" onSubmit={onSubmit}><label><span>Semester name</span><input name="name" defaultValue={semester?.name} placeholder="Fall 2026" required /></label><div className="form-row"><label><span>First day</span><input name="start_date" type="date" defaultValue={semester?.start_date} required /></label><label><span>Last day</span><input name="end_date" type="date" defaultValue={semester?.end_date} required /></label></div></form></>;
 }
 
-function CommitmentsStep({ events, busy, onSubmit, onRemove }: { events: FixedEvent[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
+function CommitmentsAndGoalsStep({ events, goals, busy, onSubmit, onRemoveEvent, onRemoveGoal }: { events: FixedEvent[]; goals: Goal[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemoveEvent: (id: string) => void; onRemoveGoal: (id: string) => void }) {
   const commitments = events.filter((event) => event.category !== "class");
-  return <><StepHeading eyebrow="The rest of your week" title="What else is already spoken for?" copy="Add work shifts, gym sessions, appointments, clubs, or anything else DoNext must plan around." optional /><div className="commitment-examples"><span><BriefcaseBusiness size={16} /> Work</span><span><Dumbbell size={16} /> Gym</span><span><Clock3 size={16} /> Appointments</span><span><Plus size={16} /> Anything else</span></div><ItemList>{commitments.map((item) => <SavedItem key={item.id} icon={<Clock3 size={18} />} title={item.title} detail={`${capitalize(item.category)} · ${formatEventTime(item.start_at)}${item.recurrence_rule ? " · Weekly" : ""}`} onRemove={() => onRemove(item.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><div className="form-row"><label><span>Commitment</span><input name="title" placeholder="Gym session" required /></label><label><span>Type</span><select name="category" defaultValue="work"><option value="work">Work</option><option value="gym">Gym</option><option value="commute">Commute</option><option value="appointment">Appointment</option><option value="club">Club or team</option><option value="personal">Personal</option><option value="other">Anything else</option></select></label></div><div className="form-row three-columns"><label><span>Day</span><select name="day" defaultValue="0">{days.map((day, index) => <option key={day} value={index}>{day}</option>)}</select></label><label><span>Starts</span><input name="start_time" type="time" required /></label><label><span>Duration</span><select name="duration" defaultValue="60"><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option><option value="75">1h 15m</option><option value="90">1h 30m</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option><option value="480">8 hours</option></select></label></div><label><span>Location <small>Optional</small></span><input name="location" placeholder="Campus gym" /></label><div className="form-row"><label><span>Travel before</span><select name="commute_before" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label><label><span>Travel after</span><select name="commute_after" defaultValue="0"><option value="0">None</option><option value="10">10 min</option><option value="15">15 min</option><option value="30">30 min</option><option value="45">45 min</option><option value="60">1 hour</option></select></label></div><label className="checkbox-field"><input name="repeats" type="checkbox" defaultChecked /><span><strong>Repeat every week</strong><small>DoNext will protect this time through the semester.</small></span></label><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add commitment</button></form></>;
-}
+  const flexibleCommitments = goals.filter((goal) => goal.planning_kind === "flexible_commitment");
+  const personalGoals = goals.filter((goal) => goal.planning_kind === "goal");
+  const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [planningMode, setPlanningMode] = useState<"manual" | "flexible">("manual");
+  const [cadence, setCadence] = useState<"weekly" | "selected_days">("weekly");
+  const [flexibleDays, setFlexibleDays] = useState<number[]>([]);
 
-function GoalsStep({ goals, busy, onSubmit, onRemove }: { goals: Goal[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onRemove: (id: string) => void }) {
-  return <><StepHeading eyebrow="Beyond obligations" title="What do you want to keep moving?" copy="Goals give personal priorities a real place in the plan instead of leaving them for whatever time remains." optional /><ItemList>{goals.map((goal) => <SavedItem key={goal.id} icon={<Flag size={18} />} title={goal.name} detail={`${capitalize(goal.category)} · ${formatMinutes(goal.preferred_weekly_minutes)} preferred weekly`} onRemove={() => onRemove(goal.id)} />)}</ItemList><form className="onboarding-form compact-form" onSubmit={onSubmit}><label><span>Goal</span><input name="name" placeholder="Practice conversational French" required /></label><div className="form-row"><label><span>Category</span><select name="category" defaultValue="personal"><option value="health">Health</option><option value="career">Career</option><option value="creative">Creative</option><option value="learning">Learning</option><option value="personal">Personal</option></select></label><label><span>Priority</span><select name="priority" defaultValue="medium"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="optional">Optional</option></select></label></div><div className="form-row"><label><span>Preferred weekly time</span><select name="weekly_minutes" defaultValue="120"><option value="30">30 minutes</option><option value="60">1 hour</option><option value="90">1.5 hours</option><option value="120">2 hours</option><option value="180">3 hours</option><option value="240">4 hours</option></select></label><label><span>What does success look like? <small>Optional</small></span><input name="target_description" placeholder="Run 5 km comfortably" /></label></div><button className="secondary-button form-submit" disabled={busy} type="submit"><Plus size={17} /> Add goal</button></form></>;
+  function setDaySelected(index: number, selected: boolean) {
+    setSelectedDays((current) => selected
+      ? [...current, index].sort((left, right) => left - right)
+      : current.filter((day) => day !== index));
+  }
+
+  function setFlexibleDay(index: number, selected: boolean) {
+    setFlexibleDays((current) => selected
+      ? [...current, index].sort((left, right) => left - right)
+      : current.filter((day) => day !== index));
+  }
+
+  function resetFormState() {
+    setSelectedDays([]);
+    setFlexibleDays([]);
+    setPlanningMode("manual");
+    setCadence("weekly");
+  }
+
+  return (
+    <>
+      <StepHeading eyebrow="Life beyond classes" title="What should DoNext make room for?" copy="Add work, workouts, personal projects, appointments, or anything else that needs time." optional />
+      <div className="commitment-examples"><span><BriefcaseBusiness size={16} /> Work</span><span><Dumbbell size={16} /> Gym</span><span><Flag size={16} /> Personal goals</span><span><Plus size={16} /> Anything else</span></div>
+      <ItemList>
+        {commitments.map((item) => <SavedItem key={item.id} icon={<Clock3 size={18} />} title={item.title} detail={`Fixed time · ${formatEventTime(item.start_at)}${item.recurrence_rule ? " · Weekly" : ""} · ${capitalize(item.priority)} priority`} onRemove={() => onRemoveEvent(item.id)} />)}
+        {flexibleCommitments.map((item) => <SavedItem key={item.id} icon={<Sparkles size={18} />} title={item.name} detail={`${formatFlexibleCommitment(item)} · ${capitalize(item.priority)} priority`} onRemove={() => onRemoveGoal(item.id)} />)}
+        {personalGoals.map((goal) => <SavedItem key={goal.id} icon={<Flag size={18} />} title={goal.name} detail={`Scheduled by DoNext · ${formatMinutes(goal.preferred_weekly_minutes)}/week · ${capitalize(goal.priority)} priority`} onRemove={() => onRemoveGoal(goal.id)} />)}
+      </ItemList>
+      <form className="onboarding-form compact-form" onReset={resetFormState} onSubmit={onSubmit}>
+        <div className="form-row three-columns">
+          <label><span>Name</span><input name="title" placeholder="Work shift, gym, or project" required /></label>
+          <label><span>Category</span><select name="category" defaultValue="work"><option value="work">Work</option><option value="gym">Gym or fitness</option><option value="appointment">Appointment</option><option value="club">Club or team</option><option value="health">Health</option><option value="career">Career</option><option value="creative">Creative</option><option value="learning">Learning</option><option value="personal">Personal</option><option value="commute">Commute</option><option value="other">Anything else</option></select></label>
+          <label><span>Priority</span><select name="priority" defaultValue="medium"><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option><option value="optional">Optional</option></select><small>Helps DoNext choose between flexible items. Fixed times always stay protected.</small></label>
+        </div>
+        <input name="planning_mode" type="hidden" value={planningMode} />
+        <fieldset className="commitment-mode-picker">
+          <legend>Who should choose the time?</legend>
+          <label><input checked={planningMode === "manual"} name="planning_mode_choice" type="radio" value="manual" onChange={() => setPlanningMode("manual")} /><span><Clock3 size={18} /><span><strong>I’ll set the times</strong><small>Best for work shifts, appointments, and anything fixed.</small></span></span></label>
+          <label><input checked={planningMode === "flexible"} name="planning_mode_choice" type="radio" value="flexible" onChange={() => setPlanningMode("flexible")} /><span><Sparkles size={18} /><span><strong>Let DoNext schedule it</strong><small>Tell us the hours and we’ll find room in a draft.</small></span></span></label>
+        </fieldset>
+        {planningMode === "manual" ? (
+          <>
+            <fieldset className="class-day-picker">
+              <legend>Occurs on</legend>
+              {days.map((day, index) => <label key={day}><input checked={selectedDays.includes(index)} name={`commitment_day_${index}`} type="checkbox" onChange={(event) => setDaySelected(index, event.currentTarget.checked)} /><span>{day.slice(0, 3)}</span></label>)}
+            </fieldset>
+            {selectedDays.length ? (
+              <section aria-label="Times by day" className="commitment-day-schedules">
+                <header><div><strong>Times by day</strong><small>Each selected day can have its own schedule.</small></div></header>
+                {selectedDays.map((day) => (
+                  <div className="commitment-day-row" key={day}>
+                    <strong>{days[day]}</strong>
+                    <label><span>Starts</span><input aria-label={`${days[day]} starts`} name={`commitment_start_${day}`} type="time" required /></label>
+                    <label><span>Duration</span><select aria-label={`${days[day]} duration`} name={`commitment_duration_${day}`} defaultValue="60">{commitmentDurations.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+                  </div>
+                ))}
+              </section>
+            ) : (
+              <div className="commitment-day-empty"><Clock3 size={18} /><span><strong>Select the days first</strong><small>You’ll set a time for each selected day.</small></span></div>
+            )}
+            <label><span>Location <small>Optional</small></span><input name="location" placeholder="Campus gym" /></label>
+            <label className="checkbox-field"><input name="repeats" type="checkbox" defaultChecked /><span><strong>Repeat every week</strong><small>DoNext will repeat each day at the time you set above.</small></span></label>
+          </>
+        ) : (
+          <section className="flexible-commitment-fields">
+            <fieldset className="flexible-cadence-picker">
+              <legend>How should the time add up?</legend>
+              <label><input checked={cadence === "weekly"} name="schedule_cadence" type="radio" value="weekly" onChange={() => setCadence("weekly")} /><span><strong>Hours per week</strong><small>DoNext can spread the time across any available days.</small></span></label>
+              <label><input checked={cadence === "selected_days"} name="schedule_cadence" type="radio" value="selected_days" onChange={() => setCadence("selected_days")} /><span><strong>Hours per selected day</strong><small>Keep the target attached to specific weekdays.</small></span></label>
+            </fieldset>
+            {cadence === "selected_days" ? <fieldset className="class-day-picker"><legend>Schedule on</legend>{days.map((day, index) => <label key={day}><input checked={flexibleDays.includes(index)} name={`flexible_day_${index}`} type="checkbox" onChange={(event) => setFlexibleDay(index, event.currentTarget.checked)} /><span>{day.slice(0, 3)}</span></label>)}</fieldset> : null}
+            <label><span>{cadence === "weekly" ? "Hours each week" : "Hours on each selected day"}</span><input name="flexible_hours" type="number" min="0.25" max={cadence === "weekly" ? "168" : "24"} step="0.25" defaultValue="1" required /><small>Use 15-minute increments.</small></label>
+            <div className="flexible-draft-note"><Sparkles size={18} /><span><strong>Times won’t be added to your calendar yet.</strong><small>DoNext will propose times in your next draft schedule. Review and accept the draft before your calendar changes.</small></span></div>
+          </section>
+        )}
+        <button className="secondary-button form-submit" disabled={busy} type="submit">{planningMode === "flexible" ? <Sparkles size={17} /> : <Plus size={17} />} {planningMode === "flexible" ? "Let DoNext schedule it" : "Add item"}</button>
+      </form>
+    </>
+  );
 }
 
 function BoundariesStep({ preferences, availability, busy, onSubmit }: { preferences: Preferences; availability: AvailabilityWindow[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
@@ -471,10 +580,14 @@ function BoundariesStep({ preferences, availability, busy, onSubmit }: { prefere
 }
 
 function ReviewStep({ semester, courses, tasks, events, goals, preferences, busy, onFinish }: { semester: Semester | null; courses: Course[]; tasks: PlanningTask[]; events: FixedEvent[]; goals: Goal[]; preferences: Preferences | null; busy: boolean; onFinish: () => void }) {
-  const weeklyMinutes = courses.reduce((total, course) => total + course.weekly_study_target_minutes, 0) + goals.reduce((total, goal) => total + goal.preferred_weekly_minutes, 0);
+  const personalGoals = goals.filter((goal) => goal.planning_kind === "goal");
+  const flexibleCommitments = goals.filter((goal) => goal.planning_kind === "flexible_commitment");
+  const goalMinutes = personalGoals.reduce((total, goal) => total + goal.preferred_weekly_minutes, 0);
+  const flexibleMinutes = flexibleCommitments.reduce((total, goal) => total + goal.preferred_weekly_minutes, 0);
   const classMeetings = events.filter((event) => event.category === "class").length;
-  const otherCommitments = events.length - classMeetings;
-  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="You can edit every detail later. Finishing setup unlocks your planner without generating or moving anything yet." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outlines" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Class schedule" value={`${classMeetings} meetings`} detail="Locked weekly class time" /><ReviewCard icon={<Clock3 size={20} />} label="Other commitments" value={`${otherCommitments} added`} detail="Work, gym, appointments, and life" /><ReviewCard icon={<Flag size={20} />} label="Personal goals" value={`${goals.length} protected`} detail={`${formatMinutes(weeklyMinutes)} combined weekly targets`} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? `${preferences.preserve_free_time_percent}% free-time buffer` : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>Your first plan will still ask before making tradeoffs.</strong><p>Setup gives DoNext context. It does not grant permission to silently overbook you or move fixed commitments.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} Finish setup and open my planner</button></>;
+  const lifeItems = events.length - classMeetings + flexibleCommitments.length + personalGoals.length;
+  const flexibleLifeMinutes = flexibleMinutes + goalMinutes;
+  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="When you finish, DoNext will create a 14-day draft using these details and take you straight to review it." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outlines" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Class schedule" value={`${classMeetings} meetings`} detail="Locked weekly class time" /><ReviewCard icon={<Flag size={20} />} label="Commitments & goals" value={`${lifeItems} added`} detail={flexibleLifeMinutes ? `${formatMinutes(flexibleLifeMinutes)} for DoNext to place each week` : "Work, workouts, projects, and life"} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? `${preferences.preserve_free_time_percent}% free-time buffer` : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>You stay in control of the final schedule.</strong><p>DoNext will prepare a draft, not change your calendar. Nothing becomes active until you review and accept it.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} {busy ? "Creating your first draft…" : "Finish setup and create my draft"}</button></>;
 }
 
 function ItemList({ children }: { children: ReactNode }) {
@@ -494,10 +607,10 @@ function ReviewCard({ icon, label, value, detail }: { icon: ReactNode; label: st
 }
 
 function firstDayInSemester(startDate: string, dayIndex: number) {
-  const date = new Date(`${startDate}T12:00:00`);
+  const date = new Date(`${startDate}T12:00:00Z`);
   const jsTarget = dayIndex === 6 ? 0 : dayIndex + 1;
-  date.setDate(date.getDate() + ((jsTarget - date.getDay() + 7) % 7));
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  date.setUTCDate(date.getUTCDate() + ((jsTarget - date.getUTCDay() + 7) % 7));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
 }
 
 function formatDate(value: string) {
@@ -513,6 +626,16 @@ function formatMinutes(minutes: number) {
   if (minutes < 60) return `${minutes} min`;
   const hours = minutes / 60;
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
+}
+
+function formatFlexibleCommitment(goal: Goal) {
+  const rule = goal.schedule_rule;
+  if (!rule) return "Scheduled by DoNext";
+  if (rule.cadence === "weekly") {
+    return `Scheduled by DoNext · ${formatMinutes(rule.target_minutes)}/week`;
+  }
+  const selectedDays = rule.days_of_week.map((day) => days[day].slice(0, 3)).join(", ");
+  return `Scheduled by DoNext · ${formatMinutes(rule.target_minutes)} on ${selectedDays}`;
 }
 
 function capitalize(value: string) {

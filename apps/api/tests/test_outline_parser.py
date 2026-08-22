@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, time
 
 from donext.outline_parser import (
     ExtractedDocument,
@@ -7,6 +7,7 @@ from donext.outline_parser import (
     _extract_items_from_tables,
     _extract_meetings_from_tables,
     _merge_items,
+    _merge_meetings,
     _proposal_warnings,
     _source_date_warnings,
 )
@@ -92,6 +93,9 @@ def test_formal_outline_tables_extract_assessments_and_recurring_meetings() -> N
     ]
     assert {meeting.day_of_week for meeting in meetings} == {0, 2, 3}
     assert {meeting.location for meeting in meetings} == {"MAC D283"}
+    assert {meeting.start_time for meeting in meetings} == {time(12, 30)}
+    assert {meeting.end_time for meeting in meetings} == {time(14, 20)}
+    assert len(_merge_meetings([*meetings, *meetings])) == 3
 
 
 def proposal(name: str, kind: str, weight: float | None = None) -> OutlineItemProposal:

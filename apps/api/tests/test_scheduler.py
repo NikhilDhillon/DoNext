@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
 
@@ -63,3 +63,36 @@ def test_solver_uses_a_valid_remainder_session() -> None:
         )
         == 180
     )
+
+
+def test_solver_keeps_selected_day_targets_on_their_eligible_date() -> None:
+    item = SchedulingItem(
+        id="gym:wednesday",
+        title="Gym",
+        target_minutes=60,
+        minimum_session_minutes=15,
+        preferred_session_minutes=60,
+        maximum_session_minutes=90,
+        priority_rank=2,
+        intensity="moderate",
+        kind="flexible_commitment",
+        eligible_dates=frozenset({date(2026, 8, 12)}),
+    )
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 8, 11, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 11, 18, 0, tzinfo=UTC),
+        ),
+        SchedulingWindow(
+            datetime(2026, 8, 12, 16, 0, tzinfo=UTC),
+            datetime(2026, 8, 12, 18, 0, tzinfo=UTC),
+        ),
+    ]
+
+    result = solve_schedule([item], windows, minimum_break_minutes=10)
+
+    assert result.scheduled_minutes[item.id] == 60
+    assert {placement.start_at.date() for placement in result.placements} == {date(2026, 8, 12)}
+    assert {placement.reason_code for placement in result.placements} == {
+        "flexible_commitment_target"
+    }

@@ -71,7 +71,8 @@ export function GoalManager() {
     }
   }
 
-  const activeGoals = goals.data?.filter((goal) => goal.status === "active") ?? [];
+  const personalGoals = goals.data?.filter((goal) => goal.planning_kind === "goal") ?? [];
+  const activeGoals = personalGoals.filter((goal) => goal.status === "active");
   const plannedMinutes = activeGoals.reduce((sum, goal) => sum + goal.preferred_weekly_minutes, 0);
 
   return (
@@ -93,12 +94,12 @@ export function GoalManager() {
             <div className="goal-summary-stat"><strong>{formatMinutes(plannedMinutes)}</strong><span>preferred across {activeGoals.length} active {activeGoals.length === 1 ? "goal" : "goals"}</span></div>
           </section>
 
-          {goals.data?.length === 0 ? (
+          {personalGoals.length === 0 ? (
             <section className="empty-state"><span><Sprout size={25} /></span><h2>Add a goal worth protecting.</h2><p>Set a preferred weekly rhythm and a smaller maintenance level for busy weeks.</p><button className="primary-button" type="button" onClick={() => setDialogOpen(true)}><Plus size={17} /> Add your first goal</button></section>
           ) : null}
 
           <section className="goals-list">
-            {goals.data?.map((goal, index) => {
+            {personalGoals.map((goal, index) => {
               const hasProgress = goal.current_progress !== null && goal.target_progress !== null;
               const percent = hasProgress ? Math.min(100, Math.round((goal.current_progress! / goal.target_progress!) * 100)) : goal.status === "completed" ? 100 : 0;
               return (

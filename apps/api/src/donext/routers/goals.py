@@ -1,4 +1,5 @@
 import uuid
+from typing import cast
 
 from fastapi import APIRouter
 from sqlalchemy import select
@@ -10,6 +11,31 @@ from donext.routers.semesters import owned_semester
 from donext.schemas import GoalCreate, GoalRead, GoalUpdate
 
 router = APIRouter(prefix="/goals", tags=["goals"])
+
+
+def _schedule_weekly_minutes(rule: dict[str, object]) -> int:
+    target = cast(int, rule["target_minutes"])
+    if rule["cadence"] == "selected_days":
+        return target * len(cast(list[object], rule["days_of_week"]))
+    return target
+
+
+def _normalize_flexible_effort(values: dict[str, object]) -> None:
+    rule = values.get("schedule_rule")
+    if not isinstance(rule, dict):
+        raise ApiError(
+            "VALIDATION_ERROR",
+            "Flexible commitments need either weekly hours or hours on selected days.",
+            422,
+        )
+    weekly_minutes = _schedule_weekly_minutes(rule)
+    values.update(
+        minimum_weekly_minutes=0,
+        preferred_weekly_minutes=weekly_minutes,
+        maximum_weekly_minutes=weekly_minutes,
+        maintenance_weekly_minutes=0,
+        reducible_during_busy_weeks=True,
+    )
 
 
 def owned_goal(db: DbSession, user_id: uuid.UUID, goal_id: uuid.UUID) -> Goal:
@@ -34,7 +60,10 @@ def list_goals(db: DbSession, current_user: CurrentUser) -> list[Goal]:
 def create_goal(payload: GoalCreate, db: DbSession, current_user: CurrentUser) -> Goal:
     if payload.semester_id:
         owned_semester(db, current_user.id, payload.semester_id)
-    goal = Goal(user_id=current_user.id, **payload.model_dump())
+    values = payload.model_dump()
+    if payload.planning_kind == "flexible_commitment":
+        _normalize_flexible_effort(values)
+    goal = Goal(user_id=current_user.id, **values)
     db.add(goal)
     db.commit()
     db.refresh(goal)
@@ -58,6 +87,13 @@ def update_goal(
     semester_id = values.get("semester_id", goal.semester_id)
     if semester_id:
         owned_semester(db, current_user.id, semester_id)
+    planning_kind = values.get("planning_kind", goal.planning_kind)
+    if planning_kind == "flexible_commitment":
+        if "schedule_rule" not in values:
+            values["schedule_rule"] = goal.schedule_rule
+        _normalize_flexible_effort(values)
+    elif planning_kind == "goal":
+        values["schedule_rule"] = None
     minimum = values.get("minimum_weekly_minutes", goal.minimum_weekly_minutes)
     preferred = values.get("preferred_weekly_minutes", goal.preferred_weekly_minutes)
     maximum = values.get("maximum_weekly_minutes", goal.maximum_weekly_minutes)

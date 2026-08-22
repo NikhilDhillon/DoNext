@@ -55,6 +55,11 @@ export type Goal = {
   progress_type: string | null;
   current_progress: number | null;
   target_progress: number | null;
+  planning_kind: "goal" | "flexible_commitment";
+  schedule_rule:
+    | { cadence: "weekly"; target_minutes: number }
+    | { cadence: "selected_days"; target_minutes: number; days_of_week: number[] }
+    | null;
   created_at: string;
   updated_at: string;
 };
@@ -104,6 +109,7 @@ export type FixedEvent = {
   title: string;
   semester_id: string | null;
   category: string;
+  priority: "critical" | "high" | "medium" | "low" | "optional";
   start_at: string;
   end_at: string;
   recurrence_rule: string | null;

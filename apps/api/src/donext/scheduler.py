@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
 from ortools.sat.python import cp_model
@@ -18,6 +18,7 @@ class SchedulingItem:
     priority_rank: int
     intensity: str
     kind: str = "task"
+    eligible_dates: frozenset[date] | None = None
 
 
 @dataclass(frozen=True)
@@ -130,11 +131,22 @@ def solve_schedule(
                 start_at=candidate.start_at,
                 end_at=candidate.start_at + timedelta(minutes=candidate.duration_minutes),
                 kind=candidate.item.kind,
-                reason_code=("goal_maintenance" if candidate.item.kind == "goal" else "dated_work"),
+                reason_code=(
+                    "flexible_commitment_target"
+                    if candidate.item.kind == "flexible_commitment"
+                    else "goal_maintenance"
+                    if candidate.item.kind == "goal"
+                    else "dated_work"
+                ),
                 reason_details={
                     "energy_level": candidate.energy_level,
                     "priority_rank": candidate.item.priority_rank,
                     "session_minutes": candidate.duration_minutes,
+                    **(
+                        {"eligible_date": candidate.start_at.date().isoformat()}
+                        if candidate.item.eligible_dates
+                        else {}
+                    ),
                 },
             )
         )
@@ -158,6 +170,11 @@ def _candidates(items: list[SchedulingItem], windows: list[SchedulingWindow]) ->
     for item in sorted(items, key=lambda value: (-value.priority_rank, value.id)):
         durations = _session_durations(item)
         for window in sorted(windows, key=lambda value: value.start_at):
+            if (
+                item.eligible_dates is not None
+                and window.start_at.date() not in item.eligible_dates
+            ):
+                continue
             for duration in durations:
                 latest = window.end_at - timedelta(minutes=duration)
                 cursor = _round_up(window.start_at)
@@ -186,7 +203,14 @@ def _candidate_preference(candidate: _Candidate) -> int:
     duration_fit = 1000 - abs(candidate.duration_minutes - candidate.item.preferred_session_minutes)
     energy_fit = 100 if _energy_matches(candidate.item.intensity, candidate.energy_level) else 0
     kind_rank = 1000 if candidate.item.kind == "task" else 100
-    return -10000 + kind_rank + candidate.item.priority_rank * 100 + duration_fit + energy_fit
+    return (
+        candidate.duration_minutes * 10000
+        - 5000
+        + kind_rank
+        + candidate.item.priority_rank * 100
+        + duration_fit
+        + energy_fit
+    )
 
 
 def _energy_matches(intensity: str, energy_level: str) -> bool:

@@ -69,6 +69,11 @@ class GoalStatus(StrEnum):
     archived = "archived"
 
 
+class GoalPlanningKind(StrEnum):
+    goal = "goal"
+    flexible_commitment = "flexible_commitment"
+
+
 class AvailabilityType(StrEnum):
     available = "available"
     unavailable = "unavailable"
@@ -419,6 +424,10 @@ class Goal(UuidTimestampMixin, Base):
             name="ck_goal_session_effort",
         ),
         CheckConstraint("target_date IS NULL OR target_date >= start_date", name="ck_goal_dates"),
+        CheckConstraint(
+            "planning_kind IN ('goal', 'flexible_commitment')",
+            name="ck_goal_planning_kind",
+        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
@@ -451,6 +460,10 @@ class Goal(UuidTimestampMixin, Base):
     progress_type: Mapped[str | None] = mapped_column(String(64))
     current_progress: Mapped[float | None] = mapped_column(Float)
     target_progress: Mapped[float | None] = mapped_column(Float)
+    planning_kind: Mapped[str] = mapped_column(
+        String(32), default=GoalPlanningKind.goal.value, server_default=GoalPlanningKind.goal.value
+    )
+    schedule_rule: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
 
 class Task(UuidTimestampMixin, Base):
@@ -528,6 +541,11 @@ class FixedEvent(UuidTimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(200))
     category: Mapped[str] = mapped_column(String(64), default="personal")
+    priority: Mapped[Priority] = mapped_column(
+        Enum(Priority, native_enum=False),
+        default=Priority.medium,
+        server_default=Priority.medium.value,
+    )
     start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     recurrence_rule: Mapped[str | None] = mapped_column(String(500))

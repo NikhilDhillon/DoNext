@@ -62,6 +62,54 @@ def test_authentication_lifecycle(client: TestClient) -> None:
     assert login.status_code == 200
 
 
+def test_flexible_commitment_rules_are_validated_and_normalized(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    base = {
+        "name": "Gym",
+        "semester_id": semester["id"],
+        "category": "gym",
+        "start_date": semester["start_date"],
+        "planning_kind": "flexible_commitment",
+    }
+
+    missing_rule = client.post("/api/v1/goals", json=base)
+    assert missing_rule.status_code == 422
+
+    no_days = client.post(
+        "/api/v1/goals",
+        json={
+            **base,
+            "schedule_rule": {
+                "cadence": "selected_days",
+                "target_minutes": 60,
+                "days_of_week": [],
+            },
+        },
+    )
+    assert no_days.status_code == 422
+
+    response = client.post(
+        "/api/v1/goals",
+        json={
+            **base,
+            "schedule_rule": {
+                "cadence": "selected_days",
+                "target_minutes": 75,
+                "days_of_week": [4, 1],
+            },
+        },
+    )
+    assert response.status_code == 201
+    flexible = response.json()
+    assert flexible["schedule_rule"]["days_of_week"] == [1, 4]
+    assert flexible["minimum_weekly_minutes"] == 0
+    assert flexible["preferred_weekly_minutes"] == 150
+    assert flexible["maximum_weekly_minutes"] == 150
+
+
 def test_core_planning_crud(client: TestClient) -> None:
     register(client)
     semester = create_semester(client)
@@ -98,6 +146,8 @@ def test_core_planning_crud(client: TestClient) -> None:
     )
     assert goal_response.status_code == 201
     goal = goal_response.json()
+    assert goal["planning_kind"] == "goal"
+    assert goal["schedule_rule"] is None
 
     deadline = datetime.now(UTC) + timedelta(days=7)
     task_response = client.post(
@@ -129,6 +179,14 @@ def test_core_planning_crud(client: TestClient) -> None:
         },
     )
     assert event_response.status_code == 201
+    assert event_response.json()["priority"] == "medium"
+
+    updated_event = client.patch(
+        f"/api/v1/events/{event_response.json()['id']}",
+        json={"priority": "high"},
+    )
+    assert updated_event.status_code == 200
+    assert updated_event.json()["priority"] == "high"
 
     availability = client.put(
         "/api/v1/availability",

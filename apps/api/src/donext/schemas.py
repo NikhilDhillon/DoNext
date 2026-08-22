@@ -1,8 +1,8 @@
 import uuid
 from datetime import date, datetime, time
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from donext.models import (
     AcademicGradeStatus,
@@ -425,6 +425,7 @@ class FixedEventBase(ApiModel):
     title: str = Field(min_length=1, max_length=200)
     semester_id: uuid.UUID | None = None
     category: str = Field(default="personal", min_length=1, max_length=64)
+    priority: Priority = Priority.medium
     start_at: datetime
     end_at: datetime
     recurrence_rule: str | None = Field(default=None, max_length=500)
@@ -444,10 +445,27 @@ class FixedEventCreate(FixedEventBase):
     pass
 
 
+class CourseMeetingImport(ApiModel):
+    title: str = Field(min_length=1, max_length=200)
+    day_of_week: int = Field(ge=0, le=6)
+    start_time: time
+    end_time: time
+    location: str | None = Field(default=None, max_length=200)
+    confidence: float = Field(ge=0, le=1)
+    source_text: str
+
+    @model_validator(mode="after")
+    def validate_times(self) -> "CourseMeetingImport":
+        if self.end_time <= self.start_time:
+            raise ValueError("end_time must be after start_time")
+        return self
+
+
 class CourseOutlineImport(ApiModel):
     course: CourseCreate
     grading: CourseGradingReplace
     meetings: list[FixedEventCreate] = Field(default_factory=list, max_length=30)
+    meeting_proposals: list[CourseMeetingImport] = Field(default_factory=list, max_length=30)
     replace_existing: bool = False
 
 
@@ -461,6 +479,7 @@ class FixedEventUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     semester_id: uuid.UUID | None = None
     category: str | None = Field(default=None, min_length=1, max_length=64)
+    priority: Priority | None = None
     start_at: datetime | None = None
     end_at: datetime | None = None
     recurrence_rule: str | None = Field(default=None, max_length=500)
@@ -474,6 +493,32 @@ class FixedEventRead(FixedEventBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+
+
+class WeeklyScheduleRule(ApiModel):
+    cadence: Literal["weekly"] = "weekly"
+    target_minutes: int = Field(gt=0, le=10080, multiple_of=15)
+
+
+class SelectedDaysScheduleRule(ApiModel):
+    cadence: Literal["selected_days"] = "selected_days"
+    target_minutes: int = Field(gt=0, le=1440, multiple_of=15)
+    days_of_week: list[int] = Field(min_length=1, max_length=7)
+
+    @field_validator("days_of_week")
+    @classmethod
+    def validate_days(cls, value: list[int]) -> list[int]:
+        if any(day < 0 or day > 6 for day in value):
+            raise ValueError("days_of_week values must be between 0 and 6")
+        if len(set(value)) != len(value):
+            raise ValueError("days_of_week values must be unique")
+        return sorted(value)
+
+
+FlexibleScheduleRule = Annotated[
+    WeeklyScheduleRule | SelectedDaysScheduleRule,
+    Field(discriminator="cadence"),
+]
 
 
 class GoalBase(ApiModel):
@@ -498,6 +543,8 @@ class GoalBase(ApiModel):
     progress_type: str | None = Field(default=None, max_length=64)
     current_progress: float | None = Field(default=None, ge=0)
     target_progress: float | None = Field(default=None, gt=0)
+    planning_kind: Literal["goal", "flexible_commitment"] = "goal"
+    schedule_rule: FlexibleScheduleRule | None = None
 
     @model_validator(mode="after")
     def validate_effort(self) -> "GoalBase":
@@ -515,6 +562,10 @@ class GoalBase(ApiModel):
             raise ValueError("session lengths must be ordered minimum, preferred, maximum")
         if self.target_date and self.target_date < self.start_date:
             raise ValueError("target_date must be on or after start_date")
+        if self.planning_kind == "flexible_commitment" and self.schedule_rule is None:
+            raise ValueError("flexible commitments require a schedule rule")
+        if self.planning_kind == "goal" and self.schedule_rule is not None:
+            raise ValueError("schedule rules are only supported for flexible commitments")
         return self
 
 
@@ -544,6 +595,8 @@ class GoalUpdate(ApiModel):
     progress_type: str | None = Field(default=None, max_length=64)
     current_progress: float | None = Field(default=None, ge=0)
     target_progress: float | None = Field(default=None, gt=0)
+    planning_kind: Literal["goal", "flexible_commitment"] | None = None
+    schedule_rule: FlexibleScheduleRule | None = None
 
 
 class GoalRead(GoalBase):
