@@ -537,15 +537,18 @@ def _scheduling_windows(
             (aware(block.start_at).astimezone(timezone), aware(block.end_at).astimezone(timezone))
             for block in preserved
         )
-        sleep_start = datetime.combine(current, preferences.default_sleep_time, tzinfo=timezone)
+        sleep_start_date = (
+            current + timedelta(days=1) if preferences.default_sleep_time == time.min else current
+        )
+        sleep_start = datetime.combine(
+            sleep_start_date, preferences.default_sleep_time, tzinfo=timezone
+        )
         wake = datetime.combine(current, preferences.default_wake_time, tzinfo=timezone)
+        day_end = datetime.combine(current + timedelta(days=1), time.min, tzinfo=timezone)
         exclusions.extend(
             [
-                (datetime.combine(current - timedelta(days=1), time.min, tzinfo=timezone), wake),
-                (
-                    sleep_start,
-                    datetime.combine(current + timedelta(days=1), time.min, tzinfo=timezone),
-                ),
+                (datetime.combine(current, time.min, tzinfo=timezone), wake),
+                (sleep_start, day_end),
             ]
         )
         open_intervals = subtract_intervals(available, exclusions)
@@ -565,8 +568,14 @@ def _scheduling_windows(
                         window.energy_level.value
                         for window in availability
                         if window.day_of_week == current.weekday()
-                        and window.start_time <= start_at.timetz().replace(tzinfo=None)
-                        and window.end_time >= end_at.timetz().replace(tzinfo=None)
+                        and datetime.combine(current, window.start_time, tzinfo=timezone)
+                        <= start_at
+                        and datetime.combine(
+                            current + timedelta(days=1) if window.end_time == time.min else current,
+                            window.end_time,
+                            tzinfo=timezone,
+                        )
+                        >= end_at
                     ),
                     "medium",
                 )

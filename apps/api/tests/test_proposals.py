@@ -131,6 +131,57 @@ def test_proposal_block_may_end_at_midnight(client: TestClient) -> None:
     assert created.json()["title"] == "Late study session"
 
 
+def test_midnight_bedtime_keeps_daytime_capacity_for_flexible_commitments(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    preferences = client.patch(
+        "/api/v1/preferences",
+        json={"default_sleep_time": "00:00:00", "default_wake_time": "08:00:00"},
+    )
+    assert preferences.status_code == 200
+    availability = client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": 2,
+                    "start_time": "10:00:00",
+                    "end_time": "00:00:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+            ]
+        },
+    )
+    assert availability.status_code == 200
+    gym = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Gym",
+            "semester_id": semester["id"],
+            "category": "gym",
+            "start_date": semester["start_date"],
+            "planning_kind": "flexible_commitment",
+            "schedule_rule": {
+                "cadence": "selected_days",
+                "target_minutes": 60,
+                "days_of_week": [2],
+            },
+        },
+    )
+    assert gym.status_code == 201
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+
+    assert proposal.status_code == 201
+    body = proposal.json()
+    assert body["generation_summary"]["scheduled_minutes"] == 120
+    assert {block["title"] for block in body["blocks"]} == {"Gym"}
+    assert {block["block_type"] for block in body["blocks"]} == {"commitment"}
+
+
 def test_stale_and_rejected_proposals_never_replace_the_accepted_plan(
     client: TestClient,
 ) -> None:
