@@ -5,14 +5,13 @@ import {
   CalendarClock,
   Check,
   LoaderCircle,
-  Lock,
-  Pencil,
   RefreshCw,
   Sparkles,
   X,
 } from "lucide-react";
 import { useState } from "react";
 
+import { DraftScheduleCalendar } from "@/components/draft-schedule-calendar";
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
@@ -89,9 +88,9 @@ export function ScheduleProposalReview({
     setEditorOpen(true);
   }
 
-  function addBlock() {
+  function addBlock(date?: string) {
     setSelectedEntry(null);
-    setEditorDate(proposal.data?.horizon_start ?? semester.start_date);
+    setEditorDate(date ?? proposal.data?.horizon_start ?? semester.start_date);
     setEditorOpen(true);
   }
 
@@ -146,18 +145,17 @@ export function ScheduleProposalReview({
       ))}
 
       <div className="proposal-block-heading">
-        <div><h3>Draft blocks</h3><p>Open any generated block to move, resize, lock, or remove it.</p></div>
-        <button className="text-button" type="button" onClick={addBlock}>Add draft block</button>
+        <div><h3>Draft calendar</h3><p>See when each block lands. Select a block to edit it, or click an open day to add one.</p></div>
+        <button className="text-button" type="button" onClick={() => addBlock()}>Add draft block</button>
       </div>
-      <div className="proposal-blocks">
-        {draft.blocks.length ? draft.blocks.map((block) => (
-          <button type="button" className="proposal-block" onClick={() => edit(block)} key={block.id}>
-            <span className={block.block_type}>{formatBlockDate(block.start_at, timezone)}</span>
-            <span><strong>{block.title}</strong><small>{formatBlockTime(block, timezone)}</small></span>
-            {block.locked ? <Lock size={14} /> : <Pencil size={14} />}
-          </button>
-        )) : <p className="planner-quiet">No blocks could be placed. Review the warnings before accepting.</p>}
-      </div>
+      <DraftScheduleCalendar
+        blocks={draft.blocks}
+        horizonEnd={draft.horizon_end}
+        horizonStart={draft.horizon_start}
+        timezone={timezone}
+        onAdd={addBlock}
+        onEdit={edit}
+      />
 
       {draft.generation_summary.unscheduled.length ? (
         <div className="proposal-unresolved">
@@ -237,15 +235,6 @@ function formatMinutes(minutes: number) {
 function formatRange(start: string, end: string) {
   const formatter = new Intl.DateTimeFormat("en-CA", { month: "short", day: "numeric", timeZone: "UTC" });
   return `${formatter.format(new Date(`${start}T12:00:00Z`))}–${formatter.format(new Date(`${end}T12:00:00Z`))}`;
-}
-
-function formatBlockDate(value: string, timezone: string) {
-  return new Intl.DateTimeFormat("en-CA", { weekday: "short", month: "short", day: "numeric", timeZone: timezone }).format(new Date(value));
-}
-
-function formatBlockTime(block: ScheduleBlock, timezone: string) {
-  const formatter = new Intl.DateTimeFormat("en-CA", { hour: "numeric", minute: "2-digit", timeZone: timezone });
-  return `${formatter.format(new Date(block.start_at))}–${formatter.format(new Date(block.end_at))}`;
 }
 
 function dateInTimezone(value: string, timezone: string) {

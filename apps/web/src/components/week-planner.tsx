@@ -101,34 +101,36 @@ export function WeekPlanner() {
         </div>
       </section>
 
-      <section className="calendar-card" aria-label="Weekly calendar">
-        <div className="calendar-header live-calendar-header">
-          <div className="timezone">{timezoneName(data.timezone, data.start_date)}</div>
-          {days.map((day) => (
-            <div className={day.date === localToday(data.timezone) ? "today" : undefined} key={day.date}>
-              <span>{weekday(day.date)}</span><strong>{dayNumber(day.date)}</strong><small>{dayLoad(day.capacity)}</small>
-            </div>
-          ))}
-        </div>
-        <div className="calendar-body live-calendar-body">
-          <div className="time-axis live-time-axis" style={{ gridTemplateRows: `repeat(${hours.length}, 60px)` }}>
-            {hours.map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
-          </div>
-          <div className="calendar-grid live-calendar-grid" style={{ gridTemplateRows: `repeat(${rows}, 30px)` }}>
-            {days.map((day) => <button className="day-column" aria-label={`Add a block on ${formatCalendarDate(day.date)}`} type="button" onClick={() => openNew(day.date)} key={day.date} />)}
-            {data.entries.map((entry) => (
-              <WeekBlock
-                entry={entry}
-                timezone={data.timezone}
-                weekStart={data.start_date}
-                startHour={startHour}
-                onOpen={() => openEntry(entry)}
-                key={entry.id}
-              />
+      {data.entries.length > 0 ? (
+        <section className="calendar-card" aria-label="Weekly calendar">
+          <div className="calendar-header live-calendar-header">
+            <div className="timezone">{timezoneName(data.timezone, data.start_date)}</div>
+            {days.map((day) => (
+              <div className={day.date === localToday(data.timezone) ? "today" : undefined} key={day.date}>
+                <span>{weekday(day.date)}</span><strong>{dayNumber(day.date)}</strong><small>{dayLoad(day.capacity)}</small>
+              </div>
             ))}
           </div>
-        </div>
-      </section>
+          <div className="calendar-body live-calendar-body">
+            <div className="time-axis live-time-axis" style={{ gridTemplateRows: `repeat(${hours.length}, 60px)` }}>
+              {hours.map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
+            </div>
+            <div className="calendar-grid live-calendar-grid" style={{ gridTemplateRows: `repeat(${rows}, 30px)` }}>
+              {days.map((day) => <button className="day-column" aria-label={`Add a block on ${formatCalendarDate(day.date)}`} type="button" onClick={() => openNew(day.date)} key={day.date} />)}
+              {data.entries.map((entry) => (
+                <WeekBlock
+                  entry={entry}
+                  timezone={data.timezone}
+                  weekStart={data.start_date}
+                  startHour={startHour}
+                  onOpen={() => openEntry(entry)}
+                  key={entry.id}
+                />
+              ))}
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       {currentSemester && (
         <ScheduleBlockEditor
