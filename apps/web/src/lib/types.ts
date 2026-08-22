@@ -165,20 +165,47 @@ export type Schedule = {
 
 export type ScheduleProposal = Schedule & {
   base_schedule_version_id: string | null;
+  revision_of_proposal_id: string | null;
   horizon_start: string;
   horizon_end: string;
   stale: boolean;
   generation_summary: {
     solve_status: "optimal" | "feasible" | "infeasible";
+    coverage_status: "complete" | "partial";
+    timed_out: boolean;
+    used_baseline: boolean;
     scheduled_minutes: number;
     requested_minutes: number;
+    eligible_capacity_minutes: number;
+    protected_free_minutes: number;
+    solver_runtime_ms: number;
     preserved_blocks: number;
     generated_blocks: number;
     moved_blocks: number;
     warnings: string[];
-    unscheduled: { id: string; name: string; remaining_minutes: number; reason: string }[];
+    unscheduled: {
+      id: string;
+      name: string;
+      remaining_minutes: number;
+      reason_code?: string;
+      reason: string;
+    }[];
   };
+  revision_feedback: {
+    interpreter: "openai" | "fallback";
+    note_applied: boolean;
+    summary: string;
+    policy: Record<string, unknown>;
+  } | null;
 };
+
+export type ScheduleRevisionReason =
+  | "too_packed"
+  | "wrong_times"
+  | "sessions_too_long"
+  | "sessions_too_short"
+  | "balance_activities"
+  | "other";
 
 export type PlanningEntry = {
   id: string;

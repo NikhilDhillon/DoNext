@@ -13,6 +13,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { DraftScheduleCalendar } from "@/components/draft-schedule-calendar";
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
+import { ScheduleRevisionDialog } from "@/components/schedule-revision-dialog";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
@@ -21,6 +22,7 @@ import type {
   PlanningEntry,
   ScheduleBlock,
   ScheduleProposal,
+  ScheduleRevisionReason,
   Semester,
 } from "@/lib/types";
 
@@ -46,7 +48,9 @@ export function ScheduleProposalReview({
     "idle",
   );
   const [error, setError] = useState<string | null>(null);
-  const [confirming, setConfirming] = useState<"accept" | "reject" | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [revisionOpen, setRevisionOpen] = useState(false);
+  const [revisionError, setRevisionError] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
   const [editorDate, setEditorDate] = useState(semester.start_date);
@@ -81,20 +85,49 @@ export function ScheduleProposalReview({
     }
   }
 
-  async function finish(action: "accept" | "reject") {
+  async function accept() {
     if (!proposal.data) return;
     setBusy(true);
     setError(null);
     try {
       await apiRequest<ScheduleProposal | void>(
-        `/schedule-proposals/${proposal.data.id}/${action}`,
+        `/schedule-proposals/${proposal.data.id}/accept`,
         { method: "POST" },
       );
       proposal.setData(null);
-      setConfirming(null);
-      if (action === "accept") await onAccepted();
+      setConfirming(false);
+      await onAccepted();
     } catch (requestError) {
-      setError(errorMessage(requestError, `DoNext could not ${action} this draft.`));
+      setError(errorMessage(requestError, "DoNext could not accept this draft."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revise(payload: {
+    reasons: ScheduleRevisionReason[];
+    note: string;
+    remember: boolean;
+  }) {
+    if (!proposal.data) return;
+    setBusy(true);
+    setRevisionError(null);
+    try {
+      const revised = await apiRequest<ScheduleProposal>(
+        `/schedule-proposals/${proposal.data.id}/revise`,
+        { method: "POST", body: JSON.stringify(payload) },
+      );
+      proposal.setData(revised);
+      setRevisionOpen(false);
+      setGenerationState("success");
+      generationSuccessTimer.current = setTimeout(() => {
+        setGenerationState("idle");
+        generationSuccessTimer.current = null;
+      }, 2200);
+    } catch (requestError) {
+      setRevisionError(
+        errorMessage(requestError, "DoNext could not apply that feedback. The current draft is unchanged."),
+      );
     } finally {
       setBusy(false);
     }
@@ -176,10 +209,18 @@ export function ScheduleProposalReview({
 
       <div className="proposal-metrics">
         <div><strong>{formatMinutes(draft.generation_summary.scheduled_minutes)}</strong><span>scheduled</span></div>
+        <div><strong>{formatMinutes(draft.generation_summary.requested_minutes)}</strong><span>requested</span></div>
+        <div><strong>{formatMinutes(draft.generation_summary.eligible_capacity_minutes)}</strong><span>eligible capacity</span></div>
         <div><strong>{draft.generation_summary.generated_blocks}</strong><span>generated blocks</span></div>
-        <div><strong>{draft.generation_summary.preserved_blocks}</strong><span>preserved blocks</span></div>
-        <div><strong>{draft.generation_summary.moved_blocks}</strong><span>review edits</span></div>
       </div>
+
+      {draft.revision_feedback ? (
+        <div className="revision-applied" role="status">
+          <Sparkles size={17} />
+          <span><strong>Applied your feedback</strong><small>{draft.revision_feedback.summary}</small></span>
+          <em>{draft.revision_feedback.interpreter === "openai" ? "AI interpreted" : "Quick preferences"}</em>
+        </div>
+      ) : null}
 
       {draft.stale ? (
         <p className="planner-alert error"><AlertTriangle size={15} /> Inputs changed. Regenerate before accepting.</p>
@@ -216,17 +257,17 @@ export function ScheduleProposalReview({
       <footer>
         {confirming ? (
           <div className="proposal-confirm" role="alert">
-            <span>{confirming === "accept" ? "Replace the accepted schedule with this complete draft?" : "Discard this draft without changing the accepted schedule?"}</span>
-            <button type="button" onClick={() => setConfirming(null)}>Cancel</button>
-            <button className={confirming === "accept" ? "primary-button" : "danger-button"} disabled={busy} type="button" onClick={() => void finish(confirming)}>
-              {busy ? <LoaderCircle className="spin" size={16} /> : confirming === "accept" ? <Check size={16} /> : <X size={16} />}
-              Confirm {confirming}
+            <span>Replace the accepted schedule with this reviewed draft?</span>
+            <button type="button" onClick={() => setConfirming(false)}>Cancel</button>
+            <button className="primary-button" disabled={busy} type="button" onClick={() => void accept()}>
+              {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+              Confirm acceptance
             </button>
           </div>
         ) : (
           <>
-            <button className="danger-button" disabled={busy} type="button" onClick={() => setConfirming("reject")}><X size={16} /> Reject draft</button>
-            <button className="primary-button" disabled={busy || draft.stale} type="button" onClick={() => setConfirming("accept")}><Check size={16} /> Accept complete draft</button>
+            <button className="danger-button" disabled={busy} type="button" onClick={() => { setRevisionError(null); setRevisionOpen(true); }}><X size={16} /> Reject and revise</button>
+            <button className="primary-button" disabled={busy || draft.stale} type="button" onClick={() => setConfirming(true)}><Check size={16} /> Accept draft</button>
           </>
         )}
       </footer>
@@ -242,6 +283,15 @@ export function ScheduleProposalReview({
         onClose={() => setEditorOpen(false)}
         onSaved={proposal.reload}
       />
+      {revisionOpen ? (
+        <ScheduleRevisionDialog
+          busy={busy}
+          error={revisionError}
+          open
+          onClose={() => setRevisionOpen(false)}
+          onSubmit={revise}
+        />
+      ) : null}
     </section>
   );
 }
