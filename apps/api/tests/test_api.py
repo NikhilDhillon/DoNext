@@ -1,6 +1,10 @@
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
+from donext.database import Base
 
 
 def register(client: TestClient, email: str = "nikhil@example.com") -> dict[str, str]:
@@ -60,6 +64,103 @@ def test_authentication_lifecycle(client: TestClient) -> None:
         json={"email": "nikhil@example.com", "password": "a-secure-local-password"},
     )
     assert login.status_code == 200
+
+
+def test_account_deletion_requires_password_and_removes_all_data(
+    client: TestClient, db_session: Session
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    course = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses",
+        json={
+            "name": "Account deletion test",
+            "code": "DEL 101",
+            "difficulty": 3,
+            "weekly_study_target_minutes": 120,
+        },
+    ).json()
+    assert (
+        client.post(
+            "/api/v1/tasks",
+            json={
+                "name": "Delete this task",
+                "course_id": course["id"],
+                "estimated_minutes": 60,
+            },
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            "/api/v1/events",
+            json={
+                "title": "Delete this commitment",
+                "semester_id": semester["id"],
+                "category": "work",
+                "start_at": "2026-09-03T17:00:00Z",
+                "end_at": "2026-09-03T18:00:00Z",
+            },
+        ).status_code
+        == 201
+    )
+    assert (
+        client.post(
+            "/api/v1/goals",
+            json={
+                "name": "Delete this flexible commitment",
+                "semester_id": semester["id"],
+                "category": "personal",
+                "start_date": semester["start_date"],
+                "planning_kind": "flexible_commitment",
+                "schedule_rule": {"cadence": "weekly", "target_minutes": 60},
+            },
+        ).status_code
+        == 201
+    )
+    assert (
+        client.put(
+            "/api/v1/availability",
+            json={
+                "windows": [
+                    {
+                        "day_of_week": day,
+                        "start_time": "09:00",
+                        "end_time": "17:00",
+                        "type": "available",
+                        "energy_level": "medium",
+                    }
+                    for day in range(5)
+                ]
+            },
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").status_code == 201
+
+    rejected = client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"password": "not-the-current-password", "confirmation": "DELETE"},
+    )
+    assert rejected.status_code == 403
+    assert rejected.json()["error"]["message"] == "The current password is incorrect."
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+    deleted = client.request(
+        "DELETE",
+        "/api/v1/auth/account",
+        json={"password": "a-secure-local-password", "confirmation": "DELETE"},
+    )
+    assert deleted.status_code == 204
+    assert client.get("/api/v1/auth/me").status_code == 401
+
+    db_session.expire_all()
+    remaining_rows = {
+        mapper.local_table.name: db_session.scalar(select(func.count()).select_from(mapper.class_))
+        for mapper in Base.registry.mappers
+    }
+    assert all(count == 0 for count in remaining_rows.values()), remaining_rows
 
 
 def test_flexible_commitment_rules_are_validated_and_normalized(

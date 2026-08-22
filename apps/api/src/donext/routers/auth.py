@@ -7,7 +7,7 @@ from donext.config import get_settings
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import AuthSession, User, UserPreference
-from donext.schemas import Message, UserLogin, UserRead, UserRegister
+from donext.schemas import AccountDelete, Message, UserLogin, UserRead, UserRegister
 from donext.security import create_session_token, hash_password, verify_password
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -78,6 +78,20 @@ def logout(
 @router.get("/me", response_model=UserRead)
 def me(current_user: CurrentUser) -> User:
     return current_user
+
+
+@router.delete("/account", status_code=204)
+def delete_account(
+    payload: AccountDelete,
+    response: Response,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> None:
+    if not verify_password(payload.password, current_user.password_hash):
+        raise ApiError("FORBIDDEN", "The current password is incorrect.", 403)
+    db.delete(current_user)
+    db.commit()
+    response.delete_cookie(COOKIE_NAME, path="/")
 
 
 @router.post("/onboarding/complete", response_model=UserRead)

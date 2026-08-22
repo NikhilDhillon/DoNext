@@ -43,6 +43,11 @@ class UserLogin(ApiModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class AccountDelete(ApiModel):
+    password: str = Field(min_length=1, max_length=128)
+    confirmation: Literal["DELETE"]
+
+
 class UserRead(ApiModel):
     id: uuid.UUID
     email: EmailStr
