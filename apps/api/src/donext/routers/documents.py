@@ -22,6 +22,7 @@ async def parse_course_outline(
     current_user: CurrentUser,
     file: Annotated[UploadFile, File(description="PDF, DOCX, or TXT course outline")],
     semester_start: Annotated[date, Form()],
+    semester_end: Annotated[date | None, Form()] = None,
 ) -> OutlineExtractionRead:
     del current_user
     file_name = Path(file.filename or "course-outline").name
@@ -34,7 +35,7 @@ async def parse_course_outline(
     if not content:
         raise ApiError("EMPTY_DOCUMENT", "The uploaded course outline is empty.", 422)
 
-    return extract_outline(file_name, content, semester_start)
+    return extract_outline(file_name, content, semester_start, semester_end)
 
 
 @router.post("/parse-outlines", response_model=list[OutlineExtractionRead])
@@ -42,6 +43,7 @@ async def parse_course_outlines(
     current_user: CurrentUser,
     files: Annotated[list[UploadFile], File(description="Related course documents")],
     semester_start: Annotated[date, Form()],
+    semester_end: Annotated[date | None, Form()] = None,
 ) -> list[OutlineExtractionRead]:
     del current_user
     if not files or len(files) > MAX_BATCH_FILES:
@@ -65,6 +67,6 @@ async def parse_course_outlines(
             raise ApiError(
                 "DOCUMENT_BATCH_TOO_LARGE", "The combined upload may be up to 40 MB.", 413
             )
-        extractions.append(extract_outline(file_name, content, semester_start))
+        extractions.append(extract_outline(file_name, content, semester_start, semester_end))
 
     return merge_outline_extractions(extractions)

@@ -3,7 +3,15 @@ from datetime import UTC, date, datetime
 from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
 
 
-def task(identifier: str, minutes: int = 50, priority: int = 3) -> SchedulingItem:
+def task(
+    identifier: str,
+    minutes: int = 50,
+    priority: int = 3,
+    importance: int = 0,
+    due_at: datetime | None = None,
+    earliest_start_at: datetime | None = None,
+    latest_end_at: datetime | None = None,
+) -> SchedulingItem:
     return SchedulingItem(
         id=identifier,
         title=f"Task {identifier}",
@@ -13,6 +21,10 @@ def task(identifier: str, minutes: int = 50, priority: int = 3) -> SchedulingIte
         maximum_session_minutes=90,
         priority_rank=priority,
         intensity="moderate",
+        importance_rank=importance,
+        due_at=due_at,
+        earliest_start_at=earliest_start_at,
+        latest_end_at=latest_end_at,
     )
 
 
@@ -96,3 +108,60 @@ def test_solver_keeps_selected_day_targets_on_their_eligible_date() -> None:
     assert {placement.reason_code for placement in result.placements} == {
         "flexible_commitment_target"
     }
+
+
+def test_solver_gives_limited_capacity_to_the_earlier_deadline() -> None:
+    start = datetime(2026, 9, 9, 16, 0, tzinfo=UTC)
+    early_due = datetime(2026, 9, 12, 23, 59, tzinfo=UTC)
+    later_due = datetime(2026, 9, 26, 23, 59, tzinfo=UTC)
+    windows = [SchedulingWindow(start, start.replace(hour=17))]
+
+    result = solve_schedule(
+        [
+            task("assignment-4", minutes=50, importance=10, due_at=later_due),
+            task("assignment-1", minutes=50, importance=100, due_at=early_due),
+        ],
+        windows,
+        minimum_break_minutes=0,
+    )
+
+    assert result.scheduled_minutes["assignment-1"] == 50
+    assert result.scheduled_minutes["assignment-4"] == 0
+
+
+def test_solver_places_earlier_deadline_work_first_when_both_fit() -> None:
+    start = datetime(2026, 9, 9, 16, 0, tzinfo=UTC)
+    windows = [SchedulingWindow(start, start.replace(hour=18))]
+    result = solve_schedule(
+        [
+            task("assignment-4", importance=10),
+            task("assignment-1", importance=100),
+        ],
+        windows,
+        minimum_break_minutes=10,
+    )
+
+    placements = {placement.item_id: placement for placement in result.placements}
+    assert placements["assignment-1"].start_at < placements["assignment-4"].start_at
+
+
+def test_solver_respects_task_start_and_deadline_boundaries() -> None:
+    window_start = datetime(2026, 9, 9, 9, 0, tzinfo=UTC)
+    earliest = datetime(2026, 9, 9, 10, 0, tzinfo=UTC)
+    deadline = datetime(2026, 9, 9, 11, 0, tzinfo=UTC)
+    result = solve_schedule(
+        [
+            task(
+                "bounded",
+                earliest_start_at=earliest,
+                latest_end_at=deadline,
+                due_at=deadline,
+            )
+        ],
+        [SchedulingWindow(window_start, window_start.replace(hour=12))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.placements
+    assert all(placement.start_at >= earliest for placement in result.placements)
+    assert all(placement.end_at <= deadline for placement in result.placements)

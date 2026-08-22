@@ -1,6 +1,12 @@
+from datetime import datetime
+from uuid import UUID
+
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 from test_api import create_semester, register
 from test_planning import replace_weekday_availability
+
+from donext.models import Task
 
 
 def proposal_fixture(client: TestClient) -> tuple[dict[str, str], dict[str, str]]:
@@ -85,6 +91,57 @@ def test_undated_work_is_reported_without_an_invented_deadline(client: TestClien
     proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
     assert proposal["blocks"] == []
     assert "no confirmed deadline" in proposal["generation_summary"]["warnings"][0]
+
+
+def test_far_future_assignments_wait_until_their_planning_window(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses",
+        json={"name": "Algorithms", "code": "CSC 320"},
+    ).json()
+    for name, deadline in (
+        ("Assignment 1", "2026-09-10T23:00:00Z"),
+        ("Assignment 4", "2026-12-01T23:00:00Z"),
+    ):
+        response = client.post(
+            "/api/v1/tasks",
+            json={
+                "name": name,
+                "course_id": course["id"],
+                "estimated_minutes": 100,
+                "deadline_at": deadline,
+            },
+        )
+        assert response.status_code == 201
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert {block["title"] for block in proposal["blocks"]} == {"Assignment 1"}
+    assert all(
+        item["name"] != "Assignment 4" for item in proposal["generation_summary"]["unscheduled"]
+    )
+
+
+def test_legacy_out_of_semester_deadlines_are_quarantined_from_proposals(
+    client: TestClient, db_session: Session
+) -> None:
+    semester, task = proposal_fixture(client)
+    stored_task = db_session.get(Task, UUID(task["id"]))
+    assert stored_task is not None
+    stored_task.deadline_at = datetime.fromisoformat("2026-01-18T23:59:00-08:00")
+    db_session.commit()
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert proposal["blocks"] == []
+    assert any(
+        "outside Fall 2026" in warning and "Graph problem set (2026-01-18)" in warning
+        for warning in proposal["generation_summary"]["warnings"]
+    )
 
 
 def test_weekly_flexible_commitment_is_proposed_as_commitment_time(

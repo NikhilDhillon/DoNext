@@ -348,6 +348,15 @@ def replace_course_grading(
     db: DbSession,
     current_user: CurrentUser,
 ) -> CourseGradingRead:
+    course = owned_course(db, current_user.id, course_id)
+    semester = owned_semester(db, current_user.id, course.semester_id)
+    _validate_imported_deadlines(
+        payload,
+        semester.name,
+        semester.start_date,
+        semester.end_date,
+        resolve_timezone(current_user.timezone),
+    )
     _replace_course_grading_data(course_id, payload, db, current_user)
     db.commit()
     return _grading_read(db, course_id)
@@ -399,6 +408,34 @@ def _meeting_event(
     )
 
 
+def _validate_imported_deadlines(
+    grading: CourseGradingReplace,
+    semester_name: str,
+    semester_start: date,
+    semester_end: date,
+    timezone: ZoneInfo,
+) -> None:
+    invalid = [
+        (item.name, aware(item.due_at).astimezone(timezone).date())
+        for item in grading.items
+        if item.due_at is not None
+        and not (semester_start <= aware(item.due_at).astimezone(timezone).date() <= semester_end)
+    ]
+    if not invalid:
+        return
+    examples = ", ".join(f"{name} ({due_date.isoformat()})" for name, due_date in invalid[:3])
+    remainder = len(invalid) - 3
+    suffix = f", plus {remainder} more" if remainder > 0 else ""
+    raise ApiError(
+        "VALIDATION_ERROR",
+        f"{len(invalid)} extracted "
+        f"{'deadline falls' if len(invalid) == 1 else 'deadlines fall'} outside {semester_name} "
+        f"({semester_start.isoformat()} to {semester_end.isoformat()}). Correct or remove "
+        f"those dates before importing: {examples}{suffix}.",
+        422,
+    )
+
+
 @router.post(
     "/semesters/{semester_id}/courses/import-outline",
     response_model=CourseOutlineImportRead,
@@ -411,6 +448,13 @@ def import_course_outline(
 ) -> CourseOutlineImportRead:
     semester = owned_semester(db, current_user.id, semester_id)
     timezone = resolve_timezone(current_user.timezone)
+    _validate_imported_deadlines(
+        payload.grading,
+        semester.name,
+        semester.start_date,
+        semester.end_date,
+        timezone,
+    )
     normalized_code = payload.course.code.replace(" ", "").upper()
     existing_course = next(
         (

@@ -1,4 +1,4 @@
-from datetime import date, time
+from datetime import UTC, date, datetime, time
 
 from donext.outline_parser import (
     ExtractedDocument,
@@ -9,6 +9,7 @@ from donext.outline_parser import (
     _merge_items,
     _merge_meetings,
     _proposal_warnings,
+    _semester_date_warnings,
     _source_date_warnings,
 )
 from donext.schemas import OutlineCourseProposal, OutlineItemProposal
@@ -58,6 +59,23 @@ def test_calendar_year_conflicts_and_missing_dates_are_review_warnings() -> None
     ]
     assert any("1 academic item has no date" in warning for warning in proposal_warnings)
     assert any("No recurring class times" in warning for warning in proposal_warnings)
+
+
+def test_dates_outside_the_selected_semester_are_flagged_before_import() -> None:
+    items = [
+        proposal("Assignment 1", "assignment").model_copy(
+            update={"deadline_at": datetime(2026, 1, 18, 23, 59, tzinfo=UTC)}
+        ),
+        proposal("Assignment 2", "assignment").model_copy(
+            update={"deadline_at": datetime(2026, 9, 20, 23, 59, tzinfo=UTC)}
+        ),
+    ]
+
+    warnings = _semester_date_warnings(items, date(2026, 9, 9), date(2026, 12, 31))
+
+    assert len(warnings) == 1
+    assert "Assignment 1 (2026-01-18)" in warnings[0]
+    assert "Correct or remove them before importing" in warnings[0]
 
 
 def test_formal_outline_tables_extract_assessments_and_recurring_meetings() -> None:

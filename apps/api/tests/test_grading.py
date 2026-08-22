@@ -96,7 +96,7 @@ def grading_payload(deadline: datetime) -> dict[str, object]:
 def test_grading_replacement_is_atomic_idempotent_and_explainable(client: TestClient) -> None:
     register(client)
     course = create_course(client)
-    deadline = datetime.now(UTC) + timedelta(days=2)
+    deadline = datetime(2026, 9, 5, tzinfo=UTC)
     payload = grading_payload(deadline)
 
     first = client.put(f"/api/v1/courses/{course['id']}/grading", json=payload)
@@ -127,7 +127,7 @@ def test_grading_replacement_is_atomic_idempotent_and_explainable(client: TestCl
 def test_grade_updates_resolve_hurdle_risk_and_sync_task(client: TestClient) -> None:
     register(client)
     course = create_course(client)
-    payload = grading_payload(datetime.now(UTC) + timedelta(days=10))
+    payload = grading_payload(datetime(2026, 9, 10, tzinfo=UTC))
     grading = client.put(f"/api/v1/courses/{course['id']}/grading", json=payload).json()
     final_item = next(item for item in grading["items"] if item["name"] == "Final exam")
 
@@ -156,7 +156,7 @@ def test_grade_updates_resolve_hurdle_risk_and_sync_task(client: TestClient) -> 
 def test_complete_scheme_requires_one_hundred_percent(client: TestClient) -> None:
     register(client)
     course = create_course(client)
-    payload = grading_payload(datetime.now(UTC) + timedelta(days=10))
+    payload = grading_payload(datetime(2026, 9, 10, tzinfo=UTC))
     payload["schemes"][0]["is_complete"] = True  # type: ignore[index]
 
     response = client.put(f"/api/v1/courses/{course['id']}/grading", json=payload)
@@ -171,7 +171,7 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
 ) -> None:
     register(client)
     semester = create_semester(client)
-    deadline = datetime.now(UTC) + timedelta(days=10)
+    deadline = datetime(2026, 9, 10, tzinfo=UTC)
     payload = {
         "course": {
             "code": "CSC 349A",
@@ -246,10 +246,30 @@ def test_outline_import_is_atomic_and_requires_explicit_existing_course_update(
     assert {course["code"] for course in courses} == {"CSC 349A"}
 
 
+def test_outline_import_rejects_deadlines_outside_the_selected_semester(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    response = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses/import-outline",
+        json={
+            "course": {"code": "CSC 349A", "name": "Numerical Analysis"},
+            "grading": grading_payload(datetime(2026, 1, 18, tzinfo=UTC)),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "outside Fall 2026" in response.json()["error"]["message"]
+    assert client.get(f"/api/v1/semesters/{semester['id']}/courses").json() == []
+    assert client.get("/api/v1/tasks").json() == []
+
+
 def test_outline_meeting_proposals_use_the_account_timezone(client: TestClient) -> None:
     register(client)
     semester = create_semester(client)
-    deadline = datetime.now(UTC) + timedelta(days=10)
+    deadline = datetime(2026, 9, 10, tzinfo=UTC)
     response = client.post(
         f"/api/v1/semesters/{semester['id']}/courses/import-outline",
         json={
@@ -286,7 +306,7 @@ def test_outline_meeting_proposals_use_the_account_timezone(client: TestClient) 
 def test_academic_items_are_user_scoped(client: TestClient) -> None:
     register(client, "first-grading@example.com")
     course = create_course(client)
-    payload = grading_payload(datetime.now(UTC) + timedelta(days=10))
+    payload = grading_payload(datetime(2026, 9, 10, tzinfo=UTC))
     item = client.put(f"/api/v1/courses/{course['id']}/grading", json=payload).json()["items"][0]
     client.post("/api/v1/auth/logout")
     register(client, "second-grading@example.com")

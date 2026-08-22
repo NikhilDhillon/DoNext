@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -6,8 +7,10 @@ from sqlalchemy import select
 
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
-from donext.models import AcademicItem, Task, TaskStatus, WeightOrigin
+from donext.models import AcademicItem, Task, TaskStatus, User, WeightOrigin
+from donext.planning import aware, resolve_timezone
 from donext.routers.courses import owned_course
+from donext.routers.semesters import owned_semester
 from donext.schemas import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -48,6 +51,27 @@ def validate_task_links(
         owned_task(db, user_id, parent_task_id)
 
 
+def validate_course_deadline(
+    db: DbSession,
+    user: User,
+    course_id: uuid.UUID | None,
+    deadline_at: datetime | None,
+) -> None:
+    if course_id is None or deadline_at is None:
+        return
+    course = owned_course(db, user.id, course_id)
+    semester = owned_semester(db, user.id, course.semester_id)
+    due_date = aware(deadline_at).astimezone(resolve_timezone(user.timezone)).date()
+    if semester.start_date <= due_date <= semester.end_date:
+        return
+    raise ApiError(
+        "VALIDATION_ERROR",
+        f"The deadline {due_date.isoformat()} is outside {semester.name} "
+        f"({semester.start_date.isoformat()} to {semester.end_date.isoformat()}).",
+        422,
+    )
+
+
 @router.get("", response_model=list[TaskRead])
 def list_tasks(
     db: DbSession,
@@ -71,6 +95,7 @@ def create_task(payload: TaskCreate, db: DbSession, current_user: CurrentUser) -
         payload.academic_item_id,
         payload.parent_task_id,
     )
+    validate_course_deadline(db, current_user, payload.course_id, payload.deadline_at)
     values = payload.model_dump()
     if values["remaining_minutes"] is None:
         values["remaining_minutes"] = payload.estimated_minutes
@@ -126,6 +151,12 @@ def update_task(
     deadline = values.get("deadline_at", task.deadline_at)
     if earliest and deadline and deadline <= earliest:
         raise ApiError("VALIDATION_ERROR", "Task deadline must follow its start time.", 422)
+    validate_course_deadline(
+        db,
+        current_user,
+        values.get("course_id", task.course_id),
+        deadline,
+    )
     for field, value in values.items():
         setattr(task, field, value)
     db.commit()

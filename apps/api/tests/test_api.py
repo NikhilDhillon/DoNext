@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -250,7 +250,7 @@ def test_core_planning_crud(client: TestClient) -> None:
     assert goal["planning_kind"] == "goal"
     assert goal["schedule_rule"] is None
 
-    deadline = datetime.now(UTC) + timedelta(days=7)
+    deadline = datetime(2026, 9, 10, 23, 0, tzinfo=UTC)
     task_response = client.post(
         "/api/v1/tasks",
         json={
@@ -339,6 +339,30 @@ def test_validation_errors_are_structured(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_course_task_deadline_must_belong_to_its_semester(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    course = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses",
+        json={"name": "Algorithms", "code": "CSC 320"},
+    ).json()
+
+    response = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Old assignment",
+            "course_id": course["id"],
+            "estimated_minutes": 60,
+            "deadline_at": "2026-01-18T23:59:00-08:00",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert "outside Fall 2026" in response.json()["error"]["message"]
+    assert client.get("/api/v1/tasks").json() == []
 
 
 def test_planning_preferences_can_be_read_and_updated(client: TestClient) -> None:

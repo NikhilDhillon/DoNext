@@ -88,6 +88,7 @@ export function CourseOutlineStep({
       const body = new FormData();
       files.forEach((file) => body.append("files", file));
       body.append("semester_start", semester.start_date);
+      body.append("semester_end", semester.end_date);
       const extracted = await apiUpload<OutlineExtraction[]>("/documents/parse-outlines", body);
       setProposals(extracted);
       setFiles([]);

@@ -138,7 +138,12 @@ class ExtractedDocument:
     metadata: dict[str, str] = field(default_factory=dict)
 
 
-def extract_outline(file_name: str, content: bytes, semester_start: date) -> OutlineExtractionRead:
+def extract_outline(
+    file_name: str,
+    content: bytes,
+    semester_start: date,
+    semester_end: date | None = None,
+) -> OutlineExtractionRead:
     suffix = Path(file_name).suffix.lower()
     document = _extract_document(suffix, content)
     lines = _clean_lines(document.text)
@@ -163,6 +168,7 @@ def extract_outline(file_name: str, content: bytes, semester_start: date) -> Out
         ]
     )
     warnings = _proposal_warnings(course, items, meetings, document_type)
+    warnings.extend(_semester_date_warnings(items, semester_start, semester_end))
     if document_type == "course_schedule":
         warnings.extend(_source_date_warnings(document, semester_start))
 
@@ -217,6 +223,7 @@ def merge_outline_extractions(
             for item in related
             for warning in item.warnings
             if warning.startswith("The document contains calendar headings")
+            or warning.startswith("Extracted deadlines fall outside")
         ]
         warnings = list(
             dict.fromkeys(
@@ -1167,6 +1174,34 @@ def _source_date_warnings(document: ExtractedDocument, semester_start: date) -> 
     return [
         f"The document contains calendar headings for {listed}, but this semester starts in "
         f"{semester_start.year}. DoNext used {semester_start.year}; review those dates."
+    ]
+
+
+def _semester_date_warnings(
+    items: list[OutlineItemProposal], semester_start: date, semester_end: date | None
+) -> list[str]:
+    invalid = [
+        (item.name, item.deadline_at.date())
+        for item in items
+        if item.deadline_at is not None
+        and (
+            item.deadline_at.date() < semester_start
+            or (semester_end is not None and item.deadline_at.date() > semester_end)
+        )
+    ]
+    if not invalid:
+        return []
+    examples = ", ".join(f"{name} ({due_date.isoformat()})" for name, due_date in invalid[:3])
+    remainder = len(invalid) - 3
+    suffix = f", plus {remainder} more" if remainder > 0 else ""
+    date_range = (
+        f"{semester_start.isoformat()} to {semester_end.isoformat()}"
+        if semester_end is not None
+        else f"starting {semester_start.isoformat()}"
+    )
+    return [
+        f"Extracted deadlines fall outside the semester dates ({date_range}): "
+        f"{examples}{suffix}. Correct or remove them before importing."
     ]
 
 

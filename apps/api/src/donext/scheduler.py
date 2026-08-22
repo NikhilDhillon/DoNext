@@ -19,6 +19,10 @@ class SchedulingItem:
     intensity: str
     kind: str = "task"
     eligible_dates: frozenset[date] | None = None
+    importance_rank: int = 0
+    due_at: datetime | None = None
+    earliest_start_at: datetime | None = None
+    latest_end_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -98,17 +102,31 @@ def solve_schedule(
             if candidate.item.kind == "task"
         ]
     )
-    model.maximize(required_minutes)
+    academic_importance = cp_model.LinearExpr.sum(
+        [
+            selected[index] * candidate.duration_minutes * max(candidate.item.importance_rank, 0)
+            for index, candidate in enumerate(candidates)
+            if candidate.item.kind == "task"
+        ]
+    )
+    maximum_importance = sum(
+        item.target_minutes * max(item.importance_rank, 0) for item in items if item.kind == "task"
+    )
+    coverage_base = maximum_importance + 1
+    model.maximize(required_minutes * coverage_base + academic_importance)
     solver = _solver(time_limit_seconds)
     first_status = solver.solve(model)
     if first_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return SchedulingResult("infeasible", [], {item.id: 0 for item in items}, False)
-    best_required = round(solver.objective_value)
+    best_required = solver.value(required_minutes)
+    best_importance = solver.value(academic_importance)
     model.add(required_minutes == best_required)
+    model.add(academic_importance == best_importance)
 
+    latest_window_end = max(window.end_at for window in windows)
     preference = cp_model.LinearExpr.sum(
         [
-            selected[index] * _candidate_preference(candidate)
+            selected[index] * _candidate_preference(candidate, epoch, latest_window_end)
             for index, candidate in enumerate(candidates)
         ]
     )
@@ -141,7 +159,13 @@ def solve_schedule(
                 reason_details={
                     "energy_level": candidate.energy_level,
                     "priority_rank": candidate.item.priority_rank,
+                    "importance_rank": candidate.item.importance_rank,
                     "session_minutes": candidate.duration_minutes,
+                    **(
+                        {"due_at": candidate.item.due_at.isoformat()}
+                        if candidate.item.due_at
+                        else {}
+                    ),
                     **(
                         {"eligible_date": candidate.start_at.date().isoformat()}
                         if candidate.item.eligible_dates
@@ -177,7 +201,13 @@ def _candidates(items: list[SchedulingItem], windows: list[SchedulingWindow]) ->
                 continue
             for duration in durations:
                 latest = window.end_at - timedelta(minutes=duration)
-                cursor = _round_up(window.start_at)
+                if item.latest_end_at is not None:
+                    latest = min(latest, item.latest_end_at - timedelta(minutes=duration))
+                cursor = _round_up(
+                    max(window.start_at, item.earliest_start_at)
+                    if item.earliest_start_at is not None
+                    else window.start_at
+                )
                 while cursor <= latest:
                     candidates.append(_Candidate(item, cursor, duration, window.energy_level))
                     cursor += timedelta(minutes=GRID_MINUTES)
@@ -199,10 +229,19 @@ def _session_durations(item: SchedulingItem) -> list[int]:
     return sorted({value for value in values if lower <= value <= upper}, reverse=True)
 
 
-def _candidate_preference(candidate: _Candidate) -> int:
+def _candidate_preference(
+    candidate: _Candidate, epoch: datetime, latest_window_end: datetime
+) -> int:
     duration_fit = 1000 - abs(candidate.duration_minutes - candidate.item.preferred_session_minutes)
     energy_fit = 100 if _energy_matches(candidate.item.intensity, candidate.energy_level) else 0
     kind_rank = 1000 if candidate.item.kind == "task" else 100
+    early_fit = max(
+        _minutes_from(epoch, latest_window_end) - _minutes_from(epoch, candidate.start_at),
+        0,
+    )
+    deadline_order = (
+        candidate.item.importance_rank * early_fit if candidate.item.kind == "task" else 0
+    )
     return (
         candidate.duration_minutes * 10000
         - 5000
@@ -210,6 +249,7 @@ def _candidate_preference(candidate: _Candidate) -> int:
         + candidate.item.priority_rank * 100
         + duration_fit
         + energy_fit
+        + deadline_order
     )
 
 

@@ -13,6 +13,8 @@ from sqlalchemy.orm import selectinload
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
+    AcademicItem,
+    AcademicItemType,
     AvailabilityWindow,
     Course,
     FixedEvent,
@@ -50,6 +52,17 @@ from donext.schemas import (
 
 router = APIRouter(tags=["schedule proposals"])
 PRIORITY_RANK = {"optional": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+PLANNING_LEAD_DAYS = {
+    AcademicItemType.final_exam: 28,
+    AcademicItemType.midterm: 28,
+    AcademicItemType.project: 21,
+    AcademicItemType.presentation: 21,
+    AcademicItemType.assignment: 14,
+    AcademicItemType.lab: 14,
+    AcademicItemType.quiz: 7,
+    AcademicItemType.reading: 7,
+    AcademicItemType.other: 14,
+}
 
 
 class FingerprintRecord(Protocol):
@@ -182,6 +195,7 @@ def generate_proposal(
         preserved,
         preferences,
         timezone,
+        freeze_until.astimezone(timezone),
     )
     items, item_links, warnings = _scheduling_items(
         db,
@@ -463,11 +477,16 @@ def _scheduling_windows(
     preserved: list[ScheduledBlock],
     preferences: UserPreference,
     timezone: ZoneInfo,
+    not_before: datetime,
 ) -> list[SchedulingWindow]:
     windows: list[SchedulingWindow] = []
     for offset in range((end_date - start_date).days + 1):
         current = start_date + timedelta(days=offset)
-        available = availability_intervals(current, availability, timezone)
+        available = [
+            (max(start_at, not_before), end_at)
+            for start_at, end_at in availability_intervals(current, availability, timezone)
+            if end_at > not_before
+        ]
         exclusions: list[Interval] = []
         for occurrence in occurrences:
             start_at = occurrence.start_at - timedelta(
@@ -535,6 +554,11 @@ def _scheduling_items(
 ]:
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
     course_ids = {course.id for course in courses}
+    course_codes = {course.id: course.code for course in courses}
+    academic_items = list(
+        db.scalars(select(AcademicItem).where(AcademicItem.course_id.in_(course_ids)))
+    )
+    academic_items_by_id = {item.id: item for item in academic_items}
     goals = list(
         db.scalars(
             select(Goal).where(
@@ -572,17 +596,54 @@ def _scheduling_items(
     items: list[SchedulingItem] = []
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
-    for task in tasks:
+    invalid_deadlines: dict[str, list[tuple[str, date]]] = {}
+    for task in sorted(
+        tasks,
+        key=lambda value: (
+            value.deadline_at is None,
+            aware(value.deadline_at) if value.deadline_at else datetime.max.replace(tzinfo=UTC),
+            value.name,
+        ),
+    ):
         if task.course_id not in course_ids and task.goal_id not in goal_ids:
             continue
         if task.deadline_at is None:
             warnings.append(f'"{task.name}" has no confirmed deadline and was not scheduled.')
             continue
-        due_date = task.deadline_at.astimezone(UTC).date()
+        due_at = aware(task.deadline_at).astimezone(timezone)
+        due_date = due_at.date()
+        if task.course_id in course_ids and not (
+            semester.start_date <= due_date <= semester.end_date
+        ):
+            course_code = course_codes.get(task.course_id, "Course")
+            invalid_deadlines.setdefault(course_code, []).append((task.name, due_date))
+            continue
+        academic_item = (
+            academic_items_by_id.get(task.academic_item_id) if task.academic_item_id else None
+        )
+        lead_days = PLANNING_LEAD_DAYS[
+            academic_item.item_type if academic_item else AcademicItemType.other
+        ]
+        planning_start_date = due_date - timedelta(days=lead_days - 1)
+        earliest_start_at = datetime.combine(
+            max(semester.start_date, planning_start_date), time.min, tzinfo=timezone
+        )
+        if task.earliest_start_at is not None:
+            earliest_start_at = max(
+                earliest_start_at, aware(task.earliest_start_at).astimezone(timezone)
+            )
+        if due_date >= horizon_start and earliest_start_at.date() > horizon_end:
+            continue
         days_to_due = max((due_date - horizon_start).days + 1, 1)
         remaining = max(task.remaining_minutes - preserved_minutes.get(task.id, 0), 0)
         if not remaining:
             continue
+        overdue = due_date < horizon_start
+        if overdue:
+            warnings.append(
+                f'"{task.name}" was due {due_date.isoformat()} and is being scheduled '
+                "as overdue work."
+            )
         if due_date <= horizon_end:
             target = remaining
         else:
@@ -592,19 +653,49 @@ def _scheduling_items(
             )
             target = min(target, remaining)
         identifier = f"task:{task.id}"
+        weight_percent = 0.0
+        if academic_item is not None:
+            weight_percent = (
+                academic_item.direct_weight_percent
+                if academic_item.direct_weight_percent is not None
+                else academic_item.relative_weight_percent or 0.0
+            )
         items.append(
             SchedulingItem(
-                identifier,
-                task.name,
-                target,
-                task.minimum_session_minutes,
-                task.preferred_session_minutes,
-                task.maximum_session_minutes,
-                PRIORITY_RANK[task.priority.value],
-                task.intensity.value,
+                id=identifier,
+                title=task.name,
+                target_minutes=target,
+                minimum_session_minutes=task.minimum_session_minutes,
+                preferred_session_minutes=task.preferred_session_minutes,
+                maximum_session_minutes=task.maximum_session_minutes,
+                priority_rank=PRIORITY_RANK[task.priority.value],
+                intensity=task.intensity.value,
+                importance_rank=_task_importance_rank(
+                    due_date,
+                    horizon_start,
+                    task.required,
+                    PRIORITY_RANK[task.priority.value],
+                    weight_percent,
+                ),
+                due_at=due_at,
+                earliest_start_at=max(
+                    earliest_start_at,
+                    datetime.combine(horizon_start, time.min, tzinfo=timezone),
+                ),
+                latest_end_at=None if overdue else due_at,
             )
         )
         links[identifier] = (task.id, None, "focus")
+    for course_code, invalid in sorted(invalid_deadlines.items()):
+        examples = ", ".join(f"{name} ({deadline.isoformat()})" for name, deadline in invalid[:3])
+        remainder = len(invalid) - 3
+        suffix = f", plus {remainder} more" if remainder > 0 else ""
+        warnings.append(
+            f"{course_code} has {len(invalid)} "
+            f"{'deadline' if len(invalid) == 1 else 'deadlines'} outside {semester.name} "
+            f"({semester.start_date.isoformat()} to {semester.end_date.isoformat()}) and they were "
+            f"not scheduled. Review the imported dates: {examples}{suffix}."
+        )
     for goal in goals:
         if goal.id not in goal_ids:
             continue
@@ -683,6 +774,19 @@ def _scheduling_items(
         )
         links[identifier] = (None, goal.id, "goal")
     return items, links, warnings
+
+
+def _task_importance_rank(
+    due_date: date,
+    horizon_start: date,
+    required: bool,
+    priority_rank: int,
+    weight_percent: float,
+) -> int:
+    days_to_due = max((due_date - horizon_start).days, 0)
+    deadline_rank = max(366 - min(days_to_due, 365), 1)
+    required_rank = 1_000_000 if required else 0
+    return required_rank + deadline_rank * 1000 + priority_rank * 100 + round(weight_percent)
 
 
 def _unscheduled_summary(
