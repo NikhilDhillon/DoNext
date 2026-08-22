@@ -1,5 +1,6 @@
 from datetime import datetime
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
@@ -54,6 +55,46 @@ def test_proposal_is_editable_and_acceptance_is_atomic(client: TestClient) -> No
     schedule = client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()
     assert schedule["id"] == proposal["id"]
     assert any(item["title"] == "Reviewed graph session" for item in schedule["blocks"])
+
+
+def test_proposal_blocks_stay_inside_saved_focus_hours(client: TestClient) -> None:
+    semester, _ = proposal_fixture(client)
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    block = proposal["blocks"][0]
+    original_start = datetime.fromisoformat(block["start_at"])
+    outside_start = original_start.replace(
+        hour=19,
+        minute=0,
+        second=0,
+        microsecond=0,
+        tzinfo=ZoneInfo("America/Vancouver"),
+    )
+    outside_end = outside_start.replace(hour=20)
+
+    created = client.post(
+        f"/api/v1/schedule-proposals/{proposal['id']}/blocks",
+        json={
+            "title": "Outside focus check",
+            "start_at": outside_start.isoformat(),
+            "end_at": outside_end.isoformat(),
+            "block_type": "focus",
+        },
+    )
+    assert created.status_code == 422
+    assert created.json()["error"]["code"] == "OUTSIDE_FOCUS_HOURS"
+
+    response = client.patch(
+        f"/api/v1/schedule-proposals/{proposal['id']}/blocks/{block['id']}",
+        json={"start_at": outside_start.isoformat(), "end_at": outside_end.isoformat()},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "OUTSIDE_FOCUS_HOURS"
+    unchanged = client.get(f"/api/v1/semesters/{semester['id']}/schedule/proposal").json()["blocks"]
+    assert (
+        next(item for item in unchanged if item["id"] == block["id"])["start_at"]
+        == block["start_at"]
+    )
 
 
 def test_stale_and_rejected_proposals_never_replace_the_accepted_plan(

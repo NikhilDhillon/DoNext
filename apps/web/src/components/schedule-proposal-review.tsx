@@ -16,6 +16,7 @@ import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
+  AvailabilityWindow,
   PlannerTask,
   PlanningEntry,
   ScheduleBlock,
@@ -39,6 +40,7 @@ export function ScheduleProposalReview({
   const proposal = useApiResource<ScheduleProposal>(
     `/semesters/${semester.id}/schedule/proposal`,
   );
+  const availability = useApiResource<AvailabilityWindow[]>("/availability");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<"accept" | "reject" | null>(null);
@@ -90,7 +92,14 @@ export function ScheduleProposalReview({
 
   function addBlock(date?: string) {
     setSelectedEntry(null);
-    setEditorDate(date ?? proposal.data?.horizon_start ?? semester.start_date);
+    setEditorDate(
+      date
+      ?? firstFocusDate(
+        proposal.data?.horizon_start ?? semester.start_date,
+        proposal.data?.horizon_end ?? semester.end_date,
+        availability.data ?? [],
+      ),
+    );
     setEditorOpen(true);
   }
 
@@ -223,6 +232,24 @@ function blockEntry(block: ScheduleBlock): PlanningEntry {
   };
 }
 
+function firstFocusDate(
+  startDate: string,
+  endDate: string,
+  availability: AvailabilityWindow[],
+) {
+  const availableDays = new Set(
+    availability
+      .filter((window) => window.type !== "unavailable")
+      .map((window) => window.day_of_week),
+  );
+  for (let offset = 0; offset <= dateDifference(startDate, endDate); offset += 1) {
+    const candidate = addDays(startDate, offset);
+    const weekdayIndex = (new Date(`${candidate}T12:00:00Z`).getUTCDay() + 6) % 7;
+    if (availableDays.has(weekdayIndex)) return candidate;
+  }
+  return startDate;
+}
+
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiRequestError ? error.message : fallback;
 }
@@ -243,4 +270,16 @@ function dateInTimezone(value: string, timezone: string) {
   const parts = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: timezone }).formatToParts(new Date(value));
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
   return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+function dateDifference(start: string, end: string) {
+  return Math.round(
+    (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000,
+  );
+}
+
+function addDays(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }

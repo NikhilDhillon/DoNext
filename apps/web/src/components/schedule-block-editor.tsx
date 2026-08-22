@@ -5,8 +5,14 @@ import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
 
 import { FormDialog } from "@/components/form-dialog";
+import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { PlannerTask, PlanningEntry, ScheduleBlock } from "@/lib/types";
+import type {
+  AvailabilityWindow,
+  PlannerTask,
+  PlanningEntry,
+  ScheduleBlock,
+} from "@/lib/types";
 
 type ScheduleBlockEditorProps = {
   open: boolean;
@@ -31,7 +37,11 @@ export function ScheduleBlockEditor({
   onClose,
   onSaved,
 }: ScheduleBlockEditorProps) {
-  const defaults = useMemo(() => defaultTimes(date), [date]);
+  const availability = useApiResource<AvailabilityWindow[]>(open ? "/availability" : null);
+  const defaults = useMemo(
+    () => defaultTimes(date, availability.data ?? []),
+    [availability.data, date],
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -112,7 +122,7 @@ export function ScheduleBlockEditor({
   const endValue = entry ? toDateTimeInput(entry.end_at) : defaults.end;
   const selectedTaskId = entry?.task_id ?? suggestedTask?.id ?? "";
   const title = entry?.title ?? suggestedTask?.name ?? "";
-  const formKey = `${entry?.id ?? "new"}:${suggestedTask?.id ?? "none"}:${date}:${open}`;
+  const formKey = `${entry?.id ?? "new"}:${suggestedTask?.id ?? "none"}:${date}:${defaults.start}:${open}`;
 
   return (
     <FormDialog
@@ -188,15 +198,27 @@ function toDateTimeInput(value: string) {
   return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
-function defaultTimes(dateValue: string) {
+function defaultTimes(dateValue: string, availability: AvailabilityWindow[]) {
   const now = new Date();
   const today = localDateValue(now);
-  const start = dateValue === today ? new Date(now) : new Date(`${dateValue}T09:00:00`);
-  if (dateValue === today) {
+  const weekdayIndex = (new Date(`${dateValue}T12:00:00Z`).getUTCDay() + 6) % 7;
+  const firstWindow = availability
+    .filter((window) => window.day_of_week === weekdayIndex && window.type !== "unavailable")
+    .sort((first, second) => first.start_time.localeCompare(second.start_time))[0];
+  const start = firstWindow
+    ? new Date(`${dateValue}T${firstWindow.start_time.slice(0, 5)}:00`)
+    : dateValue === today
+      ? new Date(now)
+      : new Date(`${dateValue}T09:00:00`);
+  if (!firstWindow && dateValue === today) {
     start.setSeconds(0, 0);
     start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30);
   }
-  const end = new Date(start.getTime() + 50 * 60_000);
+  const preferredEnd = new Date(start.getTime() + 50 * 60_000);
+  const windowEnd = firstWindow
+    ? new Date(`${dateValue}T${firstWindow.end_time.slice(0, 5)}:00`)
+    : null;
+  const end = windowEnd && windowEnd < preferredEnd ? windowEnd : preferredEnd;
   return { start: toDateTimeInput(start.toISOString()), end: toDateTimeInput(end.toISOString()) };
 }
 

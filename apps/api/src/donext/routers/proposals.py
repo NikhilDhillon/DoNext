@@ -279,6 +279,7 @@ def create_proposal_block(
         payload.goal_id,
     )
     validate_times(db, current_user, semester, proposal.id, payload.start_at, payload.end_at)
+    validate_focus_hours(db, current_user, payload.start_at, payload.end_at)
     block = ScheduledBlock(
         schedule_version_id=proposal.id,
         user_id=current_user.id,
@@ -318,6 +319,8 @@ def update_proposal_block(
     start_at = values.get("start_at", aware(block.start_at))
     end_at = values.get("end_at", aware(block.end_at))
     validate_times(db, current_user, semester, proposal.id, start_at, end_at, block.id)
+    if "start_at" in values or "end_at" in values:
+        validate_focus_hours(db, current_user, start_at, end_at)
     for field, value in values.items():
         setattr(block, field, value)
     block.source = "proposal_edit"
@@ -328,6 +331,38 @@ def update_proposal_block(
     db.commit()
     db.refresh(block)
     return block
+
+
+def validate_focus_hours(
+    db: DbSession,
+    user: User,
+    start_at: datetime,
+    end_at: datetime,
+) -> None:
+    timezone = resolve_timezone(user.timezone)
+    local_start = start_at.astimezone(timezone)
+    local_end = end_at.astimezone(timezone)
+    if local_start.date() != local_end.date():
+        raise ApiError(
+            "OUTSIDE_FOCUS_HOURS",
+            "Choose a time inside your saved focus hours for one day.",
+            422,
+        )
+    windows = list(
+        db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == user.id))
+    )
+    if any(
+        interval_start <= local_start and local_end <= interval_end
+        for interval_start, interval_end in availability_intervals(
+            local_start.date(), windows, timezone
+        )
+    ):
+        return
+    raise ApiError(
+        "OUTSIDE_FOCUS_HOURS",
+        "Choose a time inside your saved focus hours for that day.",
+        422,
+    )
 
 
 @router.delete("/schedule-proposals/{proposal_id}/blocks/{block_id}", status_code=204)

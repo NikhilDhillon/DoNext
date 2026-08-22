@@ -6,7 +6,12 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { PlanningEntry, PlanningView, ScheduleBlock } from "@/lib/types";
+import type {
+  AvailabilityWindow,
+  PlanningEntry,
+  PlanningView,
+  ScheduleBlock,
+} from "@/lib/types";
 
 type DraftScheduleCalendarProps = {
   blocks: ScheduleBlock[];
@@ -64,6 +69,7 @@ export function DraftScheduleCalendar({
   const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
   const selectedWeekEnd = earlierDate(addDays(selectedWeek, 6), horizonEnd);
   const classPlan = useApiResource<PlanningView>(`/planning/week?start=${selectedWeek}`);
+  const availability = useApiResource<AvailabilityWindow[]>("/availability");
   const days = Array.from(
     { length: dateDifference(selectedWeek, selectedWeekEnd) + 1 },
     (_, index) => addDays(selectedWeek, index),
@@ -78,9 +84,21 @@ export function DraftScheduleCalendar({
       && dateInTimezone(entry.start_at, timezone) >= selectedWeek
       && dateInTimezone(entry.start_at, timezone) <= selectedWeekEnd
   ));
-  const { startHour, endHour } = calendarBounds([...blocks, ...visibleClasses], timezone);
+  const { startHour, endHour } = availability.data?.length
+    ? focusBounds(availability.data)
+    : calendarBounds([...blocks, ...visibleClasses], timezone);
+  const displayedBlocks = availability.data?.length
+    ? visibleBlocks.filter((block) => blockFitsFocusHours(block, timezone, availability.data ?? []))
+    : visibleBlocks;
+  const outsideFocusBlocks = visibleBlocks.filter((block) => !displayedBlocks.includes(block));
+  const displayedClasses = availability.data?.length
+    ? visibleClasses.filter((entry) => entryFitsCalendar(entry, timezone, startHour, endHour))
+    : visibleClasses;
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
   const rows = (endHour - startHour) * 2;
+  const focusHours = availability.data?.length
+    ? formatFocusHours(availability.data)
+    : null;
 
   function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLButtonElement>) {
     if (savingBlockId) return;
@@ -115,8 +133,13 @@ export function DraftScheduleCalendar({
       startHour,
       endHour,
       timezone,
+      availability.data ?? [],
     );
-    if (!placement) return;
+    if (!placement) {
+      dragPreviewRef.current = null;
+      setDragPreview(null);
+      return;
+    }
     dragPreviewRef.current = placement;
     setDragPreview(placement);
   }
@@ -130,6 +153,9 @@ export function DraftScheduleCalendar({
     dragPreviewRef.current = null;
     if (!session.moved || !placement) {
       setDragPreview(null);
+      if (session.moved && !placement) {
+        setMoveError("That block does not fit inside your saved focus hours for that day.");
+      }
       return;
     }
 
@@ -198,6 +224,7 @@ export function DraftScheduleCalendar({
         <div>
           <span>Showing week {weekIndex + 1} of {weekStarts.length}</span>
           <strong>{formatRange(selectedWeek, selectedWeekEnd)}</strong>
+          {focusHours ? <small>Focus hours · {focusHours}</small> : null}
         </div>
         <div className="draft-week-controls" aria-label="Choose a draft week">
           <button
@@ -240,11 +267,14 @@ export function DraftScheduleCalendar({
             <div key={day}>
               <span>{weekday(day)}</span>
               <strong>{dayNumber(day)}</strong>
-              <small>{dayEntryLabel(visibleBlocks, visibleClasses, day, timezone)}</small>
+              <small>{dayEntryLabel(displayedBlocks, displayedClasses, day, timezone)}</small>
             </div>
           ))}
         </div>
-        <div className="calendar-body live-calendar-body draft-calendar-body">
+        <div
+          className="calendar-body live-calendar-body draft-calendar-body"
+          style={{ height: Math.min(Math.max(rows * 30, 120), 590) }}
+        >
           <div className="time-axis live-time-axis" style={{ gridTemplateRows: `repeat(${hours.length}, 60px)` }}>
             {hours.map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
           </div>
@@ -255,14 +285,17 @@ export function DraftScheduleCalendar({
           >
             {days.map((day) => (
               <button
-                aria-label={`Add a draft block on ${formatCalendarDate(day)}`}
+                aria-label={hasFocusTime(day, availability.data ?? [])
+                  ? `Add a draft block on ${formatCalendarDate(day)}`
+                  : `${formatCalendarDate(day)} is outside your saved focus days`}
                 className="day-column"
+                disabled={!hasFocusTime(day, availability.data ?? [])}
                 key={day}
                 type="button"
                 onClick={() => onAdd(day)}
               />
             ))}
-            {visibleBlocks.map((block) => (
+            {displayedBlocks.map((block) => (
               <DraftBlock
                 block={block}
                 dragging={draggingBlockId === block.id}
@@ -279,7 +312,7 @@ export function DraftScheduleCalendar({
                 onPointerUp={(event) => void finishDrag(event.pointerId)}
               />
             ))}
-            {visibleClasses.map((entry) => (
+            {displayedClasses.map((entry) => (
               <DraftClassBlock
                 entry={entry}
                 key={entry.id}
@@ -293,12 +326,29 @@ export function DraftScheduleCalendar({
       </section>
       {moveError ? <p className="draft-calendar-move-message error" role="alert">{moveError}</p> : null}
       {moveStatus ? <p className="draft-calendar-move-message" aria-live="polite">{moveStatus}</p> : null}
+      {outsideFocusBlocks.length ? (
+        <div className="draft-calendar-outside-focus" role="alert">
+          <strong>{outsideFocusBlocks.length} draft {outsideFocusBlocks.length === 1 ? "block is" : "blocks are"} outside your current focus hours.</strong>
+          <span>Edit or regenerate {outsideFocusBlocks.length === 1 ? "it" : "them"} before accepting this draft.</span>
+          <div>
+            {outsideFocusBlocks.map((block) => (
+              <button key={block.id} type="button" onClick={() => onEdit(block)}>
+                {block.title} · {formatBlockTime(block, timezone)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
       {classPlan.error ? (
         <p className="draft-calendar-notice error">Classes could not be loaded into this preview.</p>
+      ) : availability.error ? (
+        <p className="draft-calendar-notice error">Focus hours could not be loaded into this preview.</p>
       ) : classPlan.loading ? (
         <p className="draft-calendar-notice">Loading classes into the draft calendar…</p>
+      ) : availability.loading ? (
+        <p className="draft-calendar-notice">Loading your focus hours…</p>
       ) : null}
-      {!visibleBlocks.length && !visibleClasses.length && !classPlan.loading ? (
+      {!displayedBlocks.length && !displayedClasses.length && !classPlan.loading ? (
         <p className="draft-calendar-empty">No classes or draft blocks appear in this week. Click any day column to add a block.</p>
       ) : null}
     </div>
@@ -417,6 +467,7 @@ function placementFromPointer(
   startHour: number,
   endHour: number,
   timezone: string,
+  availability: AvailabilityWindow[],
 ): DragPreview | null {
   if (!grid || !days.length) return null;
   const bounds = grid.getBoundingClientRect();
@@ -441,13 +492,20 @@ function placementFromPointer(
   const minuteDelta = Math.round(
     ((clientY - originY) / (bounds.height / calendarMinutes)) / 15,
   ) * 15;
-  const targetMinutesFromStart = clamp(
+  const requestedMinutesFromStart = clamp(
     originalMinutes + minuteDelta,
     0,
     Math.max(calendarMinutes - durationMinutes, 0),
   );
-  const targetHour = startHour + Math.floor(targetMinutesFromStart / 60);
-  const targetMinute = targetMinutesFromStart % 60;
+  const requestedMinuteOfDay = startHour * 60 + requestedMinutesFromStart;
+  const targetMinuteOfDay = closestAvailableStart(
+    requestedMinuteOfDay,
+    durationMinutes,
+    focusIntervalsForDate(days[dayIndex], availability),
+  );
+  if (targetMinuteOfDay === null) return null;
+  const targetHour = Math.floor(targetMinuteOfDay / 60);
+  const targetMinute = targetMinuteOfDay % 60;
   const startAt = zonedDateTimeToIso(days[dayIndex], targetHour, targetMinute, timezone);
   return {
     blockId: block.id,
@@ -511,6 +569,122 @@ function calendarBounds(entries: Array<{ start_at: string; end_at: string }>, ti
     startHour: Math.max(Math.min(8, ...starts), 0),
     endHour: Math.min(Math.max(18, ...ends), 24),
   };
+}
+
+function focusBounds(windows: AvailabilityWindow[]) {
+  const positive = windows.filter((window) => window.type !== "unavailable");
+  if (!positive.length) return { startHour: 8, endHour: 18 };
+  const starts = positive.map((window) => clockMinutes(window.start_time));
+  const ends = positive.map((window) => clockMinutes(window.end_time));
+  return {
+    startHour: Math.floor(Math.min(...starts) / 60),
+    endHour: Math.ceil(Math.max(...ends) / 60),
+  };
+}
+
+function blockFitsFocusHours(
+  block: ScheduleBlock,
+  timezone: string,
+  windows: AvailabilityWindow[],
+) {
+  const startDate = dateInTimezone(block.start_at, timezone);
+  if (startDate !== dateInTimezone(block.end_at, timezone)) return false;
+  const start = timeParts(block.start_at, timezone);
+  const end = timeParts(block.end_at, timezone);
+  const startMinute = start.hour * 60 + start.minute;
+  const endMinute = end.hour * 60 + end.minute;
+  return focusIntervalsForDate(startDate, windows).some(
+    ([windowStart, windowEnd]) => windowStart <= startMinute && endMinute <= windowEnd,
+  );
+}
+
+function entryFitsCalendar(
+  entry: PlanningEntry,
+  timezone: string,
+  startHour: number,
+  endHour: number,
+) {
+  const start = timeParts(entry.start_at, timezone);
+  const end = timeParts(entry.end_at, timezone);
+  return start.hour * 60 + start.minute >= startHour * 60
+    && end.hour * 60 + end.minute <= endHour * 60;
+}
+
+function focusIntervalsForDate(date: string, windows: AvailabilityWindow[]) {
+  const weekdayIndex = (new Date(`${date}T12:00:00Z`).getUTCDay() + 6) % 7;
+  const matching = windows.filter((window) => window.day_of_week === weekdayIndex);
+  const positive = mergeMinuteIntervals(
+    matching
+      .filter((window) => window.type !== "unavailable")
+      .map((window) => [clockMinutes(window.start_time), clockMinutes(window.end_time)]),
+  );
+  const unavailable = mergeMinuteIntervals(
+    matching
+      .filter((window) => window.type === "unavailable")
+      .map((window) => [clockMinutes(window.start_time), clockMinutes(window.end_time)]),
+  );
+  return unavailable.reduce(
+    (remaining, exclusion) => remaining.flatMap((interval) => subtractMinuteInterval(interval, exclusion)),
+    positive,
+  );
+}
+
+function mergeMinuteIntervals(intervals: number[][]) {
+  const merged: number[][] = [];
+  for (const interval of intervals.sort((first, second) => first[0] - second[0])) {
+    const previous = merged[merged.length - 1];
+    if (!previous || interval[0] > previous[1]) {
+      merged.push([...interval]);
+    } else {
+      previous[1] = Math.max(previous[1], interval[1]);
+    }
+  }
+  return merged;
+}
+
+function subtractMinuteInterval(interval: number[], exclusion: number[]) {
+  const [start, end] = interval;
+  const [excludedStart, excludedEnd] = exclusion;
+  if (excludedEnd <= start || excludedStart >= end) return [interval];
+  const remaining: number[][] = [];
+  if (excludedStart > start) remaining.push([start, Math.min(excludedStart, end)]);
+  if (excludedEnd < end) remaining.push([Math.max(excludedEnd, start), end]);
+  return remaining;
+}
+
+function closestAvailableStart(requested: number, duration: number, intervals: number[][]) {
+  const candidates = intervals
+    .filter(([start, end]) => end - start >= duration)
+    .map(([start, end]) => clamp(requested, start, end - duration));
+  if (!candidates.length) return null;
+  return candidates.reduce((closest, candidate) => (
+    Math.abs(candidate - requested) < Math.abs(closest - requested) ? candidate : closest
+  ));
+}
+
+function hasFocusTime(date: string, windows: AvailabilityWindow[]) {
+  return focusIntervalsForDate(date, windows).length > 0;
+}
+
+function clockMinutes(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function formatFocusHours(windows: AvailabilityWindow[]) {
+  const positive = windows.filter((window) => window.type !== "unavailable");
+  if (!positive.length) return "No focus time saved";
+  const start = Math.min(...positive.map((window) => clockMinutes(window.start_time)));
+  const end = Math.max(...positive.map((window) => clockMinutes(window.end_time)));
+  return `${formatClockMinutes(start)}–${formatClockMinutes(end)}`;
+}
+
+function formatClockMinutes(value: number) {
+  const hour = Math.floor(value / 60);
+  const minute = value % 60;
+  const suffix = hour >= 12 ? "PM" : "AM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${String(minute).padStart(2, "0")} ${suffix}`;
 }
 
 function dayEntryLabel(
