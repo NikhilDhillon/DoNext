@@ -477,11 +477,12 @@ def _copy_preserved_blocks(
     if accepted is None:
         return preserved
     for block in accepted.blocks:
-        block_date = block.start_at.astimezone(UTC).date()
+        block_start = aware(block.start_at)
+        block_date = block_start.astimezone(UTC).date()
         eligible_generated = (
             block.source == "generated"
             and not block.locked
-            and block.start_at >= freeze_until
+            and block_start >= freeze_until
             and horizon_start <= block_date <= horizon_end
         )
         if eligible_generated:
@@ -626,16 +627,12 @@ def _scheduling_items(
         )
     )
     preserved_minutes: dict[uuid.UUID, int] = {}
-    preserved_goal_minutes: dict[uuid.UUID, int] = {}
     preserved_goal_minutes_by_date: dict[tuple[uuid.UUID, date], int] = {}
     for block in preserved:
         minutes = round((block.end_at - block.start_at).total_seconds() / 60)
         if block.task_id:
             preserved_minutes[block.task_id] = preserved_minutes.get(block.task_id, 0) + minutes
         if block.goal_id:
-            preserved_goal_minutes[block.goal_id] = (
-                preserved_goal_minutes.get(block.goal_id, 0) + minutes
-            )
             local_date = aware(block.start_at).astimezone(timezone).date()
             key = (block.goal_id, local_date)
             preserved_goal_minutes_by_date[key] = (
@@ -755,8 +752,18 @@ def _scheduling_items(
                 warnings.append(f'"{goal.name}" has an invalid flexible schedule target.')
                 continue
             if cadence == "weekly":
-                flexible_dates: list[date | None] = [None]
-                targets = [max(target_minutes * 2 - preserved_goal_minutes.get(goal.id, 0), 0)]
+                flexible_date_sets = _weekly_target_date_sets(horizon_start, horizon_end)
+                targets = [
+                    max(
+                        target_minutes
+                        - sum(
+                            preserved_goal_minutes_by_date.get((goal.id, eligible_date), 0)
+                            for eligible_date in eligible_dates
+                        ),
+                        0,
+                    )
+                    for eligible_dates in flexible_date_sets
+                ]
             elif cadence == "selected_days":
                 selected_days = rule.get("days_of_week")
                 if not isinstance(selected_days, list):
@@ -767,7 +774,9 @@ def _scheduling_items(
                     for offset in range((horizon_end - horizon_start).days + 1)
                     if (horizon_start + timedelta(days=offset)).weekday() in selected_days
                 ]
-                flexible_dates = list(matching_dates)
+                flexible_date_sets = [
+                    frozenset({matching_date}) for matching_date in matching_dates
+                ]
                 targets = [
                     max(
                         target_minutes
@@ -779,10 +788,11 @@ def _scheduling_items(
             else:
                 warnings.append(f'"{goal.name}" has an unsupported flexible schedule rule.')
                 continue
-            for eligible_date, target in zip(flexible_dates, targets, strict=True):
+            for eligible_dates, target in zip(flexible_date_sets, targets, strict=True):
                 if target <= 0:
                     continue
-                suffix = f":{eligible_date.isoformat()}" if eligible_date else ""
+                first_eligible_date = min(eligible_dates)
+                suffix = f":{first_eligible_date.isoformat()}"
                 identifier = f"flex:{goal.id}{suffix}"
                 items.append(
                     SchedulingItem(
@@ -795,33 +805,62 @@ def _scheduling_items(
                         PRIORITY_RANK[goal.priority.value],
                         "moderate",
                         "flexible_commitment",
-                        frozenset({eligible_date}) if eligible_date else None,
+                        eligible_dates,
                     )
                 )
                 links[identifier] = (None, goal.id, "commitment")
             continue
-        identifier = f"goal:{goal.id}"
-        target = max(
-            goal.preferred_weekly_minutes * 2 - preserved_goal_minutes.get(goal.id, 0),
-            0,
-        )
-        if target <= 0:
-            continue
-        items.append(
-            SchedulingItem(
-                identifier,
-                goal.name,
-                target,
-                goal.minimum_session_minutes,
-                goal.preferred_session_minutes,
-                goal.maximum_session_minutes,
-                PRIORITY_RANK[goal.priority.value],
-                "moderate",
-                "goal",
+        for eligible_dates in _weekly_target_date_sets(horizon_start, horizon_end):
+            target = max(
+                goal.preferred_weekly_minutes
+                - sum(
+                    preserved_goal_minutes_by_date.get((goal.id, eligible_date), 0)
+                    for eligible_date in eligible_dates
+                ),
+                0,
             )
-        )
-        links[identifier] = (None, goal.id, "goal")
+            if target <= 0:
+                continue
+            identifier = f"goal:{goal.id}:{min(eligible_dates).isoformat()}"
+            items.append(
+                SchedulingItem(
+                    identifier,
+                    goal.name,
+                    target,
+                    goal.minimum_session_minutes,
+                    goal.preferred_session_minutes,
+                    goal.maximum_session_minutes,
+                    PRIORITY_RANK[goal.priority.value],
+                    "moderate",
+                    "goal",
+                    eligible_dates,
+                )
+            )
+            links[identifier] = (None, goal.id, "goal")
     return items, links, warnings
+
+
+def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[frozenset[date]]:
+    """Return the two calendar weeks owned by this rolling planning pass.
+
+    A 14-day horizon can touch three Monday-to-Sunday weeks when it begins midweek. The
+    trailing partial week belongs to the next rolling pass; including it here would request
+    three weekly targets inside a two-week proposal. The current partial week still receives
+    its full remaining target, followed by the next complete calendar week.
+    """
+    first_monday = horizon_start - timedelta(days=horizon_start.weekday())
+    date_sets: list[frozenset[date]] = []
+    week_start = first_monday
+    while week_start <= horizon_end and len(date_sets) < 2:
+        eligible_dates = frozenset(
+            current
+            for offset in range(7)
+            if horizon_start <= (current := week_start + timedelta(days=offset)) <= horizon_end
+        )
+        if eligible_dates:
+            date_sets.append(eligible_dates)
+        week_start += timedelta(days=7)
+    return date_sets
 
 
 def _task_importance_rank(
@@ -848,11 +887,11 @@ def _unscheduled_summary(
         scheduled = scheduled_minutes[item.id]
         remaining = item.target_minutes - scheduled
         _, goal_id, block_type = links[item.id]
-        if block_type == "commitment" and goal_id is not None:
+        if block_type in {"commitment", "goal"} and goal_id is not None:
             entry = flexible.setdefault(
                 goal_id,
                 {
-                    "id": f"flex:{goal_id}",
+                    "id": f"{'flex' if block_type == 'commitment' else 'goal'}:{goal_id}",
                     "name": item.title,
                     "requested_minutes": 0,
                     "scheduled_minutes": 0,

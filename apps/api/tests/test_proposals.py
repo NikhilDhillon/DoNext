@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -270,7 +270,7 @@ def test_legacy_out_of_semester_deadlines_are_quarantined_from_proposals(
     )
 
 
-def test_weekly_flexible_commitment_is_proposed_as_commitment_time(
+def test_weekly_flexible_commitment_is_proposed_in_each_calendar_week(
     client: TestClient,
 ) -> None:
     register(client)
@@ -297,7 +297,92 @@ def test_weekly_flexible_commitment_is_proposed_as_commitment_time(
     assert proposal["generation_summary"]["scheduled_minutes"] == 360
     assert {block["block_type"] for block in proposal["blocks"]} == {"commitment"}
     assert {block["goal_id"] for block in proposal["blocks"]} == {flexible["id"]}
+    assert _minutes_by_calendar_week(proposal["blocks"]) == {
+        date(2026, 8, 31): 180,
+        date(2026, 9, 7): 180,
+    }
     assert client.get(f"/api/v1/semesters/{semester['id']}/schedule").json() is None
+
+
+def test_personal_goal_is_proposed_in_each_calendar_week(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    goal = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Portfolio",
+            "semester_id": semester["id"],
+            "category": "personal",
+            "start_date": semester["start_date"],
+            "planning_kind": "goal",
+            "minimum_weekly_minutes": 60,
+            "preferred_weekly_minutes": 180,
+            "maximum_weekly_minutes": 240,
+        },
+    )
+    assert goal.status_code == 201
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert {block["block_type"] for block in proposal["blocks"]} == {"goal"}
+    assert _minutes_by_calendar_week(proposal["blocks"]) == {
+        date(2026, 8, 31): 180,
+        date(2026, 9, 7): 180,
+    }
+
+
+def test_preserved_flexible_time_only_reduces_its_calendar_week(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    client.post(
+        "/api/v1/goals",
+        json={
+            "name": "French",
+            "semester_id": semester["id"],
+            "category": "personal",
+            "start_date": semester["start_date"],
+            "planning_kind": "flexible_commitment",
+            "schedule_rule": {"cadence": "weekly", "target_minutes": 360},
+        },
+    )
+    first = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    first_week_block = next(
+        block
+        for block in first["blocks"]
+        if _calendar_week_start(datetime.fromisoformat(block["start_at"]).date())
+        == date(2026, 8, 31)
+    )
+    locked = client.patch(
+        f"/api/v1/schedule-proposals/{first['id']}/blocks/{first_week_block['id']}",
+        json={"locked": True},
+    )
+    assert locked.status_code == 200
+    assert client.post(f"/api/v1/schedule-proposals/{first['id']}/accept").status_code == 200
+
+    regenerated = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    assert _minutes_by_calendar_week(regenerated["blocks"]) == {
+        date(2026, 8, 31): 360,
+        date(2026, 9, 7): 360,
+    }
+
+
+def _minutes_by_calendar_week(blocks: list[dict[str, object]]) -> dict[date, int]:
+    totals: dict[date, int] = {}
+    for block in blocks:
+        start = datetime.fromisoformat(str(block["start_at"]))
+        end = datetime.fromisoformat(str(block["end_at"]))
+        week_start = _calendar_week_start(start.date())
+        totals[week_start] = totals.get(week_start, 0) + round((end - start).total_seconds() / 60)
+    return totals
+
+
+def _calendar_week_start(value: date) -> date:
+    return value - timedelta(days=value.weekday())
 
 
 def test_selected_day_flexible_commitment_reports_one_aggregate_shortfall(
