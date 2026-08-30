@@ -179,6 +179,7 @@ export type ScheduleProposal = Schedule & {
     eligible_capacity_minutes: number;
     protected_free_minutes: number;
     solver_runtime_ms: number;
+    academic_planning_source: "openai" | "fallback" | "mixed" | "none";
     preserved_blocks: number;
     generated_blocks: number;
     moved_blocks: number;

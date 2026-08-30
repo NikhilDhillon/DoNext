@@ -1,14 +1,20 @@
 "use client";
 
-import { BookOpen, Clock3, LoaderCircle, Plus, Scale, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { BookOpen, Clock3, LoaderCircle, Plus, Scale, Trash2, UploadCloud } from "lucide-react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 
+import { CourseOutlineStep } from "@/components/course-outline-step";
 import { FormDialog } from "@/components/form-dialog";
 import { GradingEditor } from "@/components/grading-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { Course, Semester } from "@/lib/types";
+import type {
+  Course,
+  CourseOutlineImportResult,
+  OutlineExtraction,
+  Semester,
+} from "@/lib/types";
 
 const courseColors = ["mint", "violet", "blue", "coral"];
 
@@ -35,6 +41,19 @@ export function CourseManager() {
   const [gradingCourse, setGradingCourse] = useState<Course | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [outlineImporterOpen, setOutlineImporterOpen] = useState(false);
+  const [outlineReviewActive, setOutlineReviewActive] = useState(false);
+  const outlineReviewStarted = useRef(false);
+
+  const handleOutlineReviewActiveChange = useCallback((active: boolean) => {
+    setOutlineReviewActive(active);
+    if (active) {
+      outlineReviewStarted.current = true;
+    } else if (outlineReviewStarted.current) {
+      outlineReviewStarted.current = false;
+      setOutlineImporterOpen(false);
+    }
+  }, []);
 
   async function createSemester(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -73,7 +92,7 @@ export function CourseManager() {
           name: form.get("name"),
           instructor: form.get("instructor") || null,
           difficulty: Number(form.get("difficulty")),
-          weekly_study_target_minutes: Number(form.get("weekly_target")) * 60,
+          weekly_study_target_minutes: Number(form.get("weekly_target") ?? form.get("weekly_hours")) * 60,
         }),
       });
       setCourseDialogOpen(false);
@@ -93,6 +112,68 @@ export function CourseManager() {
       await courses.reload();
     } catch (error) {
       setActionError(error instanceof ApiRequestError ? error.message : "Could not remove the course.");
+    }
+  }
+
+  async function importOutline(proposal: OutlineExtraction): Promise<boolean> {
+    const courseCode = proposal.course.code;
+    const courseName = proposal.course.name;
+    if (!currentSemester || !courseCode || !courseName) return false;
+    setSubmitting(true);
+    setActionError(null);
+    try {
+      const existingCourse = courses.data?.find(
+        (item) => normalizeCourseCode(item.code) === normalizeCourseCode(courseCode),
+      );
+      await apiRequest<CourseOutlineImportResult>(
+        `/semesters/${currentSemester.id}/courses/import-outline`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            course: {
+              code: courseCode,
+              name: courseName,
+              instructor: proposal.course.instructor,
+              difficulty: 3,
+              weekly_study_target_minutes: 180,
+            },
+            grading: {
+              groups: proposal.groups,
+              items: proposal.items.map((item, index) => ({
+                key: item.key ?? `item-${index + 1}`,
+                group_key: item.group_key,
+                item_type: academicItemType(item),
+                name: item.name,
+                due_at: item.deadline_at,
+                direct_weight_percent: item.weight_percent,
+                relative_weight_percent: item.relative_weight_percent,
+                points_possible: item.points_possible,
+                weight_origin: item.weight_origin,
+                extraction_confidence: item.confidence,
+                minimum_required_percent: item.minimum_required_percent,
+                extra_credit: item.extra_credit,
+                source_text: item.source_text,
+                source_references: proposal.source_files,
+                estimated_minutes: item.estimated_minutes,
+              })),
+              schemes: proposal.schemes,
+            },
+            meeting_proposals: proposal.meetings,
+            replace_existing: Boolean(existingCourse),
+          }),
+        },
+      );
+      await courses.reload();
+      return true;
+    } catch (error) {
+      setActionError(
+        error instanceof ApiRequestError
+          ? error.message
+          : "DoNext could not import that course outline.",
+      );
+      return false;
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -138,23 +219,63 @@ export function CourseManager() {
           <h1>Courses</h1>
           <p>{courses.data?.length ?? 0} {(courses.data?.length ?? 0) === 1 ? "course" : "courses"} · {(totalMinutes / 60).toFixed(1)} hours of weekly study targets.</p>
         </div>
-        <button className="primary-button" type="button" onClick={() => setCourseDialogOpen(true)}><Plus size={17} /> Add course</button>
+        <div className="heading-actions">
+          {courses.data?.length && !outlineReviewActive ? (
+            <button
+              aria-pressed={outlineImporterOpen}
+              className="secondary-button"
+              type="button"
+              onClick={() => setOutlineImporterOpen((current) => !current)}
+            >
+              <UploadCloud size={17} />
+              {outlineImporterOpen ? "Close outline import" : "Add from outline"}
+            </button>
+          ) : null}
+          <button className="primary-button" type="button" onClick={() => setCourseDialogOpen(true)}><Plus size={17} /> Add course</button>
+        </div>
       </header>
 
       {actionError ? <p className="page-alert" role="alert">{actionError}</p> : null}
-      {courses.loading ? <PageLoading label="Loading course details" /> : null}
+      {courses.loading && !outlineReviewActive ? <PageLoading label="Loading course details" /> : null}
       {courses.error ? <PageError message={courses.error} onRetry={courses.reload} /> : null}
 
-      {!courses.loading && courses.data?.length === 0 ? (
-        <section className="empty-state">
-          <span><BookOpen size={25} /></span>
-          <h2>Add the courses competing for your time.</h2>
-          <p>Weekly targets help DoNext make tradeoffs without guessing.</p>
-          <button className="primary-button" type="button" onClick={() => setCourseDialogOpen(true)}><Plus size={17} /> Add your first course</button>
+      {outlineReviewActive || (!courses.loading && (courses.data?.length === 0 || outlineImporterOpen)) ? (
+        <section className={`course-outline-empty${outlineReviewActive ? " reviewing" : ""}`}>
+          {!outlineReviewActive ? (
+            <div className="course-outline-empty-copy">
+              <span><BookOpen size={25} /></span>
+              <h2>{courses.data?.length ? "Add more courses from outlines." : "Add the courses competing for your time."}</h2>
+              <p>Drop one or more course outlines and review each course before DoNext adds it.</p>
+            </div>
+          ) : null}
+          <CourseOutlineStep
+            busy={submitting}
+            courses={courses.data ?? []}
+            semester={currentSemester}
+            showExistingCourses={false}
+            showIntro={false}
+            showManualEntry={false}
+            tasks={[]}
+            onCreateCourse={createCourse}
+            onCreateItem={(event) => event.preventDefault()}
+            onImport={importOutline}
+            onRemoveCourse={() => undefined}
+            onRemoveItem={() => undefined}
+            onReviewActiveChange={handleOutlineReviewActiveChange}
+          />
+          {!outlineReviewActive ? (
+            <div className="course-outline-manual-option">
+              <span>or</span>
+              <button className="secondary-button" type="button" onClick={() => {
+                setOutlineImporterOpen(false);
+                setCourseDialogOpen(true);
+              }}><Plus size={17} /> Enter course manually</button>
+            </div>
+          ) : null}
         </section>
       ) : null}
 
-      {courses.data && courses.data.length > 0 ? (
+      {courses.data && courses.data.length > 0 && !outlineImporterOpen && !outlineReviewActive ? (
         <section className="course-grid">
           {courses.data.map((course, index) => (
             <article className="course-card" key={course.id}>
@@ -194,6 +315,18 @@ function formatMinutes(minutes: number) {
   if (minutes < 60) return `${minutes} min`;
   const hours = minutes / 60;
   return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
+}
+
+function normalizeCourseCode(value: string) {
+  return value.replaceAll(/\s+/g, "").toUpperCase();
+}
+
+function academicItemType(item: OutlineExtraction["items"][number]) {
+  if (item.kind === "exam") {
+    return item.name.toLowerCase().includes("final") ? "final_exam" : "midterm";
+  }
+  if (item.kind === "paper") return "presentation";
+  return item.kind;
 }
 
 function PageLoading({ label }: { label: string }) {

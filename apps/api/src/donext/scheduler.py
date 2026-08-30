@@ -15,6 +15,15 @@ MINUTE_UNIT = 5
 
 
 @dataclass(frozen=True)
+class SessionBlueprint:
+    title: str
+    duration_minutes: int
+    preferred_dates: frozenset[date] = frozenset()
+    planning_source: Literal["openai", "fallback"] = "fallback"
+    phase: str = "work"
+
+
+@dataclass(frozen=True)
 class SchedulingItem:
     id: str
     title: str
@@ -30,6 +39,7 @@ class SchedulingItem:
     due_at: datetime | None = None
     earliest_start_at: datetime | None = None
     latest_end_at: datetime | None = None
+    session_blueprints: tuple[SessionBlueprint, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,10 @@ class _Session:
     item: SchedulingItem
     index: int
     duration_minutes: int
+    title: str
+    preferred_dates: frozenset[date] = frozenset()
+    planning_source: Literal["openai", "fallback"] | None = None
+    phase: str | None = None
 
 
 @dataclass
@@ -102,11 +116,25 @@ def solve_schedule(
     policy: SchedulingPolicy | None = None,
 ) -> SchedulingResult:
     started = time.monotonic()
-    sessions = [
-        _Session(item, index, duration)
-        for item in items
-        for index, duration in enumerate(_session_plan(item))
-    ]
+    sessions: list[_Session] = []
+    for item in items:
+        durations = session_durations(item)
+        blueprints = item.session_blueprints
+        if blueprints and [value.duration_minutes for value in blueprints] != durations:
+            blueprints = ()
+        for index, duration in enumerate(durations):
+            blueprint = blueprints[index] if blueprints else None
+            sessions.append(
+                _Session(
+                    item=item,
+                    index=index,
+                    duration_minutes=duration,
+                    title=blueprint.title if blueprint else item.title,
+                    preferred_dates=blueprint.preferred_dates if blueprint else frozenset(),
+                    planning_source=blueprint.planning_source if blueprint else None,
+                    phase=blueprint.phase if blueprint else None,
+                )
+            )
     capacity_by_day = _capacity_by_day(windows)
     baseline = _greedy_baseline(
         items, sessions, windows, capacity_by_day, minimum_break_minutes, policy
@@ -154,6 +182,8 @@ def _greedy_baseline(
     used_by_day: dict[date, int] = defaultdict(int)
     blocks_by_day: dict[date, int] = defaultdict(int)
     item_dates: dict[tuple[str, date], int] = defaultdict(int)
+    item_ready_at: dict[str, datetime] = {}
+    blocked_blueprint_items: set[str] = set()
     scheduled = {item.id: 0 for item in items}
     placements: list[Placement] = []
     sessions_by_item: dict[str, list[_Session]] = defaultdict(list)
@@ -186,6 +216,8 @@ def _greedy_baseline(
             cursor += 1
 
     for session in ordered:
+        if session.item.id in blocked_blueprint_items:
+            continue
         choice = _best_greedy_slot(
             session,
             free,
@@ -195,8 +227,11 @@ def _greedy_baseline(
             blocks_by_day,
             minimum_break_minutes,
             policy,
+            item_ready_at.get(session.item.id),
         )
         if choice is None:
+            if session.item.session_blueprints:
+                blocked_blueprint_items.add(session.item.id)
             continue
         segment_index, start_at = choice
         occupied_end = start_at + timedelta(
@@ -212,6 +247,7 @@ def _greedy_baseline(
         blocks_by_day[start_at.date()] += 1
         item_dates[(session.item.id, start_at.date())] += 1
         scheduled[session.item.id] += session.duration_minutes
+        item_ready_at[session.item.id] = occupied_end
         placements.append(_placement(session, start_at, segment.energy_level))
 
     placements.sort(key=lambda placement: (placement.start_at, placement.item_id))
@@ -234,6 +270,7 @@ def _best_greedy_slot(
     blocks_by_day: dict[date, int],
     minimum_break_minutes: int,
     policy: SchedulingPolicy | None,
+    item_ready_at: datetime | None,
 ) -> tuple[int, datetime] | None:
     choices: list[tuple[tuple[object, ...], int, datetime]] = []
     occupied = session.duration_minutes + minimum_break_minutes
@@ -252,6 +289,7 @@ def _best_greedy_slot(
         earliest = max(
             segment.start_at,
             session.item.earliest_start_at or segment.start_at,
+            item_ready_at or segment.start_at,
         )
         start_at = _round_up(earliest)
         latest_end = min(
@@ -262,6 +300,7 @@ def _best_greedy_slot(
             continue
         if session.item.kind == "task":
             score: tuple[object, ...] = (
+                _preferred_date_penalty(day, session.preferred_dates),
                 _preferred_time_penalty(start_at, policy),
                 start_at,
                 0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
@@ -351,6 +390,18 @@ def _optimize_sessions(
                 presence_by_session[(previous.item.id, previous.index)]
                 >= presence_by_session[(current.item.id, current.index)]
             )
+            if item.session_blueprints:
+                for previous_alternative in alternatives_by_session[
+                    (previous.item.id, previous.index)
+                ]:
+                    for current_alternative in alternatives_by_session[
+                        (current.item.id, current.index)
+                    ]:
+                        model.add(
+                            previous_alternative.start < current_alternative.start
+                        ).only_enforce_if(
+                            [previous_alternative.selected, current_alternative.selected]
+                        )
 
     _add_baseline_hints(model, baseline, alternatives, presence_by_session, epoch)
     academic_minutes = sum(
@@ -413,7 +464,17 @@ def _optimize_sessions(
             if _energy_matches(alternative.session.item.intensity, alternative.energy_level)
             else 0
         )
-        timing_terms.append(alternative.selected * (latest_tick + energy_bonus) - effective_start)
+        date_distance = _preferred_date_penalty(
+            alternative.day, alternative.session.preferred_dates
+        )
+        date_bonus = (
+            max(32 - date_distance, 0) * (latest_tick + 60)
+            if alternative.session.preferred_dates
+            else 0
+        )
+        timing_terms.append(
+            alternative.selected * (latest_tick + energy_bonus + date_bonus) - effective_start
+        )
     model.maximize(flexible_minutes * 100_000 + sum(fairness_terms) * 10_000 + sum(timing_terms))
     second_solver = _solver(max(time_limit_seconds * 0.4, 0.05))
     second_status = second_solver.solve(model)
@@ -508,7 +569,7 @@ def _add_baseline_hints(
         model.add_hint(presence, int(key[1] < len(placements_by_item[key[0]])))
 
 
-def _session_plan(item: SchedulingItem) -> list[int]:
+def session_durations(item: SchedulingItem) -> list[int]:
     target_units = max(item.target_minutes // MINUTE_UNIT, 0)
     if not target_units:
         return []
@@ -553,7 +614,7 @@ def _placement(session: _Session, start_at: datetime, energy_level: str) -> Plac
     item = session.item
     return Placement(
         item_id=item.id,
-        title=item.title,
+        title=session.title,
         start_at=start_at,
         end_at=start_at + timedelta(minutes=session.duration_minutes),
         kind=item.kind,
@@ -569,6 +630,17 @@ def _placement(session: _Session, start_at: datetime, energy_level: str) -> Plac
             "priority_rank": item.priority_rank,
             "importance_rank": item.importance_rank,
             "session_minutes": session.duration_minutes,
+            **(
+                {
+                    "academic_planning_source": session.planning_source,
+                    "academic_phase": session.phase,
+                    "preferred_study_dates": sorted(
+                        value.isoformat() for value in session.preferred_dates
+                    ),
+                }
+                if session.planning_source is not None
+                else {}
+            ),
             **({"due_at": item.due_at.isoformat()} if item.due_at else {}),
             **({"eligible_date": start_at.date().isoformat()} if item.eligible_dates else {}),
         },
@@ -601,6 +673,12 @@ def _preferred_time_penalty(start_at: datetime, policy: SchedulingPolicy | None)
         if start <= local_time < end:
             return 0
     return 1
+
+
+def _preferred_date_penalty(day: date, preferred_dates: frozenset[date]) -> int:
+    if not preferred_dates:
+        return 0
+    return min(abs((day - preferred).days) for preferred in preferred_dates)
 
 
 def _ticks_from(epoch: datetime, value: datetime) -> int:

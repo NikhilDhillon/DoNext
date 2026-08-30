@@ -1,12 +1,56 @@
+# Design QA: course-outline drop zone
+
+## Evidence
+
+- Source pixels: 2132 x 660.
+- Desktop state: authenticated Courses empty state at a 2132 x 900 CSS viewport; the captured empty-state component measured 1224 x 500 pixels at device pixel ratio 1.
+- Mobile state: authenticated Courses empty state at a 390 x 844 CSS viewport and device pixel ratio 1.
+
+## Findings
+
+- P0: none.
+- P1: none.
+- P2: none.
+- P3: the source is a wide content-only crop, while the implementation remains inside the existing Courses page shell. The new nested drop target intentionally adds height so file formats, limits, and the manual fallback remain visible.
+
+The original icon, centered heading, dashed boundary, paper surface, and manual-add path remain recognizable. The single primary button is replaced by a review-first outline drop zone plus a secondary manual-entry button.
+
+## Required fidelity surfaces
+
+- Fonts and typography: the existing DoNext type scale, weights, and muted helper copy are reused.
+- Spacing and layout rhythm: the empty state keeps its centered composition, with the new drop zone constrained to a readable 720-pixel maximum width.
+- Colors and visual tokens: existing ink, mint, paper, border, and muted tokens are preserved.
+- Image and icon quality: no raster or custom SVG assets were introduced; the existing Lucide book, upload, and plus icons are used.
+- Copy and content: the empty state now clearly offers course-outline upload and manual entry, including supported formats and the 10 MB per-file limit.
+
+## Interaction and accessibility checks
+
+- The file control accepts PDF, DOCX, and TXT documents and supports multiple files.
+- Semesters that already contain courses expose `Add from outline`, so a partial or later import can resume without returning to onboarding.
+- Selecting the Fall 2026 CSC 370 DOCX fixture exposed the file name and enabled `Analyze document`.
+- Analysis produced a seven-assessment review with a grading scheme and the explicit `Nothing is imported until you confirm` safeguard; the visual capture stopped before import.
+- Three-outline regression pass: SENG 310, CSC 370, and CSC 349A produced three review cards; confirming them reduced the queue from 3 to 2 to 1 to 0 while preserving every unconfirmed review through each course-list refresh.
+- The completed regression pass showed all three imported course codes in the local Flow Check Fall 2026 QA workspace.
+- Dismissing review returned to the empty state without changing saved course data.
+- `Enter course manually` opened the existing accessible course dialog.
+- The 390-pixel layout had a 390-pixel document width, so there was no horizontal overflow.
+- Browser console warnings and errors: none.
+
+## Comparison history
+
+1. The source established the empty-state hierarchy and manual-add affordance.
+2. The implementation preserved that hierarchy and inserted the outline drop target as the primary path.
+3. Desktop comparison confirmed the existing design language remains intact despite the intentional control expansion.
+4. Mobile verification confirmed readable stacking, a full-width manual fallback, and no overflow.
+
+final result: passed
+
+---
+
 # Design QA: per-day commitment times
 
 ## Evidence
 
-- Source visual truth: `artifacts/commitment-shared-time-source.png`
-- Browser-rendered desktop implementation: `artifacts/commitment-per-day-times.jpg`
-- Browser-rendered mobile implementation: `artifacts/commitment-per-day-times-mobile-top.jpg` and `artifacts/commitment-per-day-times-mobile-viewport.jpg`
-- Full comparison: `artifacts/commitment-per-day-times-comparison.png`
-- Focused schedule comparison: `artifacts/commitment-per-day-times-focused-comparison.png`
 - Source pixels: 1684 x 1492; the screenshot shows Monday, Tuesday, and Wednesday sharing one 10:30 AM, eight-hour schedule.
 - Desktop implementation pixels: 1710 x 1102 at a 1710 x 1080 CSS viewport. The in-app browser rendered the app content at approximately 0.5 visual density, so the form region was normalized before comparison.
 - Mobile implementation pixels: 390 x 844 at a 390 x 844 CSS viewport and device pixel ratio 1.
@@ -54,9 +98,6 @@ final result: passed
 
 ## Evidence
 
-- Source visual truth: `/var/folders/wf/j9x8hm7j7r7g6tffvr85bbbc0000gn/T/TemporaryItems/NSIRD_screencaptureui_XWzCcN/Screenshot 2026-08-21 at 10.40.22 AM.png`
-- Browser-rendered desktop implementation: `artifacts/flexible-commitment-desktop-fixed.png`
-- Browser-rendered mobile implementation: `artifacts/flexible-commitment-mobile-viewport.png`
 - Source pixels: 1684 x 1492.
 - Desktop implementation: 1280 x 1122 pixels at the in-app browser's default desktop viewport and device pixel ratio 1.
 - Mobile implementation: 390 x 844 pixels at a 390 x 844 CSS viewport and device pixel ratio 1.
@@ -103,10 +144,6 @@ final result: passed
 
 ## Evidence
 
-- Source visual truth: `artifacts/design-qa/regeneration-source-reference.png`
-- Rendered implementation: `artifacts/design-qa/regeneration-success.png`
-- Focused idle state: `artifacts/design-qa/regeneration-idle-button.png`
-- Focused completed state: `artifacts/design-qa/regeneration-success-button.png`
 - Browser viewport: 1280 x 720 CSS pixels at the in-app browser's default density
 - Source pixels: 470 x 182; the Retina-style source was judged at its apparent 2x density
 - Implementation pixels: 1280 x 720 full view, 138 x 44 idle control, and 158 x 44 completed control

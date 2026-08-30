@@ -4,15 +4,16 @@ import logging
 import math
 import uuid
 from collections import Counter
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 from sqlalchemy import Table, func, select
 from sqlalchemy.orm import selectinload
 
+from donext.academic_planning import AcademicPlanningInput, plan_academic_sessions
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
@@ -53,6 +54,8 @@ from donext.scheduler import (
     SchedulingItem,
     SchedulingPolicy,
     SchedulingWindow,
+    SessionBlueprint,
+    session_durations,
     solve_schedule,
 )
 from donext.schemas import (
@@ -78,12 +81,93 @@ PLANNING_LEAD_DAYS = {
     AcademicItemType.reading: 7,
     AcademicItemType.other: 14,
 }
+COMPLETE_TIMEOUT_WARNING = (
+    "Everything fits: all requested work is scheduled and every hard constraint is "
+    "satisfied. DoNext stopped after its optimization limit, so a different valid "
+    "arrangement may match your preferences slightly better."
+)
+PARTIAL_TIMEOUT_WARNING = (
+    "DoNext found a valid partial draft before its optimization limit, but some work "
+    "remains unscheduled. Review the unresolved items below; a different valid "
+    "arrangement may fit more work or match your preferences better."
+)
+
+
+@dataclass(frozen=True)
+class CourseMeetings:
+    """When a course actually meets, used to keep preparation behind its first lecture."""
+
+    first_meeting: date | None
+    horizon_dates: tuple[date, ...]
+
+
+def _titles_course(title: str, code: str) -> bool:
+    """Class events carry no course id, so they are matched by the code that titles them.
+
+    The boundary check stops a shorter code such as "CSC 37" from claiming "CSC 370".
+    """
+    normalized_title = " ".join(title.split()).casefold()
+    normalized_code = " ".join(code.split()).casefold()
+    if not normalized_code or not normalized_title.startswith(normalized_code):
+        return False
+    remainder = normalized_title[len(normalized_code) :]
+    return not remainder or not remainder[0].isalnum()
+
+
+def _lecture_ready_dates(
+    candidate_dates: tuple[date, ...], first_meeting: date | None
+) -> tuple[date, ...]:
+    """Drop dates before a course has met, so preparation never precedes the first lecture.
+
+    When the clamp would leave nowhere to work at all - an assessment falling due before its
+    course begins - the deadline wins and the original dates stand, rather than silently
+    dropping the assessment out of the plan.
+    """
+    if first_meeting is None:
+        return candidate_dates
+    lecture_ready = tuple(value for value in candidate_dates if value >= first_meeting)
+    return lecture_ready or candidate_dates
+
+
+def _course_meetings(
+    events: list[FixedEvent],
+    occurrences: list[EventOccurrence],
+    courses: list[Course],
+    timezone: ZoneInfo,
+) -> dict[uuid.UUID, CourseMeetings]:
+    meetings: dict[uuid.UUID, CourseMeetings] = {}
+    for course in courses:
+        # The first meeting comes from each series' own start, not from the expanded
+        # occurrences, which only cover the horizon and would misreport a course that
+        # began earlier in the term.
+        series_starts = [
+            aware(event.start_at).astimezone(timezone).date()
+            for event in events
+            if event.category == "class" and _titles_course(event.title, course.code)
+        ]
+        horizon_dates = sorted(
+            {
+                occurrence.start_at.astimezone(timezone).date()
+                for occurrence in occurrences
+                if occurrence.event.category == "class"
+                and _titles_course(occurrence.event.title, course.code)
+            }
+        )
+        meetings[course.id] = CourseMeetings(
+            first_meeting=min(series_starts) if series_starts else None,
+            horizon_dates=tuple(horizon_dates),
+        )
+    return meetings
 
 
 class FingerprintRecord(Protocol):
     id: object
     updated_at: datetime
     __table__: Table
+
+
+def _solver_timeout_warning(*, has_unscheduled: bool) -> str:
+    return PARTIAL_TIMEOUT_WARNING if has_unscheduled else COMPLETE_TIMEOUT_WARNING
 
 
 def current_proposal(
@@ -248,7 +332,7 @@ def _build_proposal(
     preferred_session_minutes = _preferred_session_minutes(
         preferences.preferred_session_minutes, policy
     )
-    items, item_links, warnings = _scheduling_items(
+    items, item_links, warnings, academic_planning_source = _scheduling_items(
         db,
         current_user.id,
         semester,
@@ -257,6 +341,13 @@ def _build_proposal(
         preserved,
         preferred_session_minutes,
         timezone,
+        tuple(sorted({window.start_at.date() for window in windows})),
+        _course_meetings(
+            events,
+            occurrences,
+            list(db.scalars(select(Course).where(Course.semester_id == semester.id))),
+            timezone,
+        ),
     )
     if policy is not None:
         items = _apply_item_adjustments(items, item_links, policy)
@@ -290,9 +381,7 @@ def _build_proposal(
     scheduled_total = sum(result.scheduled_minutes.values())
     unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links, windows)
     if result.timed_out:
-        warnings.append(
-            "The solver reached its time limit; this feasible draft may not be optimal."
-        )
+        warnings.append(_solver_timeout_warning(has_unscheduled=bool(unscheduled)))
     proposal.generation_summary = ProposalSummaryRead(
         solve_status=result.status,
         coverage_status="partial" if unscheduled else "complete",
@@ -303,6 +392,7 @@ def _build_proposal(
         eligible_capacity_minutes=result.eligible_capacity_minutes,
         protected_free_minutes=result.protected_free_minutes,
         solver_runtime_ms=result.runtime_ms,
+        academic_planning_source=academic_planning_source,
         preserved_blocks=len(preserved),
         generated_blocks=len(result.placements),
         warnings=warnings,
@@ -900,10 +990,13 @@ def _scheduling_items(
     preserved: list[ScheduledBlock],
     preferred_session_minutes: int,
     timezone: ZoneInfo,
+    available_dates: tuple[date, ...],
+    class_meetings: dict[uuid.UUID, CourseMeetings],
 ) -> tuple[
     list[SchedulingItem],
     dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
     list[str],
+    Literal["openai", "fallback", "mixed", "none"],
 ]:
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
     course_ids = {course.id for course in courses}
@@ -945,6 +1038,7 @@ def _scheduling_items(
     items: list[SchedulingItem] = []
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
+    academic_planning_inputs: list[AcademicPlanningInput] = []
     invalid_deadlines: dict[str, list[tuple[str, date]]] = {}
     for task in sorted(
         tasks,
@@ -1009,31 +1103,65 @@ def _scheduling_items(
                 if academic_item.direct_weight_percent is not None
                 else academic_item.relative_weight_percent or 0.0
             )
-        items.append(
-            SchedulingItem(
-                id=identifier,
-                title=task.name,
-                target_minutes=target,
-                minimum_session_minutes=task.minimum_session_minutes,
-                preferred_session_minutes=task.preferred_session_minutes,
-                maximum_session_minutes=task.maximum_session_minutes,
-                priority_rank=PRIORITY_RANK[task.priority.value],
-                intensity=task.intensity.value,
-                importance_rank=_task_importance_rank(
-                    due_date,
-                    horizon_start,
-                    task.required,
-                    PRIORITY_RANK[task.priority.value],
-                    weight_percent,
-                ),
-                due_at=due_at,
-                earliest_start_at=max(
-                    earliest_start_at,
-                    datetime.combine(horizon_start, time.min, tzinfo=timezone),
-                ),
-                latest_end_at=None if overdue else due_at,
-            )
+        scheduling_item = SchedulingItem(
+            id=identifier,
+            title=task.name,
+            target_minutes=target,
+            minimum_session_minutes=task.minimum_session_minutes,
+            preferred_session_minutes=task.preferred_session_minutes,
+            maximum_session_minutes=task.maximum_session_minutes,
+            priority_rank=PRIORITY_RANK[task.priority.value],
+            intensity=task.intensity.value,
+            importance_rank=_task_importance_rank(
+                due_date,
+                horizon_start,
+                task.required,
+                PRIORITY_RANK[task.priority.value],
+                weight_percent,
+            ),
+            due_at=due_at,
+            earliest_start_at=max(
+                earliest_start_at,
+                datetime.combine(horizon_start, time.min, tzinfo=timezone),
+            ),
+            latest_end_at=None if overdue else due_at,
         )
+        items.append(scheduling_item)
+        if academic_item is not None and not overdue:
+            planning_earliest_date = max(
+                earliest_start_at,
+                datetime.combine(horizon_start, time.min, tzinfo=timezone),
+            ).date()
+            candidate_dates = tuple(
+                value
+                for value in available_dates
+                if planning_earliest_date <= value <= min(due_date, horizon_end)
+            )
+            meetings = class_meetings.get(task.course_id) if task.course_id else None
+            candidate_dates = _lecture_ready_dates(
+                candidate_dates, meetings.first_meeting if meetings else None
+            )
+            if candidate_dates:
+                academic_planning_inputs.append(
+                    AcademicPlanningInput(
+                        source_id=identifier,
+                        course_code=(
+                            course_codes.get(task.course_id, "Course")
+                            if task.course_id is not None
+                            else "Course"
+                        ),
+                        assessment_name=task.name,
+                        assessment_type=academic_item.item_type.value,
+                        due_date=due_date,
+                        session_durations=tuple(session_durations(scheduling_item)),
+                        available_dates=candidate_dates,
+                        class_meeting_dates=tuple(
+                            value
+                            for value in (meetings.horizon_dates if meetings else ())
+                            if candidate_dates[0] <= value <= candidate_dates[-1]
+                        ),
+                    )
+                )
         links[identifier] = (task.id, None, "focus")
     for course_code, invalid in sorted(invalid_deadlines.items()):
         examples = ", ".join(f"{name} ({deadline.isoformat()})" for name, deadline in invalid[:3])
@@ -1141,7 +1269,27 @@ def _scheduling_items(
                 )
             )
             links[identifier] = (None, goal.id, "goal")
-    return items, links, warnings
+    academic_plan = plan_academic_sessions(academic_planning_inputs)
+    if academic_plan.sessions_by_source:
+        items = [
+            replace(
+                item,
+                session_blueprints=tuple(
+                    SessionBlueprint(
+                        title=session.title,
+                        duration_minutes=session.duration_minutes,
+                        preferred_dates=frozenset({session.preferred_date}),
+                        planning_source=session.source,
+                        phase=session.phase,
+                    )
+                    for session in academic_plan.sessions_by_source[item.id]
+                ),
+            )
+            if item.id in academic_plan.sessions_by_source
+            else item
+            for item in items
+        ]
+    return items, links, warnings, academic_plan.source
 
 
 def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[frozenset[date]]:

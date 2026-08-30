@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+from types import SimpleNamespace
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -7,7 +8,20 @@ from sqlalchemy.orm import Session
 from test_api import create_semester, register
 from test_planning import replace_weekday_availability
 
-from donext.models import Task
+from donext.models import AcademicItem, AcademicItemType, Task
+from donext.routers.proposals import (
+    COMPLETE_TIMEOUT_WARNING,
+    PARTIAL_TIMEOUT_WARNING,
+    _course_meetings,
+    _lecture_ready_dates,
+    _solver_timeout_warning,
+    _titles_course,
+)
+
+
+def test_solver_timeout_warning_distinguishes_complete_and_partial_drafts() -> None:
+    assert _solver_timeout_warning(has_unscheduled=False) == COMPLETE_TIMEOUT_WARNING
+    assert _solver_timeout_warning(has_unscheduled=True) == PARTIAL_TIMEOUT_WARNING
 
 
 def proposal_fixture(client: TestClient) -> tuple[dict[str, str], dict[str, str]]:
@@ -246,9 +260,53 @@ def test_far_future_assignments_wait_until_their_planning_window(
 
     proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
 
-    assert {block["title"] for block in proposal["blocks"]} == {"Assignment 1"}
+    assert {block["title"] for block in proposal["blocks"]} == {
+        "CSC 320 · Plan Assignment 1",
+        "CSC 320 · Review and revise Assignment 1",
+    }
     assert all(
         item["name"] != "Assignment 4" for item in proposal["generation_summary"]["unscheduled"]
+    )
+
+
+def test_midterm_is_scheduled_as_labeled_preparation_across_preferred_days(
+    client: TestClient, db_session: Session
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = client.post(
+        f"/api/v1/semesters/{semester['id']}/courses",
+        json={"name": "Database Systems", "code": "CSC 370"},
+    ).json()
+    task = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Midterm Exam",
+            "course_id": course["id"],
+            "estimated_minutes": 200,
+            "deadline_at": "2026-09-10T23:00:00Z",
+            "priority": "high",
+        },
+    ).json()
+    stored_task = db_session.get(Task, UUID(task["id"]))
+    assert stored_task is not None
+    assert stored_task.academic_item_id is not None
+    academic_item = db_session.get(AcademicItem, stored_task.academic_item_id)
+    assert academic_item is not None
+    academic_item.item_type = AcademicItemType.midterm
+    db_session.commit()
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    academic_blocks = [block for block in proposal["blocks"] if block["task_id"] == task["id"]]
+    assert proposal["generation_summary"]["academic_planning_source"] == "fallback"
+    assert len({datetime.fromisoformat(block["start_at"]).date() for block in academic_blocks}) > 1
+    assert all(block["title"] != "Midterm Exam" for block in academic_blocks)
+    assert all("Midterm Exam" in block["title"] for block in academic_blocks)
+    assert all(
+        block["reason_details"]["academic_planning_source"] == "fallback"
+        for block in academic_blocks
     )
 
 
@@ -419,3 +477,84 @@ def test_selected_day_flexible_commitment_reports_one_aggregate_shortfall(
     assert unresolved["requested_minutes"] == 120
     assert unresolved["remaining_minutes"] == 120
     assert "2026-09-05" in unresolved["reason"]
+
+
+def test_class_events_match_only_their_own_course_code() -> None:
+    assert _titles_course("CSC 349A instruction", "CSC 349A")
+    assert _titles_course("csc 349a  problem session", "CSC 349A")
+    assert _titles_course("CSC 370", "CSC 370")
+    # A shorter code must not claim a longer one that merely starts the same way.
+    assert not _titles_course("CSC 370 instruction", "CSC 37")
+    assert not _titles_course("SENG 310 design studio", "CSC 370")
+    assert not _titles_course("Popeyes", "CSC 370")
+
+
+def test_course_first_meeting_comes_from_series_start_not_the_horizon() -> None:
+    timezone = ZoneInfo("America/Vancouver")
+    course = SimpleNamespace(id=UUID(int=1), code="CSC 349A")
+    # Three weekly series; the Wednesday one starts earliest.
+    events = [
+        SimpleNamespace(
+            category="class",
+            title="CSC 349A instruction",
+            start_at=datetime(2026, 9, 13, 9, 30, tzinfo=timezone),
+        ),
+        SimpleNamespace(
+            category="class",
+            title="CSC 349A instruction",
+            start_at=datetime(2026, 9, 8, 9, 30, tzinfo=timezone),
+        ),
+        SimpleNamespace(
+            category="work",
+            title="Popeyes",
+            start_at=datetime(2026, 9, 1, 17, 0, tzinfo=timezone),
+        ),
+    ]
+    occurrences = [
+        SimpleNamespace(
+            event=events[0],
+            start_at=datetime(2026, 9, 14, 9, 30, tzinfo=timezone),
+        )
+    ]
+
+    meetings = _course_meetings(events, occurrences, [course], timezone)
+
+    assert meetings[course.id].first_meeting == date(2026, 9, 8)
+    assert meetings[course.id].horizon_dates == (date(2026, 9, 14),)
+
+
+def test_course_without_class_events_reports_no_first_meeting() -> None:
+    timezone = ZoneInfo("America/Vancouver")
+    course = SimpleNamespace(id=UUID(int=2), code="CSC 370")
+
+    meetings = _course_meetings([], [], [course], timezone)
+
+    assert meetings[course.id].first_meeting is None
+    assert meetings[course.id].horizon_dates == ()
+
+
+def test_preparation_may_not_begin_before_the_course_first_meets() -> None:
+    candidates = (
+        date(2026, 9, 4),
+        date(2026, 9, 6),
+        date(2026, 9, 8),
+        date(2026, 9, 10),
+    )
+
+    assert _lecture_ready_dates(candidates, date(2026, 9, 8)) == (
+        date(2026, 9, 8),
+        date(2026, 9, 10),
+    )
+
+
+def test_courses_without_known_meetings_keep_every_candidate_date() -> None:
+    candidates = (date(2026, 9, 4), date(2026, 9, 6))
+
+    assert _lecture_ready_dates(candidates, None) == candidates
+
+
+def test_deadline_wins_when_the_lecture_clamp_would_leave_nowhere_to_work() -> None:
+    # An assessment due before its course begins must still be planned somewhere.
+    candidates = (date(2026, 9, 4), date(2026, 9, 6))
+
+    assert _lecture_ready_dates(candidates, date(2026, 9, 20)) == candidates

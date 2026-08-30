@@ -711,6 +711,7 @@ class ProposalSummaryRead(ApiModel):
     eligible_capacity_minutes: int = 0
     protected_free_minutes: int = 0
     solver_runtime_ms: int = 0
+    academic_planning_source: Literal["openai", "fallback", "mixed", "none"] = "none"
     preserved_blocks: int
     generated_blocks: int
     moved_blocks: int = 0

@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, LoaderCircle, Pencil, Plus } from "lucide-react";
+import { CalendarClock, ChevronLeft, ChevronRight, LoaderCircle, Pencil, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
@@ -95,7 +95,14 @@ export function WeekPlanner() {
         <div className="week-task-list">
           {data.unscheduled_tasks.length ? data.unscheduled_tasks.slice(0, 6).map((task) => (
             <button type="button" key={task.id} onClick={() => openNew(defaultEditorDate(data), task)}>
-              <span>{task.course_code || task.goal_name || "Task"}</span><strong>{task.name}</strong><small>{formatMinutes(task.remaining_minutes)} remaining</small><Plus size={15} />
+              <span>{task.course_code || task.goal_name || "Task"}</span>
+              <strong>{task.name}</strong>
+              <small>{formatMinutes(task.remaining_minutes)} remaining</small>
+              <small className={`task-due ${taskDeadline(task, data.timezone).tone}`}>
+                <CalendarClock size={12} aria-hidden="true" />
+                {taskDeadline(task, data.timezone).text}
+              </small>
+              <Plus size={15} />
             </button>
           )) : <p>Every unfinished task already has a block in the accepted plan.</p>}
         </div>
@@ -250,6 +257,34 @@ function entryColor(entry: PlanningEntry) {
 
 function entryMinutes(entries: PlanningEntry[]) {
   return entries.reduce((total, entry) => total + Math.round((new Date(entry.end_at).getTime() - new Date(entry.start_at).getTime()) / 60_000), 0);
+}
+
+// Unscheduled work is only actionable if the student can see how soon it is due, so the tray
+// states the deadline in the plan's timezone and leads with urgency for anything inside a week.
+// The tone is carried by wording as well as colour so it never depends on colour alone.
+function taskDeadline(task: PlannerTask, timezone: string) {
+  if (!task.deadline_at) return { text: "No deadline", tone: "none" as const };
+  const dueDate = dateInTimezone(task.deadline_at, timezone);
+  const days = dateDifference(localToday(timezone), dueDate);
+  if (days < 0) {
+    const overdueBy = Math.abs(days);
+    return {
+      text: `Overdue by ${overdueBy} ${overdueBy === 1 ? "day" : "days"}`,
+      tone: "overdue" as const,
+    };
+  }
+  if (days === 0) return { text: "Due today", tone: "urgent" as const };
+  if (days === 1) return { text: "Due tomorrow", tone: "urgent" as const };
+  if (days <= 6) return { text: `Due ${weekday(dueDate)}`, tone: "soon" as const };
+  return { text: `Due ${shortDate(dueDate)}`, tone: "later" as const };
+}
+
+function shortDate(value: string) {
+  return new Intl.DateTimeFormat("en-CA", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(`${value}T12:00:00Z`));
 }
 
 function formatMinutes(minutes: number) {

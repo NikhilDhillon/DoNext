@@ -15,6 +15,7 @@ Phase 3 review-first scheduling workflow:
 - Responsive Today, Week, Semester, Courses, Goals, and Settings experiences backed by authenticated user data
 - Manual schedule-block creation, editing, moving, linking, locking, and deletion
 - Deterministic 14-day schedule proposals that preserve the accepted plan until explicit approval
+- AI-assisted assessment preparation that chooses validated phases and preferred study days, with a deterministic fallback when AI is unavailable
 - Reviewable placement reasons, unresolved-work warnings, stale-input protection, and editable drafts
 - User-local day and week planning views with recurring commitments, commute time, availability, and protected buffer calculations
 - Semester workload, deadline, capacity, and risk summaries derived from stored tasks and preferences
@@ -24,8 +25,10 @@ Phase 3 review-first scheduling workflow:
 
 Model-assisted document interpretation and automatic proposal acceptance are intentionally reserved
 for later phases. Uploaded outlines use a deterministic local parser and are not sent to an external
-AI provider. Today, Week, and Semester read the accepted schedule and planning inputs; a generated
-proposal stays separate and editable until the student accepts the complete draft.
+AI provider. When configured, AI receives only confirmed assessment metadata, permitted study dates,
+and fixed session indexes; it cannot create deadlines, change session sizes, or place exact calendar
+times. Today, Week, and Semester read the accepted schedule and planning inputs; a generated proposal
+stays separate and editable until the student accepts the complete draft.
 
 New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload outlines, course calendars, and lecture materials together. DoNext groups files by course code, combines complementary evidence, and proposes course details, weighted assessments, deadlines, and recurring class meetings for confirmation. Scanned PDFs without embedded text may require manual entry.
 

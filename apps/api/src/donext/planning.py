@@ -343,6 +343,9 @@ def build_planning_view(
             )
         )
 
+    # Work that has already been broken into blocks has a place, whether that place is the
+    # accepted plan or the draft still under review. Superseded and rejected versions are
+    # excluded: their blocks describe a plan the student has already moved on from.
     scheduled_task_ids = set(
         db.scalars(
             select(ScheduledBlock.task_id)
@@ -350,7 +353,7 @@ def build_planning_view(
             .where(
                 ScheduledBlock.user_id == user.id,
                 ScheduledBlock.task_id.is_not(None),
-                ScheduleVersion.status == ScheduleStatus.accepted,
+                ScheduleVersion.status.in_((ScheduleStatus.accepted, ScheduleStatus.proposed)),
             )
         )
     )

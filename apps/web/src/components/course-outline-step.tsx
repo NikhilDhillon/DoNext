@@ -37,6 +37,9 @@ type CourseOutlineStepProps = {
   onRemoveCourse: (id: string) => void;
   onRemoveItem: (id: string) => void;
   onReviewActiveChange?: (active: boolean) => void;
+  showIntro?: boolean;
+  showExistingCourses?: boolean;
+  showManualEntry?: boolean;
 };
 
 export function CourseOutlineStep({
@@ -50,6 +53,9 @@ export function CourseOutlineStep({
   onRemoveCourse,
   onRemoveItem,
   onReviewActiveChange,
+  showIntro = true,
+  showExistingCourses = true,
+  showManualEntry = true,
 }: CourseOutlineStepProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [proposals, setProposals] = useState<OutlineExtraction[]>([]);
@@ -61,8 +67,9 @@ export function CourseOutlineStep({
 
   useEffect(() => {
     onReviewActiveChange?.(proposals.length > 0);
-    return () => onReviewActiveChange?.(false);
   }, [onReviewActiveChange, proposals.length]);
+
+  useEffect(() => () => onReviewActiveChange?.(false), [onReviewActiveChange]);
 
   function selectFiles(selected: FileList | File[]) {
     const selectedFiles = Array.from(selected);
@@ -213,11 +220,13 @@ export function CourseOutlineStep({
     <>
       {!proposals.length ? (
         <>
-          <header className="onboarding-step-heading">
-            <div><p className="eyebrow">Start with the source</p></div>
-            <h2>Upload your course outlines.</h2>
-            <p>Upload outlines, schedules, or course slides together. DoNext identifies which files belong to the same course, combines their useful details, and waits for your review before adding anything.</p>
-          </header>
+          {showIntro ? (
+            <header className="onboarding-step-heading">
+              <div><p className="eyebrow">Start with the source</p></div>
+              <h2>Upload your course outlines.</h2>
+              <p>Upload outlines, schedules, or course slides together. DoNext identifies which files belong to the same course, combines their useful details, and waits for your review before adding anything.</p>
+            </header>
+          ) : null}
 
           <section className="outline-upload-card">
             <label
@@ -278,12 +287,12 @@ export function CourseOutlineStep({
         })}
       </div>
 
-      {!proposals.length && courses.length ? <section className="imported-courses">
+      {!proposals.length && showExistingCourses && courses.length ? <section className="imported-courses">
         <div className="proposal-section-title"><strong>Courses already added</strong><small>{courses.length} in {semester.name}</small></div>
         {courses.map((course) => <article key={course.id}><button className="imported-course-open" disabled={restoringCourseId === course.id} type="button" onClick={() => void restoreCourseForEditing(course)}><span>{restoringCourseId === course.id ? <LoaderCircle className="spin" size={17} /> : <BookOpen size={17} />}</span><span><strong>{course.code} · {course.name}</strong><small>{outlineTasks.filter((task) => task.course_id === course.id).length} assignments or exams</small></span></button><button className="imported-course-remove" aria-label={`Remove ${course.code}`} type="button" onClick={() => onRemoveCourse(course.id)}><Trash2 size={16} /></button></article>)}
       </section> : null}
 
-      {!proposals.length ? <details className="manual-entry-panel">
+      {!proposals.length && showManualEntry ? <details className="manual-entry-panel">
         <summary><span><Plus size={17} /></span><div><strong>Enter course information manually</strong><small>Add the course first, then its assignments and exams.</small></div></summary>
         <div className="manual-entry-content">
           <form className="onboarding-form compact-form" onSubmit={onCreateCourse}>

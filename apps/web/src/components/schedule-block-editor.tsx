@@ -20,6 +20,7 @@ type ScheduleBlockEditorProps = {
   date: string;
   tasks: PlannerTask[];
   entry: PlanningEntry | null;
+  duplicateOf?: PlanningEntry | null;
   suggestedTask: PlannerTask | null;
   proposalId?: string;
   onClose: () => void;
@@ -32,6 +33,7 @@ export function ScheduleBlockEditor({
   date,
   tasks,
   entry,
+  duplicateOf = null,
   suggestedTask,
   proposalId,
   onClose,
@@ -61,7 +63,7 @@ export function ScheduleBlockEditor({
         title: String(form.get("title")),
         task_id: taskId,
         fixed_event_id: taskId ? null : entry?.kind === "scheduled_block" ? null : undefined,
-        goal_id: taskId ? null : entry?.goal_id ?? null,
+        goal_id: taskId ? null : (entry ?? duplicateOf)?.goal_id ?? null,
         start_at: new Date(String(form.get("start_at"))).toISOString(),
         end_at: new Date(String(form.get("end_at"))).toISOString(),
         block_type: String(form.get("block_type")),
@@ -118,17 +120,22 @@ export function ScheduleBlockEditor({
     }
   }
 
-  const startValue = entry ? toDateTimeInput(entry.start_at) : defaults.start;
-  const endValue = entry ? toDateTimeInput(entry.end_at) : defaults.end;
-  const selectedTaskId = entry?.task_id ?? suggestedTask?.id ?? "";
-  const title = entry?.title ?? suggestedTask?.name ?? "";
-  const formKey = `${entry?.id ?? "new"}:${suggestedTask?.id ?? "none"}:${date}:${defaults.start}:${open}`;
+  const source = entry ?? duplicateOf;
+  const startValue = source ? toDateTimeInput(source.start_at) : defaults.start;
+  const endValue = source ? toDateTimeInput(source.end_at) : defaults.end;
+  const selectedTaskId = source?.task_id ?? suggestedTask?.id ?? "";
+  const title = source?.title ?? suggestedTask?.name ?? "";
+  const formKey = `${entry?.id ?? duplicateOf?.id ?? "new"}:${suggestedTask?.id ?? "none"}:${date}:${defaults.start}:${open}`;
 
   return (
     <FormDialog
       open={open}
-      title={entry ? "Adjust time block" : "Plan a time block"}
-      description={proposalId ? "Adjust this draft before accepting it." : "Choose the exact time yourself."}
+      title={entry ? "Adjust time block" : duplicateOf ? "Duplicate time block" : "Plan a time block"}
+      description={duplicateOf
+        ? "Choose a new time for this copy before adding it to the draft."
+        : proposalId
+          ? "Adjust this draft before accepting it."
+          : "Choose the exact time yourself."}
       onClose={close}
     >
       <form className="onboarding-form planner-block-form" key={formKey} onSubmit={submit}>
@@ -161,7 +168,7 @@ export function ScheduleBlockEditor({
         <div className="form-row">
           <label>
             <span>Type</span>
-            <select name="block_type" defaultValue={entry?.block_type ?? "focus"}>
+            <select name="block_type" defaultValue={source?.block_type ?? "focus"}>
               <option value="focus">Focused work</option>
               <option value="goal">Personal goal</option>
               <option value="commitment">Commitment</option>
@@ -170,7 +177,7 @@ export function ScheduleBlockEditor({
             </select>
           </label>
           <label className="checkbox-field planner-lock-field">
-            <input name="locked" type="checkbox" defaultChecked={entry?.locked ?? false} />
+            <input name="locked" type="checkbox" defaultChecked={source?.locked ?? false} />
             <span><strong>Keep this time fixed</strong><small>Future planning will work around it.</small></span>
           </label>
         </div>
@@ -184,7 +191,7 @@ export function ScheduleBlockEditor({
           <button className="secondary-button" disabled={busy} type="button" onClick={close}>Cancel</button>
           <button className="primary-button" disabled={busy} type="submit">
             {busy ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />}
-            {busy ? "Saving" : "Save block"}
+            {busy ? "Saving" : duplicateOf ? "Add copy" : "Save block"}
           </button>
         </div>
       </form>

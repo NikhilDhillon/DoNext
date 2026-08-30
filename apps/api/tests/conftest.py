@@ -1,5 +1,6 @@
 from collections.abc import Generator
 from sqlite3 import Connection as SQLiteConnection
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -35,6 +36,17 @@ def override_get_db() -> Generator[Session]:
 
 
 app.dependency_overrides[get_db] = override_get_db
+
+
+@pytest.fixture(autouse=True)
+def disable_live_openai_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the test suite deterministic and prevent calls billed to a real key."""
+
+    def no_openai() -> SimpleNamespace:
+        return SimpleNamespace(openai_api_key=None)
+
+    monkeypatch.setattr("donext.academic_planning.get_settings", no_openai)
+    monkeypatch.setattr("donext.schedule_revision.get_settings", no_openai)
 
 
 @pytest.fixture

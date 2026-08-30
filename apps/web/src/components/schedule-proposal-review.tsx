@@ -5,6 +5,7 @@ import {
   CalendarClock,
   Check,
   LoaderCircle,
+  Plus,
   RefreshCw,
   Sparkles,
   X,
@@ -25,6 +26,18 @@ import type {
   ScheduleRevisionReason,
   Semester,
 } from "@/lib/types";
+
+const legacySolverTimeoutWarning =
+  "The solver reached its time limit; this feasible draft may not be optimal.";
+const completeSolverTimeoutWarning =
+  "Everything fits: all requested work is scheduled and every hard constraint is satisfied. DoNext stopped after its optimization limit, so a different valid arrangement may match your preferences slightly better.";
+const partialSolverTimeoutWarning =
+  "DoNext found a valid partial draft before its optimization limit, but some work remains unscheduled. Review the unresolved items below; a different valid arrangement may fit more work or match your preferences better.";
+const solverTimeoutWarnings = new Set([
+  legacySolverTimeoutWarning,
+  completeSolverTimeoutWarning,
+  partialSolverTimeoutWarning,
+]);
 
 type ScheduleProposalReviewProps = {
   semester: Semester;
@@ -53,6 +66,7 @@ export function ScheduleProposalReview({
   const [revisionError, setRevisionError] = useState<string | null>(null);
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
+  const [duplicateEntry, setDuplicateEntry] = useState<PlanningEntry | null>(null);
   const [editorDate, setEditorDate] = useState(semester.start_date);
   const generationSuccessTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -134,12 +148,14 @@ export function ScheduleProposalReview({
   }
 
   function edit(block: ScheduleBlock) {
+    setDuplicateEntry(null);
     setSelectedEntry(blockEntry(block));
     setEditorDate(dateInTimezone(block.start_at, timezone));
     setEditorOpen(true);
   }
 
   function addBlock(date?: string) {
+    setDuplicateEntry(null);
     setSelectedEntry(null);
     setEditorDate(
       date
@@ -152,6 +168,14 @@ export function ScheduleProposalReview({
     setEditorOpen(true);
   }
 
+  function duplicateBlock(block: ScheduleBlock) {
+    const entry = blockEntry(block);
+    setSelectedEntry(null);
+    setDuplicateEntry(entry);
+    setEditorDate(dateInTimezone(block.start_at, timezone));
+    setEditorOpen(true);
+  }
+
   if (proposal.loading && !proposal.data) {
     return <section className="proposal-review loading"><LoaderCircle className="spin" size={20} /> Checking for a draft</section>;
   }
@@ -161,9 +185,9 @@ export function ScheduleProposalReview({
       <section className="proposal-launch">
         <span><Sparkles size={22} /></span>
         <div>
-          <p className="eyebrow">Deterministic planning</p>
+          <p className="eyebrow">AI-assisted, constraint-safe planning</p>
           <h2>Build a reviewable 14-day draft.</h2>
-          <p>Your accepted plan stays untouched until you explicitly approve the complete draft.</p>
+          <p>When available, AI shapes assessment preparation; deadlines and availability stay enforced. Your accepted plan remains untouched until you approve the draft.</p>
         </div>
         <button className="primary-button" disabled={busy} type="button" onClick={() => void generate()}>
           {busy ? <LoaderCircle className="spin" size={17} /> : <CalendarClock size={17} />}
@@ -230,16 +254,33 @@ export function ScheduleProposalReview({
         </div>
       ) : null}
 
+      {draft.generation_summary.academic_planning_source !== "none" ? (
+        <div className="revision-applied" role="status">
+          <Sparkles size={17} />
+          <span>
+            <strong>{academicPlanningTitle(draft.generation_summary.academic_planning_source)}</strong>
+            <small>{academicPlanningDescription(draft.generation_summary.academic_planning_source)}</small>
+          </span>
+          <em>{academicPlanningBadge(draft.generation_summary.academic_planning_source)}</em>
+        </div>
+      ) : null}
+
       {draft.stale ? (
         <p className="planner-alert error"><AlertTriangle size={15} /> Inputs changed. Regenerate before accepting.</p>
       ) : null}
-      {draft.generation_summary.warnings.map((warning) => (
-        <p className="planner-alert warning" key={warning}><AlertTriangle size={15} /> {warning}</p>
-      ))}
+      {draft.generation_summary.warnings.map((warning) => {
+        const display = proposalWarningDisplay(warning, draft.generation_summary);
+        return (
+          <p className={`planner-alert ${display.informational ? "info" : "warning"}`} key={warning}>
+            {display.informational ? <Check size={15} /> : <AlertTriangle size={15} />}
+            {display.message}
+          </p>
+        );
+      })}
 
       <div className="proposal-block-heading">
         <div><h3>Draft calendar</h3><p>Classes and fixed commitments are shown for context. Drag a generated block to move it, select it to edit details, or click an open day to add one.</p></div>
-        <button className="text-button" type="button" onClick={() => addBlock()}>Add draft block</button>
+        <button className="primary-button draft-add-button" type="button" onClick={() => addBlock()}><Plus size={17} /> Add draft block</button>
       </div>
       <DraftScheduleCalendar
         blocks={draft.blocks}
@@ -248,6 +289,7 @@ export function ScheduleProposalReview({
         proposalId={draft.id}
         timezone={timezone}
         onAdd={addBlock}
+        onDuplicate={duplicateBlock}
         onEdit={edit}
         onMoved={proposal.reload}
       />
@@ -287,8 +329,9 @@ export function ScheduleProposalReview({
         date={editorDate}
         tasks={tasks}
         entry={selectedEntry}
+        duplicateOf={duplicateEntry}
         suggestedTask={null}
-        onClose={() => setEditorOpen(false)}
+        onClose={() => { setEditorOpen(false); setDuplicateEntry(null); }}
         onSaved={proposal.reload}
       />
       {revisionOpen ? (
@@ -345,6 +388,48 @@ function firstFocusDate(
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiRequestError ? error.message : fallback;
+}
+
+function proposalWarningDisplay(
+  warning: string,
+  summary: ScheduleProposal["generation_summary"],
+) {
+  if (!summary.timed_out || !solverTimeoutWarnings.has(warning)) {
+    return { informational: false, message: warning };
+  }
+  const complete = summary.coverage_status === "complete" && summary.unscheduled.length === 0;
+  return {
+    informational: complete,
+    message: complete ? completeSolverTimeoutWarning : partialSolverTimeoutWarning,
+  };
+}
+
+function academicPlanningDescription(
+  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
+) {
+  if (source === "openai") {
+    return "AI selected assessment preparation phases and preferred study days. DoNext then enforced deadlines, availability, and every hard constraint.";
+  }
+  if (source === "mixed") {
+    return "AI planned some assessment sessions, and the built-in planner safely completed the rest.";
+  }
+  return "No AI output was used for this draft. The built-in planner selected preparation phases and study days.";
+}
+
+function academicPlanningTitle(
+  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
+) {
+  if (source === "openai") return "AI helped build this plan";
+  if (source === "mixed") return "AI helped build part of this plan";
+  return "This plan used the built-in planner";
+}
+
+function academicPlanningBadge(
+  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
+) {
+  if (source === "openai") return "AI used";
+  if (source === "mixed") return "AI partially used";
+  return "No AI used";
 }
 
 function formatMinutes(minutes: number) {
