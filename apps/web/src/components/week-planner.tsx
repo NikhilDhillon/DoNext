@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, ChevronLeft, ChevronRight, LoaderCircle, Pencil, Plus } from "lucide-react";
+import { CalendarClock, LoaderCircle, Pencil, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
@@ -9,8 +9,7 @@ import { useApiResource } from "@/hooks/use-api-resource";
 import type { PlannerTask, PlanningEntry, PlanningView, Semester } from "@/lib/types";
 
 export function WeekPlanner() {
-  const [path, setPath] = useState("/planning/week");
-  const plan = useApiResource<PlanningView>(path);
+  const plan = useApiResource<PlanningView>("/planning/week");
   const semesters = useApiResource<Semester[]>("/semesters");
   const currentSemester = useMemo(
     () => semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null,
@@ -35,10 +34,6 @@ export function WeekPlanner() {
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
   const rows = (endHour - startHour) * 2;
 
-  function moveWeek(offset: number) {
-    setPath(`/planning/week?start=${addDays(data.start_date, offset * 7)}`);
-  }
-
   function openNew(date: string, task: PlannerTask | null = null) {
     setSelectedEntry(null);
     setSuggestedTask(task);
@@ -61,14 +56,6 @@ export function WeekPlanner() {
           <p className="eyebrow">{formatDateRange(data.start_date, data.end_date)}</p>
           <h1>Your week</h1>
           <p>{weekSummary(data.entries.length, openMinutes, data.warnings.length > 0)}</p>
-        </div>
-        <div className="heading-actions">
-          <div className="date-controls">
-            <button aria-label="Previous week" type="button" onClick={() => moveWeek(-1)}><ChevronLeft size={18} /></button>
-            <button type="button" onClick={() => setPath("/planning/week")}>This week</button>
-            <button aria-label="Next week" type="button" onClick={() => moveWeek(1)}><ChevronRight size={18} /></button>
-          </div>
-          <button className="primary-button" disabled={!currentSemester} type="button" onClick={() => openNew(defaultEditorDate(data))}><Plus size={17} /> Add block</button>
         </div>
       </header>
 
@@ -192,12 +179,6 @@ function dateInTimezone(value: string, timezone: string) {
 
 function dateDifference(start: string, end: string) {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000);
-}
-
-function addDays(value: string, amount: number) {
-  const result = new Date(`${value}T00:00:00Z`);
-  result.setUTCDate(result.getUTCDate() + amount);
-  return result.toISOString().slice(0, 10);
 }
 
 function defaultEditorDate(plan: PlanningView) {
