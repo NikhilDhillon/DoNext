@@ -55,7 +55,6 @@ export function WeekPlanner() {
         <div>
           <p className="eyebrow">{formatDateRange(data.start_date, data.end_date)}</p>
           <h1>Your week</h1>
-          <p>{weekSummary(data.entries.length, openMinutes, data.warnings.length > 0)}</p>
         </div>
       </header>
 
@@ -273,9 +272,4 @@ function formatMinutes(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
   return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
-}
-
-function weekSummary(entries: number, openMinutes: number, incomplete: boolean) {
-  if (incomplete) return `${entries} planned items. Add availability to complete the capacity picture.`;
-  return `${entries} planned items with ${formatMinutes(openMinutes)} of usable focus capacity still open.`;
 }

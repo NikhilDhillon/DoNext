@@ -77,6 +77,10 @@ ITEM_KIND_KEYWORDS: tuple[tuple[OutlineItemKind, tuple[str, ...]], ...] = (
     ("lab", ("lab",)),
 )
 
+# Meeting types that add nothing to a course code; a lab or tutorial still earns its label.
+GENERIC_MEETING_TYPES = frozenset(
+    {"class", "instruction", "lecture", "lectures", "lec", "in person", "in-person"}
+)
 DAY_NAMES = {
     "monday": 0,
     "mon": 0,
@@ -718,8 +722,12 @@ def _meeting(
     confidence: float,
     meeting_type: str = "class",
 ) -> OutlineMeetingProposal:
+    name = course.code or course.name or "Course"
+    label = meeting_type.strip().lower()
     return OutlineMeetingProposal(
-        title=f"{course.code or course.name or 'Course'} {meeting_type.lower()}",
+        # "CSC 349A instruction" says nothing "CSC 349A" does not; only a meeting type that
+        # distinguishes one session from another earns a place in the title.
+        title=name if label in GENERIC_MEETING_TYPES else f"{name} {label}",
         day_of_week=day_index,
         start_time=start_time,
         end_time=end_time,

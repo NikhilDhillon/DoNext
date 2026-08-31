@@ -81,15 +81,10 @@ PLANNING_LEAD_DAYS = {
     AcademicItemType.reading: 7,
     AcademicItemType.other: 14,
 }
-COMPLETE_TIMEOUT_WARNING = (
-    "Everything fits: all requested work is scheduled and every hard constraint is "
-    "satisfied. DoNext stopped after its optimization limit, so a different valid "
-    "arrangement may match your preferences slightly better."
-)
+COMPLETE_TIMEOUT_WARNING = "Everything fits. Regenerate for a different arrangement."
 PARTIAL_TIMEOUT_WARNING = (
-    "DoNext found a valid partial draft before its optimization limit, but some work "
-    "remains unscheduled. Review the unresolved items below; a different valid "
-    "arrangement may fit more work or match your preferences better."
+    "Some work did not fit \u2014 see unresolved items below. "
+    "Regenerate for a different arrangement."
 )
 
 

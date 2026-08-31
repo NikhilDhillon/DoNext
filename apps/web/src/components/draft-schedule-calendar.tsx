@@ -431,7 +431,6 @@ export function DraftScheduleCalendar({
       <div className="draft-calendar-toolbar">
         <div className="draft-calendar-range">
           <span>Week {weekIndex + 1} of {weekStarts.length}</span>
-          <strong>{formatRange(selectedWeek, selectedWeekEnd)}</strong>
           {focusHours ? <small><Clock3 size={13} /> Focus hours {focusHours}</small> : null}
         </div>
         <div className="draft-calendar-navigation">
@@ -598,7 +597,7 @@ export function DraftScheduleCalendar({
               <span><GripVertical size={16} /></span>
               <div>
                 <strong>{splitEventTitle(item.block.title).label}</strong>
-                <small>{splitEventTitle(item.block.title).eyebrow ? `${splitEventTitle(item.block.title).eyebrow} · ` : ""}{formatBlockTime(item.block, timezone)} · Editable draft</small>
+                <small>{splitEventTitle(item.block.title).eyebrow ? `${splitEventTitle(item.block.title).eyebrow} · ` : ""}{formatBlockTime(item.block, timezone)}</small>
               </div>
             </button>
             <button
@@ -747,7 +746,11 @@ function DraftFixedBlock({
       title={`${entry.title} · ${formatEntryTime(entry, timezone)}${entry.location ? ` · ${entry.location}` : ""}`}
     >
       <p className="draft-event-meta-row">
-        <span className="draft-event-kind"><span>{fixedEventIcon(entry)}</span>{fixedEventLabel(entry)}</span>
+        <span className="draft-event-kind">
+          <span>{fixedEventIcon(entry)}</span>
+          {/* A class card is already a violet block with a graduation cap and a course code. */}
+          {entry.category === "class" ? null : fixedEventLabel(entry)}
+        </span>
         <span className="draft-event-time">{formatEntryTime(entry, timezone)}</span>
       </p>
       <strong className="draft-event-label">{entry.title}</strong>

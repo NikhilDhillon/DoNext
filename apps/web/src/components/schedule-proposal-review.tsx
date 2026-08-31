@@ -27,14 +27,15 @@ import type {
   Semester,
 } from "@/lib/types";
 
-const legacySolverTimeoutWarning =
-  "The solver reached its time limit; this feasible draft may not be optimal.";
-const completeSolverTimeoutWarning =
-  "Everything fits: all requested work is scheduled and every hard constraint is satisfied. DoNext stopped after its optimization limit, so a different valid arrangement may match your preferences slightly better.";
+const completeSolverTimeoutWarning = "Everything fits. Regenerate for a different arrangement.";
 const partialSolverTimeoutWarning =
-  "DoNext found a valid partial draft before its optimization limit, but some work remains unscheduled. Review the unresolved items below; a different valid arrangement may fit more work or match your preferences better.";
+  "Some work did not fit — see unresolved items below. Regenerate for a different arrangement.";
+// Drafts generated before the copy was shortened still carry the long warnings, so they stay
+// recognizable here; only the wording shown to the student changes.
 const solverTimeoutWarnings = new Set([
-  legacySolverTimeoutWarning,
+  "The solver reached its time limit; this feasible draft may not be optimal.",
+  "Everything fits: all requested work is scheduled and every hard constraint is satisfied. DoNext stopped after its optimization limit, so a different valid arrangement may match your preferences slightly better.",
+  "DoNext found a valid partial draft before its optimization limit, but some work remains unscheduled. Review the unresolved items below; a different valid arrangement may fit more work or match your preferences better.",
   completeSolverTimeoutWarning,
   partialSolverTimeoutWarning,
 ]);
@@ -205,7 +206,6 @@ export function ScheduleProposalReview({
         <div>
           <p className="eyebrow">Draft schedule · {formatRange(draft.horizon_start, draft.horizon_end)}</p>
           <h2>Review every placement before it becomes active.</h2>
-          <p>The accepted calendar remains below. These blocks are a separate editable version.</p>
         </div>
         <button
           aria-busy={generationState === "running"}
@@ -234,8 +234,6 @@ export function ScheduleProposalReview({
       <div className="proposal-metrics">
         <div><strong>{formatMinutes(draft.generation_summary.scheduled_minutes)}</strong><span>scheduled</span></div>
         <div><strong>{formatMinutes(draft.generation_summary.requested_minutes)}</strong><span>requested</span></div>
-        <div><strong>{formatMinutes(draft.generation_summary.eligible_capacity_minutes)}</strong><span>eligible capacity</span></div>
-        <div><strong>{draft.generation_summary.generated_blocks}</strong><span>generated blocks</span></div>
       </div>
 
       {draft.revision_feedback ? (
@@ -254,14 +252,13 @@ export function ScheduleProposalReview({
         </div>
       ) : null}
 
-      {draft.generation_summary.academic_planning_source !== "none" ? (
+      {aiHelped(draft.generation_summary.academic_planning_source) ? (
         <div className="revision-applied" role="status">
           <Sparkles size={17} />
           <span>
             <strong>{academicPlanningTitle(draft.generation_summary.academic_planning_source)}</strong>
             <small>{academicPlanningDescription(draft.generation_summary.academic_planning_source)}</small>
           </span>
-          <em>{academicPlanningBadge(draft.generation_summary.academic_planning_source)}</em>
         </div>
       ) : null}
 
@@ -279,7 +276,7 @@ export function ScheduleProposalReview({
       })}
 
       <div className="proposal-block-heading">
-        <div><h3>Draft calendar</h3><p>Classes and fixed commitments are shown for context. Drag a generated block to move it, select it to edit details, or click an open day to add one.</p></div>
+        <div><h3>Draft calendar</h3></div>
         <button className="primary-button draft-add-button" type="button" onClick={() => addBlock()}><Plus size={17} /> Add draft block</button>
       </div>
       <DraftScheduleCalendar
@@ -404,32 +401,26 @@ function proposalWarningDisplay(
   };
 }
 
+// The built-in planner is the baseline, so only AI involvement is worth announcing.
+function aiHelped(
+  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
+) {
+  return source === "openai" || source === "mixed";
+}
+
 function academicPlanningDescription(
   source: ScheduleProposal["generation_summary"]["academic_planning_source"],
 ) {
   if (source === "openai") {
     return "AI selected assessment preparation phases and preferred study days. DoNext then enforced deadlines, availability, and every hard constraint.";
   }
-  if (source === "mixed") {
-    return "AI planned some assessment sessions, and the built-in planner safely completed the rest.";
-  }
-  return "No AI output was used for this draft. The built-in planner selected preparation phases and study days.";
+  return "AI planned some assessment sessions, and the built-in planner safely completed the rest.";
 }
 
 function academicPlanningTitle(
   source: ScheduleProposal["generation_summary"]["academic_planning_source"],
 ) {
-  if (source === "openai") return "AI helped build this plan";
-  if (source === "mixed") return "AI helped build part of this plan";
-  return "This plan used the built-in planner";
-}
-
-function academicPlanningBadge(
-  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
-) {
-  if (source === "openai") return "AI used";
-  if (source === "mixed") return "AI partially used";
-  return "No AI used";
+  return source === "openai" ? "AI helped build this plan" : "AI helped build part of this plan";
 }
 
 function formatMinutes(minutes: number) {
