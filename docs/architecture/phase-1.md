@@ -2,6 +2,11 @@
 
 Author: Nikhil Dhillon
 
+Status: Historical milestone record
+
+This document records Phase 1 decisions at the time they were made. It is not a source of current
+scheduling policy. See [`../scheduling.md`](../scheduling.md) for the canonical behavior.
+
 ## Purpose
 
 Phase 1 creates the product and data foundation for DoNext without prematurely implementing automatic scheduling or AI-assisted input.
@@ -77,7 +82,9 @@ Important planning rules are enforced twice:
 
 Examples include semester date ordering, positive task effort, ordered goal effort ranges, valid availability windows, and end times after start times.
 
-Schedule versions and scheduled blocks exist in the schema now, but automatic schedule generation does not. Later phases will append proposed versions instead of overwriting accepted schedules.
+At the Phase 1 milestone, schedule versions and scheduled blocks existed in the schema but automatic
+schedule generation did not. Later phases subsequently added separate proposed versions instead of
+overwriting accepted schedules.
 
 ## Local services
 

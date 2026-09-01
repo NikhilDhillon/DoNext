@@ -1,6 +1,7 @@
 # DoNext
 
-DoNext is an adaptive life planner that helps students decide what to do next while protecting sleep, commitments, goals, and recovery time.
+DoNext is a semester-aware academic planner that helps students decide what to do next while
+respecting commitments, realistic capacity, and explicit scheduling trade-offs.
 
 ## Current milestone
 
@@ -28,7 +29,18 @@ for later phases. Uploaded outlines use a deterministic local parser and are not
 AI provider. When configured, AI receives only confirmed assessment metadata, permitted study dates,
 and fixed session indexes; it cannot create deadlines, change session sizes, or place exact calendar
 times. Today, Week, and Semester read the accepted schedule and planning inputs; a generated proposal
-stays separate and editable until the student accepts the complete draft.
+stays separate and editable until the student accepts the reviewed draft.
+
+## Scheduling source of truth
+
+The intended student-centered scheduling behavior is defined in
+[`docs/scheduling.md`](docs/scheduling.md). It is the canonical product specification for readiness,
+assignment and exam priority, effort defaults, capacity escalation, sleep, personal goals, honest
+shortfalls, and proposal review.
+
+[`docs/architecture/phase-3.md`](docs/architecture/phase-3.md) describes what the repository currently
+implements and lists the remaining gaps against that specification. Historical phase documents do
+not override the canonical scheduling policy.
 
 New accounts complete onboarding before entering the planner. Each step saves immediately, and incomplete accounts return to setup after signing in. Students can upload outlines, course calendars, and lecture materials together. DoNext groups files by course code, combines complementary evidence, and proposes course details, weighted assessments, deadlines, and recurring class meetings for confirmation. Scanned PDFs without embedded text may require manual entry.
 
@@ -119,7 +131,7 @@ The API test suite uses an isolated in-memory SQLite database. PostgreSQL remain
 
 Phase 1 architecture and security decisions are documented in [`docs/architecture/phase-1.md`](docs/architecture/phase-1.md).
 The live manual-planning milestone is specified in [`docs/architecture/phase-2.md`](docs/architecture/phase-2.md).
-The deterministic proposal milestone is specified in [`docs/architecture/phase-3.md`](docs/architecture/phase-3.md).
+The current deterministic proposal implementation is documented in [`docs/architecture/phase-3.md`](docs/architecture/phase-3.md).
 
 ## Author
 

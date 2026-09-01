@@ -2,15 +2,19 @@
 
 Author: Nikhil Dhillon
 
+Status: Historical milestone record
+
+This document records Phase 2 decisions at the time they were made. It is not a source of current
+scheduling policy. See [`../scheduling.md`](../scheduling.md) for the canonical behavior.
+
 ## Purpose
 
 Phase 2 turns the Phase 1 data foundation into a usable manual planner. Today, Week, and
 Semester are computed from the authenticated student's real courses, tasks, goals,
 commitments, availability, preferences, and schedule blocks.
 
-Automatic schedule generation remains a Phase 3 concern. Phase 2 establishes the same
-schedule storage and read contracts that a deterministic scheduler can use later without
-changing the planner UI.
+At the Phase 2 milestone, automatic schedule generation remained a Phase 3 concern. Phase 2
+established the schedule storage and read contracts that the later deterministic scheduler uses.
 
 ## Schedule lifecycle
 
@@ -19,8 +23,8 @@ Each semester can have schedule versions. At most one version is accepted at a t
 - The first manual planning action creates and accepts a manual schedule version.
 - Manual blocks belong to the accepted version and remain directly editable by the user.
 - User-created or user-adjusted blocks use `source=manual` and may be locked.
-- A future scheduler will create an immutable proposed version rather than changing the
-  accepted version.
+- The planned scheduler would create a separate proposed version rather than changing the accepted
+  version; Phase 3 later implemented an editable draft proposal with this separation.
 - Accepting a proposal supersedes the previously accepted version in one transaction.
 - Rejecting a proposal leaves the accepted version untouched.
 
