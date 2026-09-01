@@ -181,6 +181,17 @@ export function ScheduleProposalReview({
     return <section className="proposal-review loading"><LoaderCircle className="spin" size={20} /> Checking for a draft</section>;
   }
 
+  // A rebuild replaces every placement, so the outgoing draft is cleared away rather than
+  // left on screen to be read while it is already being replaced.
+  if (generationState === "running") {
+    return (
+      <section aria-busy="true" className="proposal-review generating" role="status">
+        <LoaderCircle className="spin" size={34} />
+        <p>Building your draft</p>
+      </section>
+    );
+  }
+
   if (!proposal.data) {
     return (
       <section className="proposal-launch">
@@ -191,8 +202,7 @@ export function ScheduleProposalReview({
           <p>When available, AI shapes assessment preparation; deadlines and availability stay enforced. Your accepted plan remains untouched until you approve the draft.</p>
         </div>
         <button className="primary-button" disabled={busy} type="button" onClick={() => void generate()}>
-          {busy ? <LoaderCircle className="spin" size={17} /> : <CalendarClock size={17} />}
-          {busy ? "Building draft" : "Generate 14-day plan"}
+          <CalendarClock size={17} /> Generate 14-day plan
         </button>
         {error ? <p className="planner-alert error" role="alert">{error}</p> : null}
       </section>
@@ -208,25 +218,18 @@ export function ScheduleProposalReview({
           <h2>Review every placement before it becomes active.</h2>
         </div>
         <button
-          aria-busy={generationState === "running"}
           className={`secondary-button regeneration-button ${generationState}`}
           disabled={busy}
           type="button"
           onClick={() => void generate()}
         >
-          {generationState === "running" ? (
-            <LoaderCircle className="spin" size={16} />
-          ) : generationState === "success" ? (
+          {generationState === "success" ? (
             <Check className="regeneration-success-icon" size={16} />
           ) : (
             <RefreshCw size={16} />
           )}
           <span aria-live="polite">
-            {generationState === "running"
-              ? "Regenerating…"
-              : generationState === "success"
-                ? "Draft updated"
-                : "Regenerate"}
+            {generationState === "success" ? "Draft updated" : "Regenerate"}
           </span>
         </button>
       </header>
