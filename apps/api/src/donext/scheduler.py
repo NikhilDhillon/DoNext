@@ -421,7 +421,7 @@ def _optimize_sessions(
     )
     coverage_base = maximum_importance + 1
     model.maximize(academic_minutes * coverage_base + academic_importance)
-    first_solver = _solver(max(time_limit_seconds * 0.6, 0.05))
+    first_solver = _solver(max(time_limit_seconds * 0.45, 0.05))
     first_status = first_solver.solve(model)
     if first_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
@@ -429,6 +429,26 @@ def _optimize_sessions(
     best_importance = first_solver.value(academic_importance)
     model.add(academic_minutes == best_academic)
     model.add(academic_importance == best_importance)
+
+    # Study days are settled before flexible work is packed in. Coverage fixes how many
+    # academic minutes get scheduled but not when, so without this pass the flexible
+    # objective below can buy a few more commitment minutes by dragging a whole
+    # assessment's phases onto whatever day has room - landing "Plan" days before the
+    # lecture it depends on, and ahead of the sessions that should follow it.
+    drift_terms = [
+        alternative.selected
+        * _preferred_date_penalty(alternative.day, alternative.session.preferred_dates)
+        for alternative in alternatives
+        if alternative.session.preferred_dates
+    ]
+    if drift_terms:
+        study_drift = sum(drift_terms)
+        model.minimize(study_drift)
+        drift_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
+        drift_status = drift_solver.solve(model)
+        if drift_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(study_drift <= drift_solver.value(study_drift))
 
     flexible_minutes = sum(
         presence_by_session[(session.item.id, session.index)] * session.duration_minutes
@@ -464,19 +484,16 @@ def _optimize_sessions(
             if _energy_matches(alternative.session.item.intensity, alternative.energy_level)
             else 0
         )
-        date_distance = _preferred_date_penalty(
+        # A day of drift outweighs any start-time gain, so the earliness term below can
+        # only order sessions within the days the drift bound already allows.
+        date_penalty = _preferred_date_penalty(
             alternative.day, alternative.session.preferred_dates
-        )
-        date_bonus = (
-            max(32 - date_distance, 0) * (latest_tick + 60)
-            if alternative.session.preferred_dates
-            else 0
-        )
+        ) * (latest_tick + 60)
         timing_terms.append(
-            alternative.selected * (latest_tick + energy_bonus + date_bonus) - effective_start
+            alternative.selected * (latest_tick + energy_bonus - date_penalty) - effective_start
         )
     model.maximize(flexible_minutes * 100_000 + sum(fairness_terms) * 10_000 + sum(timing_terms))
-    second_solver = _solver(max(time_limit_seconds * 0.4, 0.05))
+    second_solver = _solver(max(time_limit_seconds * 0.35, 0.05))
     second_status = second_solver.solve(model)
     if second_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         active_solver = second_solver
@@ -486,11 +503,15 @@ def _optimize_sessions(
         active_status = first_status
     placements: list[Placement] = []
     scheduled = {item.id: 0 for item in items}
+    optimized_drift = 0
     for alternative in alternatives:
         if not active_solver.boolean_value(alternative.selected):
             continue
         start_at = epoch + timedelta(minutes=active_solver.value(alternative.start) * MINUTE_UNIT)
         scheduled[alternative.session.item.id] += alternative.session.duration_minutes
+        optimized_drift += _preferred_date_penalty(
+            alternative.day, alternative.session.preferred_dates
+        )
         placements.append(_placement(alternative.session, start_at, alternative.energy_level))
     placements.sort(key=lambda placement: (placement.start_at, placement.item_id))
     baseline_academic = sum(
@@ -498,6 +519,12 @@ def _optimize_sessions(
     )
     optimized_academic = sum(scheduled[item.id] for item in items if item.kind == "task")
     if optimized_academic < baseline_academic:
+        return None
+    # A solve that runs out of time can still return a valid but badly dated arrangement.
+    # The greedy baseline already follows the planned study days, so it wins any tie.
+    if optimized_academic == baseline_academic and optimized_drift > _study_drift(
+        baseline.placements, sessions
+    ):
         return None
     complete = all(scheduled[item.id] == item.target_minutes for item in items)
     timed_out = active_status != cp_model.OPTIMAL or second_status not in (
@@ -537,6 +564,27 @@ def _allowed_starts(
         if starts and _energy_matches(session.item.intensity, window.energy_level):
             energy = window.energy_level
     return sorted(set(starts)), energy
+
+
+def _study_drift(placements: list[Placement], sessions: list[_Session]) -> int:
+    """Total days between the study blocks in a solution and their planned study days.
+
+    Placements are paired with sessions in start order, the same way the baseline hints
+    are, and read in their own local day rather than UTC.
+    """
+    placements_by_item: dict[str, list[Placement]] = defaultdict(list)
+    for placement in placements:
+        placements_by_item[placement.item_id].append(placement)
+    for item_placements in placements_by_item.values():
+        item_placements.sort(key=lambda value: value.start_at)
+    drift = 0
+    for session in sessions:
+        item_placements = placements_by_item[session.item.id]
+        if session.index < len(item_placements):
+            drift += _preferred_date_penalty(
+                item_placements[session.index].start_at.date(), session.preferred_dates
+            )
+    return drift
 
 
 def _add_baseline_hints(

@@ -333,6 +333,80 @@ def test_daily_capacity_is_a_budget_instead_of_an_early_day_cutoff() -> None:
     assert result.eligible_capacity_minutes == 60
 
 
+def test_flexible_commitments_cannot_pull_study_sessions_off_their_planned_days() -> None:
+    """Packing more commitment minutes is never worth moving an assessment's phases.
+
+    Every planned study day here holds exactly one session, so clearing those days lets
+    three more commitments fit. Buying them would drag the whole assignment onto the one
+    open day, ahead of the classes and the phases it is meant to follow.
+    """
+    planned = (date(2026, 9, 10), date(2026, 9, 12), date(2026, 9, 13))
+    assignment = SchedulingItem(
+        id="task:assignment",
+        title="Assignment 1",
+        target_minutes=150,
+        minimum_session_minutes=50,
+        preferred_session_minutes=50,
+        maximum_session_minutes=50,
+        priority_rank=3,
+        intensity="moderate",
+        session_blueprints=tuple(
+            SessionBlueprint(
+                title=f"SENG 310 · {label} Assignment 1",
+                duration_minutes=50,
+                preferred_dates=frozenset({day}),
+                phase=phase,
+            )
+            for label, phase, day in zip(
+                ("Plan", "Work on", "Review and revise"),
+                ("draft", "develop", "revise"),
+                planned,
+                strict=True,
+            )
+        ),
+    )
+    commitments = [
+        SchedulingItem(
+            id=f"flex:gym:{day.isoformat()}",
+            title="Gym",
+            target_minutes=50,
+            minimum_session_minutes=50,
+            preferred_session_minutes=50,
+            maximum_session_minutes=50,
+            priority_rank=3,
+            intensity="moderate",
+            kind="flexible_commitment",
+            eligible_dates=frozenset({day}),
+        )
+        for day in (date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 12), date(2026, 9, 13))
+    ]
+    # The first day is wide open; every later day holds exactly one 50 minute session.
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, 9, 9, 0, tzinfo=UTC),
+            datetime(2026, 9, 9, 17, 0, tzinfo=UTC),
+        )
+    ] + [
+        SchedulingWindow(
+            datetime(2026, 9, 10 + offset, 9, 0, tzinfo=UTC),
+            datetime(2026, 9, 10 + offset, 10, 0, tzinfo=UTC),
+        )
+        for offset in range(4)
+    ]
+
+    result = solve_schedule(
+        [assignment, *commitments], windows, minimum_break_minutes=10, time_limit_seconds=5.0
+    )
+
+    study = [placement for placement in result.placements if placement.item_id == "task:assignment"]
+    assert [placement.start_at.date() for placement in study] == list(planned)
+    assert [placement.reason_details["academic_phase"] for placement in study] == [
+        "draft",
+        "develop",
+        "revise",
+    ]
+
+
 def test_optimizer_failure_returns_the_valid_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
