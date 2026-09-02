@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, ChevronUp, Copy, LoaderCircle, Minus, Pencil, Plus, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Copy, Layers, LoaderCircle, Minus, Pencil, Plus, Trash2, X } from "lucide-react";
 
 import { formatBlockTime, splitEventTitle } from "@/components/draft-calendar/lib";
 import type { ScheduleBlock } from "@/lib/types";
@@ -44,6 +44,7 @@ export function BlockInspector({
   const minutes = Math.round(
     (new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000,
   );
+  const displaced = displacedWork(block);
 
   return (
     <aside
@@ -101,6 +102,13 @@ export function BlockInspector({
         )}
       </div>
 
+      {displaced ? (
+        <p className="console-inspector-displaced">
+          <Layers aria-hidden="true" size={13} />
+          <span>Took capacity from <strong>{displaced.title}</strong> — {displaced.short} still unscheduled.</span>
+        </p>
+      ) : null}
+
       <p className="console-inspector-hint">
         Drag the block, or nudge it with <kbd>↑</kbd><kbd>↓</kbd> and <kbd>←</kbd><kbd>→</kbd>.
         Nothing reaches your accepted plan until you approve this draft.
@@ -117,6 +125,17 @@ function panelPosition(columns: number, columnIndex: number, gutterWidth: number
   const ratio = flip ? columnIndex / columns : (columnIndex + 1) / columns;
   const nudge = flip ? `- ${PANEL_WIDTH + 8}px` : "+ 8px";
   return { left: `calc(${gutterWidth}px + (100% - ${gutterWidth}px) * ${ratio} ${nudge})` };
+}
+
+// The scheduler records which lower-priority work lost capacity to this block. Showing it
+// answers the last of the specification's explainability questions on the block itself.
+function displacedWork(block: ScheduleBlock) {
+  const details = block.reason_details;
+  if (!details) return null;
+  const title = details.displaced_title;
+  const short = details.displaced_shortfall_minutes;
+  if (typeof title !== "string" || typeof short !== "number") return null;
+  return { title, short: formatLength(short) };
 }
 
 function startClock(value: string, timezone: string) {

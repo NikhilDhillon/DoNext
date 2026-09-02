@@ -1,5 +1,6 @@
 import time
 from datetime import UTC, date, datetime, timedelta
+from typing import cast
 
 import pytest
 
@@ -405,3 +406,56 @@ def test_early_exam_review_leaves_no_gap_longer_than_the_cadence() -> None:
     days = sorted({placement.start_at.date() for placement in result.placements})
     assert days
     assert all((later - earlier).days <= 3 for earlier, later in zip(days, days[1:], strict=False))
+
+
+def test_placements_name_the_work_they_displaced() -> None:
+    windows = [
+        SchedulingWindow(
+            start_at=datetime(2026, 9, 1, 9, tzinfo=UTC),
+            end_at=datetime(2026, 9, 1, 13, tzinfo=UTC),
+            daily_capacity_minutes=130,
+        )
+    ]
+    required = task("task:report", minutes=120, importance=100)
+    goal = SchedulingItem(
+        id="goal:running",
+        title="Evening run",
+        target_minutes=120,
+        minimum_session_minutes=30,
+        preferred_session_minutes=30,
+        maximum_session_minutes=30,
+        priority_rank=2,
+        intensity="light",
+        kind="goal",
+        required=False,
+    )
+
+    result = solve_schedule([required, goal], windows, minimum_break_minutes=10)
+
+    assert result.scheduled_minutes["task:report"] == 120
+    assert result.scheduled_minutes["goal:running"] < 120
+    academic = [placement for placement in result.placements if placement.item_id == "task:report"]
+    assert academic
+    assert all(
+        placement.reason_details["displaced_title"] == "Evening run" for placement in academic
+    )
+    assert all(placement.reason_details["displaced_kind"] == "goal" for placement in academic)
+    assert all(
+        cast(int, placement.reason_details["displaced_shortfall_minutes"]) > 0
+        for placement in academic
+    )
+
+
+def test_a_block_that_displaced_nothing_makes_no_claim() -> None:
+    windows = [
+        SchedulingWindow(
+            start_at=datetime(2026, 9, 1, 9, tzinfo=UTC),
+            end_at=datetime(2026, 9, 1, 17, tzinfo=UTC),
+            daily_capacity_minutes=480,
+        )
+    ]
+
+    result = solve_schedule([task("task:report", minutes=60)], windows, minimum_break_minutes=10)
+
+    assert result.placements
+    assert all("displaced_title" not in placement.reason_details for placement in result.placements)

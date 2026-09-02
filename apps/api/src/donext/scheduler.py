@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock_time
 from typing import Literal
@@ -146,9 +146,10 @@ def solve_schedule(
             policy,
         )
     result = improved or baseline
+    placements = _attach_displacement(items, result.placements, result.scheduled_minutes)
     return SchedulingResult(
         status=result.status,
-        placements=result.placements,
+        placements=placements,
         scheduled_minutes=result.scheduled_minutes,
         timed_out=(optimizer_attempted and improved is None) or result.timed_out,
         used_baseline=improved is None,
@@ -841,6 +842,82 @@ def _placement(session: _Session, start_at: datetime, energy_level: str) -> Plac
             **({"eligible_date": start_at.date().isoformat()} if item.eligible_dates else {}),
         },
     )
+
+
+# Sacrifice order from docs/scheduling.md: flexible work yields before academics, optional
+# before required, lower weight before higher, later deadline before earlier, and work
+# unrelated to an approaching exam before work that reduces exam risk. A greater tuple means
+# more protected, so a block only claims to have displaced work ranked below it.
+def _protection_rank(item: SchedulingItem) -> tuple[float, ...]:
+    band = (
+        0.0
+        if item.kind in {"goal", "flexible_commitment"}
+        else 1.0
+        if item.kind == "distant_task"
+        else 2.0
+    )
+    deadline = -item.due_at.timestamp() if item.due_at is not None else float("-inf")
+    return (
+        band,
+        1.0 if item.required else 0.0,
+        item.weight_percent if item.weight_percent is not None else -1.0,
+        deadline,
+        1.0 if item.exam_relationship else 0.0,
+    )
+
+
+def _could_have_used(item: SchedulingItem, placement: Placement) -> bool:
+    if item.eligible_dates is not None and placement.start_at.date() not in item.eligible_dates:
+        return False
+    if item.earliest_start_at is not None and placement.start_at < item.earliest_start_at:
+        return False
+    return not (item.latest_end_at is not None and placement.end_at > item.latest_end_at)
+
+
+# Names the specific alternative that lost capacity because this block was selected: the most
+# protected item that still finished short, could have used this exact slot, and ranks below
+# the placed work. Blocks that displaced nothing carry no claim.
+def _attach_displacement(
+    items: list[SchedulingItem],
+    placements: list[Placement],
+    scheduled_minutes: dict[str, int],
+) -> list[Placement]:
+    shortfalls = [
+        (item, item.target_minutes - scheduled_minutes.get(item.id, 0))
+        for item in items
+        if item.target_minutes - scheduled_minutes.get(item.id, 0) > 0
+    ]
+    if not shortfalls:
+        return placements
+    by_id = {item.id: item for item in items}
+    enriched: list[Placement] = []
+    for placement in placements:
+        placed = by_id.get(placement.item_id)
+        candidates = [
+            (item, missing)
+            for item, missing in shortfalls
+            if placed is not None
+            and item.id != placement.item_id
+            and _protection_rank(item) < _protection_rank(placed)
+            and _could_have_used(item, placement)
+        ]
+        if not candidates:
+            enriched.append(placement)
+            continue
+        item, missing = max(candidates, key=lambda value: (_protection_rank(value[0]), value[0].id))
+        enriched.append(
+            replace(
+                placement,
+                reason_details={
+                    **placement.reason_details,
+                    "displaced_item_id": item.id,
+                    "displaced_title": item.title,
+                    "displaced_kind": item.kind,
+                    "displaced_shortfall_minutes": missing,
+                },
+            )
+        )
+    return enriched
 
 
 def _solver(time_limit_seconds: float) -> cp_model.CpSolver:
