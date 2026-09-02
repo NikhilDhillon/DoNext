@@ -463,8 +463,41 @@ def _optimize_sessions(
         return None
     model.add(required_academic_minutes == required_solver.value(required_academic_minutes))
 
+    pre_exam_assignment_terms = [
+        presence_by_session[(session.item.id, session.index)] * session.duration_minutes
+        for session in sessions
+        if session.item.required
+        and session.item.kind == "task"
+        and session.item.exam_relationship == "same_course_pre_exam"
+    ]
+    if pre_exam_assignment_terms:
+        pre_exam_assignment_minutes = sum(pre_exam_assignment_terms)
+        model.maximize(pre_exam_assignment_minutes)
+        pre_exam_solver = _solver(max(time_limit_seconds * 0.1, 0.05))
+        pre_exam_status = pre_exam_solver.solve(model)
+        if pre_exam_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(pre_exam_assignment_minutes == pre_exam_solver.value(pre_exam_assignment_minutes))
+
+    exam_items = [item for item in items if item.kind == "exam_prep"]
+    if len(exam_items) > 1:
+        minimum_exam_completion = model.new_int_var(0, 1000, "minimum_exam_completion")
+        for item in exam_items:
+            item_minutes = sum(
+                presence_by_session[(session.item.id, session.index)] * session.duration_minutes
+                for session in sessions
+                if session.item.id == item.id
+            )
+            model.add(item_minutes * 1000 >= minimum_exam_completion * item.target_minutes)
+        model.maximize(minimum_exam_completion)
+        exam_fairness_solver = _solver(max(time_limit_seconds * 0.1, 0.05))
+        exam_fairness_status = exam_fairness_solver.solve(model)
+        if exam_fairness_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(minimum_exam_completion == exam_fairness_solver.value(minimum_exam_completion))
+
     model.maximize(academic_minutes * coverage_base + academic_importance)
-    first_solver = _solver(max(time_limit_seconds * 0.25, 0.05))
+    first_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
     first_status = first_solver.solve(model)
     if first_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None

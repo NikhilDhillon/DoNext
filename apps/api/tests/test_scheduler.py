@@ -62,6 +62,36 @@ def test_solver_reports_partial_capacity_honestly() -> None:
     assert result.placements
 
 
+def test_cp_sat_shares_partial_capacity_fairly_across_simultaneous_exams() -> None:
+    start = datetime(2026, 9, 9, 9, 0, tzinfo=UTC)
+    exams = [
+        SchedulingItem(
+            id=f"exam-{index}",
+            title=f"Exam {index} prep",
+            target_minutes=100,
+            minimum_session_minutes=50,
+            preferred_session_minutes=50,
+            maximum_session_minutes=50,
+            priority_rank=3,
+            intensity="moderate",
+            kind="exam_prep",
+            due_at=start + timedelta(days=index + 2),
+            risk_tier=2,
+            slack_minutes=0,
+        )
+        for index in range(2)
+    ]
+
+    result = solve_schedule(
+        exams,
+        [SchedulingWindow(start, start + timedelta(minutes=110))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.used_baseline is False
+    assert result.scheduled_minutes == {"exam-0": 50, "exam-1": 50}
+
+
 def test_solver_uses_a_valid_remainder_session() -> None:
     windows = [
         SchedulingWindow(

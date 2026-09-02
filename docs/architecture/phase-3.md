@@ -30,6 +30,8 @@ escalation, or acceptance. Schedules are identical whether an OpenAI key exists 
 Class events carry a `course_id` and `meeting_kind`. Scheduled-course assignments become actionable
 at the end of the first linked lecture. Asynchronous courses use `first_content_available_at`.
 Missing readiness and deadlines that predate readiness are reported for correction.
+Assignment, quiz, midterm, and final work cannot begin before that readiness timestamp, so generic
+exam preparation is never placed before any course material is available.
 
 Academic items are created atomically with their tasks. Assignment, quiz, midterm, and final defaults
 are 150, 120, 480, and 480 minutes respectively. Exam defaults begin with `pending_exam`; proposal
@@ -53,7 +55,10 @@ The scheduler preserves configured minimum, preferred, and maximum session sizes
 multiple sessions on one day but always reserves the configured break and never lengthens a session
 to make overload disappear. Required academic coverage is optimized before optional academics,
 flexible work, and distant opportunistic assignments. Greedy fallback follows the same priority
-bands and constraints.
+bands and constraints. When simultaneous exams cannot both be completed, the greedy path
+round-robins their sessions and CP-SAT maximizes the minimum completion ratio before allocating
+remaining exam capacity by the existing date, slack, effort, and weight signals. Required
+same-course pre-exam assignment coverage is protected before that fairness pass.
 
 ## Capacity passes
 
@@ -108,14 +113,6 @@ fully implemented yet:
   academic coverage is fixed, but it does not explicitly target one 30-to-45-minute review block
   approximately every three days while urgent pre-exam assignments are still underway, nor does it
   minimize excessive gaps as preparation intensifies.
-- **Fair sharing across simultaneous exams:** the greedy fallback interleaves exam sessions, but the
-  CP-SAT path does not yet maximize a fair minimum completion ratio across active exams before
-  allocating the remaining capacity by exam date, slack, remaining preparation, and effective
-  weight. Under severe partial capacity, one exam can therefore receive less preparation than the
-  intended fairness rule permits.
-- **Exam-material readiness:** exam preparation is generic and does not invent topics, but it is not
-  currently gated against the course's first lecture or asynchronous content-available timestamp.
-  A proposal can therefore place generic preparation before any course material is available.
 - **Least-disruptive sleep edges:** sleep reduction respects the configured minimum and is reported
   in the proposal, but the current window builder splits each allowed reduction between a later
   bedtime and earlier wake time. It does not compare saved availability and energy suitability to

@@ -110,6 +110,49 @@ def test_assignment_waits_until_linked_lecture_ends_then_front_loads(
     assert all(block["reason_details"]["readiness_at"] for block in blocks)
 
 
+def test_exam_preparation_waits_until_course_material_is_available(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 360")
+    lecture_end = datetime.fromisoformat("2026-09-04T10:00:00-07:00")
+    lecture = client.post(
+        "/api/v1/events",
+        json={
+            "title": "CSC 360 lecture",
+            "semester_id": semester["id"],
+            "course_id": course["id"],
+            "meeting_kind": "lecture",
+            "category": "class",
+            "start_at": "2026-09-04T09:00:00-07:00",
+            "end_at": lecture_end.isoformat(),
+        },
+    )
+    assert lecture.status_code == 201
+    exam = create_item(
+        client,
+        course["id"],
+        "midterm",
+        "Midterm",
+        "2026-09-10T23:59:00-07:00",
+    )
+    resolve_exam(client, exam, 120)
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    blocks = [block for block in proposal["blocks"] if block["task_id"] == exam["task_id"]]
+
+    assert blocks
+    starts = [datetime.fromisoformat(block["start_at"]) for block in blocks]
+    starts = [
+        start.replace(tzinfo=lecture_end.tzinfo) if start.tzinfo is None else start
+        for start in starts
+    ]
+    assert all(start >= lecture_end for start in starts)
+    assert all(block["reason_details"]["readiness_at"] for block in blocks)
+
+
 def test_academic_defaults_and_exam_requirement_are_typed(client: TestClient) -> None:
     register(client)
     semester = create_semester(client)

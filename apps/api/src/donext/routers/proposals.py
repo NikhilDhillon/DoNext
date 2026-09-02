@@ -244,7 +244,12 @@ def _generation_requirements(
                     default_minutes=480,
                 )
             )
-        if item.item_type == AcademicItemType.assignment:
+        if item.item_type in {
+            AcademicItemType.assignment,
+            AcademicItemType.quiz,
+            AcademicItemType.midterm,
+            AcademicItemType.final_exam,
+        }:
             course_readiness = readiness.get(item.course_id)
             if (
                 course_readiness is None or course_readiness.ready_at is None
@@ -1683,19 +1688,20 @@ def _scheduling_items(
 
         earliest_start_at = datetime.combine(semester.start_date, time.min, tzinfo=timezone)
         readiness = course_readiness.get(task.course_id) if task.course_id else None
-        if is_assignment:
+        requires_course_material = is_assignment or is_exam or is_quiz
+        if requires_course_material:
             if readiness is None or readiness.ready_at is None:
                 course_code = (
                     course_codes.get(task.course_id, "Course") if task.course_id else "Course"
                 )
                 warnings.append(
                     f'"{task.name}" is blocked because {course_code} has no confirmed '
-                    "first lecture."
+                    "lecture or content-available time."
                 )
                 continue
             if due_at <= readiness.ready_at:
                 warnings.append(
-                    f'"{task.name}" is due before its course becomes ready; '
+                    f'"{task.name}" is due before course material becomes available; '
                     "correct the course data."
                 )
                 continue

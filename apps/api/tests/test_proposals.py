@@ -272,7 +272,12 @@ def test_midterm_is_scheduled_as_labeled_preparation_across_preferred_days(
     replace_weekday_availability(client)
     course = client.post(
         f"/api/v1/semesters/{semester['id']}/courses",
-        json={"name": "Database Systems", "code": "CSC 370"},
+        json={
+            "name": "Database Systems",
+            "code": "CSC 370",
+            "delivery_mode": "asynchronous",
+            "first_content_available_at": "2026-09-02T08:00:00-07:00",
+        },
     ).json()
     task = client.post(
         "/api/v1/tasks",
