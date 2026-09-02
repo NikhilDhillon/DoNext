@@ -6,16 +6,12 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
-  Copy,
   GraduationCap,
   GripVertical,
   LoaderCircle,
   Lock,
-  MoreHorizontal,
-  Pencil,
   Pin,
   Plus,
-  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
@@ -28,10 +24,8 @@ import {
   calendarBounds,
   calendarLaneLayout,
   cardDensity,
-  currentTimePosition,
   dateDifference,
   dateInTimezone,
-  dayEntryLabel,
   dayNumber,
   entryFitsCalendar,
   fixedEventColor,
@@ -71,7 +65,7 @@ type DraftScheduleCalendarProps = {
   proposalId: string;
   onEdit: (block: ScheduleBlock) => void;
   onDuplicate: (block: ScheduleBlock) => void;
-  onAdd: (date: string) => void;
+  onAdd: (date?: string) => void;
   onMoved: () => Promise<void> | void;
 };
 
@@ -82,6 +76,14 @@ type DragSession = {
   originY: number;
   moved: boolean;
 };
+
+const COLUMN_CHOICES = [
+  { columns: 7, label: "Week" },
+  { columns: 3, label: "3 days" },
+  { columns: 1, label: "Day" },
+] as const;
+
+const GUTTER_WIDTH = 56;
 
 export function DraftScheduleCalendar({
   blocks,
@@ -94,30 +96,20 @@ export function DraftScheduleCalendar({
   onAdd,
   onMoved,
 }: DraftScheduleCalendarProps) {
-  const weekStarts = useMemo(() => {
-    const firstMonday = mondayOnOrBefore(horizonStart);
-    const lastMonday = mondayOnOrBefore(horizonEnd);
-    return Array.from(
-      { length: Math.floor(dateDifference(firstMonday, lastMonday) / 7) + 1 },
-      (_, index) => addDays(firstMonday, index * 7),
-    );
-  }, [horizonEnd, horizonStart]);
-  const [weekIndex, setWeekIndex] = useState(0);
+  const firstMonday = useMemo(() => mondayOnOrBefore(horizonStart), [horizonStart]);
+  const totalDays = useMemo(
+    () => (Math.floor(dateDifference(firstMonday, mondayOnOrBefore(horizonEnd)) / 7) + 1) * 7,
+    [firstMonday, horizonEnd],
+  );
+  const [columns, setColumns] = useState(7);
+  const [dayOffset, setDayOffset] = useState(0);
   const [draggingBlockId, setDraggingBlockId] = useState<string | null>(null);
   const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
   const [savingBlockId, setSavingBlockId] = useState<string | null>(null);
   const [revertingBlockId, setRevertingBlockId] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
   const [moveStatus, setMoveStatus] = useState<string | null>(null);
-  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
-  const [confirmDeleteBlockId, setConfirmDeleteBlockId] = useState<string | null>(null);
   const [deletedBlock, setDeletedBlock] = useState<ScheduleBlock | null>(null);
-  const [deletingBlockId, setDeletingBlockId] = useState<string | null>(null);
-  const [mobileDayIndex, setMobileDayIndex] = useState(0);
-  const [menuBlock, setMenuBlock] = useState<ScheduleBlock | null>(null);
-  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
-  const menuAnchorRef = useRef<HTMLElement | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const dragPreviewRef = useRef<DragPreview | null>(null);
@@ -128,91 +120,47 @@ export function DraftScheduleCalendar({
     if (revertTimerRef.current) window.clearTimeout(revertTimerRef.current);
   }, []);
 
-  // The action menu is fixed-positioned at shell level: the calendar body is its own scroll
-  // container, so a popover rendered inside a block would be clipped at the container edge.
-  useEffect(() => {
-    if (!menuBlock) return undefined;
-    function place() {
-      const anchor = menuAnchorRef.current;
-      if (!anchor) return;
-      const rect = anchor.getBoundingClientRect();
-      const width = 176;
-      const height = 148;
-      const top = rect.bottom + height + 8 > window.innerHeight
-        ? Math.max(8, rect.top - height - 6)
-        : rect.bottom + 6;
-      const left = Math.min(
-        Math.max(8, rect.left),
-        Math.max(8, window.innerWidth - width - 8),
-      );
-      setMenuPosition({ top, left });
-    }
-    function dismiss(event: Event) {
-      const target = event.target as Node | null;
-      if (!target) return;
-      if (menuRef.current?.contains(target) || menuAnchorRef.current?.contains(target)) return;
-      closeMenu();
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        closeMenu();
-        menuAnchorRef.current?.focus();
-      }
-    }
-    place();
-    window.addEventListener("scroll", place, true);
-    window.addEventListener("resize", place);
-    document.addEventListener("pointerdown", dismiss, true);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("scroll", place, true);
-      window.removeEventListener("resize", place);
-      document.removeEventListener("pointerdown", dismiss, true);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [menuBlock]);
+  const maxOffset = Math.max(totalDays - columns, 0);
+  const offset = Math.min(dayOffset, maxOffset);
+  const days = Array.from({ length: columns }, (_, index) => addDays(firstMonday, offset + index));
+  const rangeStart = days[0];
+  const rangeEnd = days[days.length - 1];
 
-  function openMenu(block: ScheduleBlock, anchor: HTMLElement) {
-    menuAnchorRef.current = anchor;
-    setMenuBlock(block);
-    setSelectedBlockId(block.id);
-    setConfirmDeleteBlockId(null);
-  }
-
-  function closeMenu() {
-    setMenuBlock(null);
-    setMenuPosition(null);
-    setSelectedBlockId(null);
-    setConfirmDeleteBlockId(null);
-  }
-
-  const selectedWeek = weekStarts[Math.min(weekIndex, weekStarts.length - 1)] ?? horizonStart;
-  const selectedWeekEnd = addDays(selectedWeek, 6);
-  const fixedPlan = useApiResource<PlanningView>(`/planning/week?start=${selectedWeek}`);
+  // The planning feed is week-keyed, so a window that straddles a Monday needs both weeks.
+  const firstWeek = mondayOnOrBefore(rangeStart);
+  const lastWeek = mondayOnOrBefore(rangeEnd);
+  const primaryPlan = useApiResource<PlanningView>(`/planning/week?start=${firstWeek}`);
+  const secondaryPlan = useApiResource<PlanningView>(
+    lastWeek === firstWeek ? null : `/planning/week?start=${lastWeek}`,
+  );
   const availability = useApiResource<AvailabilityWindow[]>("/availability");
-  const days = Array.from({ length: 7 }, (_, index) => addDays(selectedWeek, index));
+
+  const planEntries = useMemo(() => {
+    const merged = new Map<string, PlanningEntry>();
+    for (const entry of primaryPlan.data?.entries ?? []) merged.set(entry.id, entry);
+    for (const entry of secondaryPlan.data?.entries ?? []) merged.set(entry.id, entry);
+    return [...merged.values()];
+  }, [primaryPlan.data, secondaryPlan.data]);
+
   const visibleBlocks = blocks.filter((block) => {
     const date = dateInTimezone(block.start_at, timezone);
-    return date >= selectedWeek
-      && date <= selectedWeekEnd
+    return date >= rangeStart
+      && date <= rangeEnd
       && date >= horizonStart
       && date <= horizonEnd;
   });
-  const visibleFixedEvents = (fixedPlan.data?.entries ?? []).filter((entry) => (
-    entry.kind === "fixed_event"
-      && dateInTimezone(entry.start_at, timezone) >= selectedWeek
-      && dateInTimezone(entry.start_at, timezone) <= selectedWeekEnd
-      && dateInTimezone(entry.start_at, timezone) >= horizonStart
-      && dateInTimezone(entry.start_at, timezone) <= horizonEnd
-  ));
+  const visibleFixedEvents = planEntries.filter((entry) => {
+    const date = dateInTimezone(entry.start_at, timezone);
+    return entry.kind === "fixed_event"
+      && date >= rangeStart
+      && date <= rangeEnd
+      && date >= horizonStart
+      && date <= horizonEnd;
+  });
   const focusBoundary = availability.data?.length
     ? focusBounds(availability.data)
     : calendarBounds(blocks, timezone);
-  const { startHour, endHour } = calendarBounds(
-    visibleFixedEvents,
-    timezone,
-    focusBoundary,
-  );
+  const { startHour, endHour } = calendarBounds(visibleFixedEvents, timezone, focusBoundary);
   const displayedBlocks = availability.data?.length
     ? visibleBlocks.filter((block) => blockFitsFocusHours(block, timezone, availability.data ?? []))
     : visibleBlocks;
@@ -221,36 +169,16 @@ export function DraftScheduleCalendar({
     entryFitsCalendar(entry, timezone, startHour, endHour)
   ));
   const today = dateInTimezone(new Date().toISOString(), timezone);
-  const todayWeekIndex = weekStarts.findIndex(
-    (weekStart) => today >= weekStart && today <= addDays(weekStart, 6),
-  );
+  const todayOffset = dateDifference(firstMonday, today);
+  const todayVisible = days.includes(today);
   const laneLayout = calendarLaneLayout(displayedBlocks, displayedFixedEvents, timezone);
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
-  const rows = (endHour - startHour) * 2;
-  const focusHours = availability.data?.length
-    ? formatFocusHours(availability.data)
-    : null;
-  const currentTimeMarker = currentTimePosition(
-    today,
-    days,
-    startHour,
-    endHour,
-    timezone,
-  );
-  const mobileDay = days[Math.min(mobileDayIndex, days.length - 1)] ?? selectedWeek;
-  const mobileEntries = [
-    ...displayedBlocks.map((block) => ({ kind: "draft" as const, block })),
-    ...displayedFixedEvents.map((entry) => ({ kind: "fixed" as const, entry })),
-  ]
-    .filter((item) => dateInTimezone(
-      item.kind === "draft" ? item.block.start_at : item.entry.start_at,
-      timezone,
-    ) === mobileDay)
-    .sort((first, second) => new Date(
-      first.kind === "draft" ? first.block.start_at : first.entry.start_at,
-    ).getTime() - new Date(
-      second.kind === "draft" ? second.block.start_at : second.entry.start_at,
-    ).getTime());
+  const dayMinutes = Math.max((endHour - startHour) * 60, 1);
+  const focusHours = availability.data?.length ? formatFocusHours(availability.data) : null;
+  const currentTimeTop = todayVisible ? currentTimeOffset(startHour, endHour, timezone) : null;
+  const columnTemplate = `${GUTTER_WIDTH}px repeat(${columns}, minmax(0, 1fr))`;
+  const loading = primaryPlan.loading || secondaryPlan.loading || availability.loading;
+  const feedError = primaryPlan.error || secondaryPlan.error;
 
   function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLElement>) {
     if (savingBlockId) return;
@@ -290,6 +218,7 @@ export function DraftScheduleCalendar({
       availability.data ?? [],
       horizonStart,
       horizonEnd,
+      GUTTER_WIDTH,
     );
     if (!placement) {
       dragPreviewRef.current = null;
@@ -334,10 +263,7 @@ export function DraftScheduleCalendar({
         `/schedule-proposals/${proposalId}/blocks/${session.block.id}`,
         {
           method: "PATCH",
-          body: JSON.stringify({
-            start_at: placement.startAt,
-            end_at: placement.endAt,
-          }),
+          body: JSON.stringify({ start_at: placement.startAt, end_at: placement.endAt }),
         },
       );
       window.dispatchEvent(new Event("donext:planning-updated"));
@@ -386,36 +312,16 @@ export function DraftScheduleCalendar({
   }
 
   function goToToday() {
-    if (todayWeekIndex < 0) return;
-    setWeekIndex(todayWeekIndex);
-    setMobileDayIndex(dateDifference(weekStarts[todayWeekIndex], today));
+    if (todayOffset < 0 || todayOffset >= totalDays) return;
+    setDayOffset(columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset));
   }
 
-  async function deleteBlock(block: ScheduleBlock) {
-    setDeletingBlockId(block.id);
-    setMoveError(null);
-    setMoveStatus(`Deleting ${block.title}…`);
-    try {
-      await apiRequest<void>(
-        `/schedule-proposals/${proposalId}/blocks/${block.id}`,
-        { method: "DELETE" },
-      );
-      setDeletedBlock(block);
-      setSelectedBlockId(null);
-      setConfirmDeleteBlockId(null);
-      window.dispatchEvent(new Event("donext:planning-updated"));
-      await onMoved();
-      setMoveStatus(`${block.title} deleted.`);
-    } catch (requestError) {
-      setMoveStatus(null);
-      setMoveError(
-        requestError instanceof ApiRequestError
-          ? requestError.message
-          : `DoNext could not delete ${block.title}.`,
-      );
-    } finally {
-      setDeletingBlockId(null);
-    }
+  function changeColumns(next: number) {
+    const anchor = columns === 7 && next !== 7 && todayOffset >= offset && todayOffset < offset + 7
+      ? todayOffset
+      : offset;
+    setColumns(next);
+    setDayOffset(Math.min(next === 7 ? Math.floor(anchor / 7) * 7 : anchor, Math.max(totalDays - next, 0)));
   }
 
   async function undoDelete() {
@@ -426,10 +332,7 @@ export function DraftScheduleCalendar({
     try {
       await apiRequest<ScheduleBlock>(
         `/schedule-proposals/${proposalId}/blocks`,
-        {
-          method: "POST",
-          body: JSON.stringify(blockPayload(block)),
-        },
+        { method: "POST", body: JSON.stringify(blockPayload(block)) },
       );
       setDeletedBlock(null);
       window.dispatchEvent(new Event("donext:planning-updated"));
@@ -446,353 +349,283 @@ export function DraftScheduleCalendar({
   }
 
   return (
-    <div
-      className="draft-calendar-shell"
+    <section
+      aria-label={`Draft calendar for ${formatRange(rangeStart, rangeEnd)}`}
+      className="draft-console"
       onMouseUp={() => void finishDrag()}
       onPointerUpCapture={(event) => void finishDrag(event.pointerId)}
     >
-      <div className="draft-calendar-toolbar">
-        <div className="draft-calendar-range">
-          <span>Week {weekIndex + 1} of {weekStarts.length}</span>
-          {focusHours ? <small><Clock3 size={13} /> Focus hours {focusHours}</small> : null}
-        </div>
-        <div className="draft-calendar-navigation">
-          <button
-            className="draft-today-button"
-            disabled={todayWeekIndex < 0}
-            type="button"
-            onClick={goToToday}
-          >
-            <CalendarDays size={15} /> Today
-          </button>
-          <div className="draft-week-controls" aria-label="Choose a draft week">
+      <header className="console-bar">
+        <h3>Draft calendar</h3>
+        <span className="console-chip">{formatRange(horizonStart, horizonEnd)}</span>
+        <span className="console-spacer" />
+        <button
+          className="console-btn"
+          disabled={todayVisible || todayOffset < 0 || todayOffset >= totalDays}
+          type="button"
+          onClick={goToToday}
+        >
+          <CalendarDays size={15} /> Today
+        </button>
+        <button
+          aria-label="Earlier days"
+          className="console-btn icon"
+          disabled={offset <= 0}
+          type="button"
+          onClick={() => setDayOffset(Math.max(offset - columns, 0))}
+        >
+          <ChevronLeft size={16} />
+        </button>
+        <button
+          aria-label="Later days"
+          className="console-btn icon"
+          disabled={offset >= maxOffset}
+          type="button"
+          onClick={() => setDayOffset(Math.min(offset + columns, maxOffset))}
+        >
+          <ChevronRight size={16} />
+        </button>
+        <div className="console-seg" role="tablist" aria-label="Calendar span">
+          {COLUMN_CHOICES.map((choice) => (
             <button
-              aria-label="Previous draft week"
-              disabled={weekIndex === 0}
+              aria-selected={columns === choice.columns}
+              className={columns === choice.columns ? "on" : undefined}
+              key={choice.columns}
+              role="tab"
               type="button"
-              onClick={() => {
-                setWeekIndex((current) => Math.max(current - 1, 0));
-                setMobileDayIndex(0);
-              }}
+              onClick={() => changeColumns(choice.columns)}
             >
-              <ChevronLeft size={17} />
+              {choice.label}
             </button>
-            <span aria-live="polite">{formatRange(selectedWeek, selectedWeekEnd)}</span>
-            <button
-              aria-label="Next draft week"
-              disabled={weekIndex === weekStarts.length - 1}
-              type="button"
-              onClick={() => {
-                setWeekIndex((current) => Math.min(current + 1, weekStarts.length - 1));
-                setMobileDayIndex(0);
-              }}
-            >
-              <ChevronRight size={17} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="draft-calendar-legend" aria-label="Calendar event types">
-        <span><GraduationCap size={14} /> Class</span>
-        <span><BriefcaseBusiness size={14} /> Fixed commitment</span>
-        <span><GripVertical size={14} /> Editable draft</span>
-      </div>
-
-      <div className="draft-mobile-days" aria-label="Choose a day">
-        {days.map((day, index) => (
-          <button
-            aria-pressed={mobileDayIndex === index}
-            className={`${mobileDayIndex === index ? "active" : ""}${day === today ? " today" : ""}`}
-            key={day}
-            type="button"
-            onClick={() => setMobileDayIndex(index)}
-          >
-            <span>{weekday(day)}</span>
-            <strong>{dayNumber(day)}</strong>
-          </button>
-        ))}
-      </div>
-
-      <section className="calendar-card draft-calendar" aria-label={`Draft calendar for ${formatRange(selectedWeek, selectedWeekEnd)}`}>
-        <div className="calendar-header live-calendar-header">
-          <div className="timezone">{timezoneName(timezone, selectedWeek)}</div>
-          {days.map((day) => (
-            <div
-              className={`${isDraftDay(day, horizonStart, horizonEnd) ? "" : "outside-draft"}${day === today ? " today" : ""}`}
-              key={day}
-            >
-              <span>{weekday(day)}</span>
-              <strong>{dayNumber(day)}</strong>
-              <small>{isDraftDay(day, horizonStart, horizonEnd)
-                ? dayEntryLabel(displayedBlocks, displayedFixedEvents, day, timezone)
-                : "Outside draft"}</small>
-            </div>
           ))}
         </div>
-        <div
-          className="calendar-body live-calendar-body draft-calendar-body"
-          style={{ height: Math.min(Math.max(rows * 30, 120), 590) }}
-        >
-          <div className="time-axis live-time-axis" style={{ gridTemplateRows: `repeat(${hours.length}, 60px)` }}>
-            {hours.map((hour) => <span key={hour}>{formatHour(hour)}</span>)}
-          </div>
-          <div
-            className={`calendar-grid live-calendar-grid draft-calendar-grid${draggingBlockId ? " drag-active" : ""}`}
-            ref={gridRef}
-            style={{ gridTemplateRows: `repeat(${rows}, 30px)` }}
-          >
+        <button className="console-cta" type="button" onClick={() => onAdd()}>
+          <Plus size={16} /> New block
+        </button>
+      </header>
+
+      <div className="console-body">
+        <div className="console-cal">
+          <div className="console-head" style={{ gridTemplateColumns: columnTemplate }}>
+            <div className="console-head-gutter">{timezoneName(timezone, rangeStart)}</div>
             {days.map((day) => (
-              <button
-                aria-label={!isDraftDay(day, horizonStart, horizonEnd)
-                  ? `${formatCalendarDate(day)} is outside this 14-day draft`
-                  : hasFocusTime(day, availability.data ?? [])
-                  ? `Add a draft block on ${formatCalendarDate(day)}`
-                  : `${formatCalendarDate(day)} is outside your saved focus days`}
-                className="day-column"
-                disabled={!isDraftDay(day, horizonStart, horizonEnd)
-                  || !hasFocusTime(day, availability.data ?? [])}
-                key={day}
-                type="button"
-                onClick={() => onAdd(day)}
-              />
-            ))}
-            {displayedBlocks.map((block) => (
-              <DraftBlock
-                block={block}
-                dragging={draggingBlockId === block.id}
-                key={block.id}
-                layout={laneLayout[`draft:${block.id}`]}
-                preview={dragPreview?.blockId === block.id ? dragPreview : null}
-                reverting={revertingBlockId === block.id}
-                saving={savingBlockId === block.id}
-                selected={selectedBlockId === block.id}
-                startHour={startHour}
-                timezone={timezone}
-                weekStart={selectedWeek}
-                onClick={() => openBlock(block)}
-                onPointerCancel={cancelDrag}
-                onPointerDown={(event) => beginDrag(block, event)}
-                onPointerMove={moveDrag}
-                onPointerUp={(event) => void finishDrag(event.pointerId)}
-              />
-            ))}
-            {displayedFixedEvents.map((entry) => (
-              <DraftFixedBlock
-                entry={entry}
-                key={entry.id}
-                layout={laneLayout[`fixed:${entry.id}`]}
-                startHour={startHour}
-                timezone={timezone}
-                weekStart={selectedWeek}
-              />
-            ))}
-            {currentTimeMarker ? (
               <div
-                aria-label="Current time"
-                className="draft-current-time"
-                style={{
-                  left: `${currentTimeMarker.left}%`,
-                  top: `${currentTimeMarker.top}%`,
-                  width: `${100 / 7}%`,
-                }}
-              />
-            ) : null}
-          </div>
-        </div>
-      </section>
-
-      <section className="draft-mobile-agenda" aria-label={`Agenda for ${formatCalendarDate(mobileDay)}`}>
-        <header>
-          <div><span>{weekday(mobileDay)}</span><strong>{formatCalendarDate(mobileDay)}</strong></div>
-          <button
-            disabled={!isDraftDay(mobileDay, horizonStart, horizonEnd)
-              || !hasFocusTime(mobileDay, availability.data ?? [])}
-            type="button"
-            onClick={() => onAdd(mobileDay)}
-          >
-            <Plus size={16} /> Add block
-          </button>
-        </header>
-        {mobileEntries.length ? mobileEntries.map((item) => item.kind === "draft" ? (
-          <div className={`draft-agenda-event editable ${blockColor(item.block)}`} key={`draft:${item.block.id}`}>
-            <button type="button" onClick={() => openBlock(item.block)}>
-              <span><GripVertical size={16} /></span>
-              <div>
-                <strong>{splitEventTitle(item.block.title).label}</strong>
-                <small>{splitEventTitle(item.block.title).eyebrow ? `${splitEventTitle(item.block.title).eyebrow} · ` : ""}{formatBlockTime(item.block, timezone)}</small>
-              </div>
-            </button>
-            <button
-              aria-label={`Actions for ${item.block.title}`}
-              title="Event actions"
-              type="button"
-              onClick={(event) => openMenu(item.block, event.currentTarget)}
-            >
-              <MoreHorizontal size={18} />
-            </button>
-          </div>
-        ) : (
-          <div className={`draft-agenda-event fixed ${fixedEventColor(item.entry)}`} key={`fixed:${item.entry.id}`}>
-            <span>{fixedEventIcon(item.entry)}</span>
-            <div><strong>{item.entry.title}</strong><small>{formatEntryTime(item.entry, timezone)}{item.entry.location ? ` · ${item.entry.location}` : ""} · {fixedEventLabel(item.entry)}</small></div>
-          </div>
-        )) : (
-          <p>No events on this day. Add a block when you are ready.</p>
-        )}
-      </section>
-
-      {menuBlock && menuPosition ? (
-        <div
-          aria-label={`Actions for ${menuBlock.title}`}
-          className="draft-block-actions"
-          ref={menuRef}
-          role="menu"
-          style={{ top: menuPosition.top, left: menuPosition.left }}
-        >
-          <p className="draft-block-actions-title">
-            <strong>{splitEventTitle(menuBlock.title).label}</strong>
-            <small>{formatBlockTime(menuBlock, timezone)}</small>
-          </p>
-          <button
-            role="menuitem"
-            type="button"
-            onClick={() => { const block = menuBlock; closeMenu(); onEdit(block); }}
-          >
-            <Pencil size={15} /> Edit
-          </button>
-          <button
-            role="menuitem"
-            type="button"
-            onClick={() => { const block = menuBlock; closeMenu(); onDuplicate(block); }}
-          >
-            <Copy size={15} /> Duplicate
-          </button>
-          {confirmDeleteBlockId === menuBlock.id ? (
-            <>
-              <button
-                className="danger"
-                disabled={deletingBlockId === menuBlock.id}
-                role="menuitem"
-                type="button"
-                onClick={() => void deleteBlock(menuBlock)}
+                className={`console-dayhead${day === today ? " today" : ""}${isDraftDay(day, horizonStart, horizonEnd) ? "" : " outside"}`}
+                key={day}
               >
-                {deletingBlockId === menuBlock.id
-                  ? <LoaderCircle className="spin" size={15} />
-                  : <Trash2 size={15} />} Confirm delete
-              </button>
-              <button role="menuitem" type="button" onClick={() => setConfirmDeleteBlockId(null)}>
-                Cancel
-              </button>
-            </>
-          ) : (
-            <button
-              className="danger"
-              role="menuitem"
-              type="button"
-              onClick={() => setConfirmDeleteBlockId(menuBlock.id)}
-            >
-              <Trash2 size={15} /> Delete
-            </button>
-          )}
-        </div>
-      ) : null}
+                <span>{weekday(day)}</span>
+                <strong>{dayNumber(day)}</strong>
+                {isDraftDay(day, horizonStart, horizonEnd)
+                  ? null
+                  : <small>Outside draft</small>}
+              </div>
+            ))}
+          </div>
 
-      {moveError ? <p className="draft-calendar-move-message error" role="alert">{moveError}</p> : null}
-      {moveStatus ? (
-        <div className="draft-calendar-move-message" aria-live="polite">
+          <div className="console-scroll">
+            <div
+              className="console-grid"
+              ref={gridRef}
+              style={{
+                gridTemplateColumns: columnTemplate,
+                height: `calc(var(--hour) * ${hours.length})`,
+              }}
+            >
+              <div className="console-gutter">
+                {hours.map((hour) => (
+                  <b key={hour} style={{ top: `${percentOf(hour * 60, startHour, dayMinutes)}%` }}>
+                    {formatHour(hour)}
+                  </b>
+                ))}
+              </div>
+
+              {days.map((day) => {
+                const draftDay = isDraftDay(day, horizonStart, horizonEnd);
+                const openForBlocks = draftDay && hasFocusTime(day, availability.data ?? []);
+                return (
+                  <div
+                    className={`console-col${day === today ? " today" : ""}${draftDay ? "" : " outside"}`}
+                    key={day}
+                  >
+                    <div className="console-rules">
+                      {hours.map((hour) => (
+                        <i key={hour} style={{ top: `${percentOf(hour * 60, startHour, dayMinutes)}%` }} />
+                      ))}
+                    </div>
+                    <button
+                      aria-label={!draftDay
+                        ? `${formatCalendarDate(day)} is outside this 14-day draft`
+                        : openForBlocks
+                        ? `Add a draft block on ${formatCalendarDate(day)}`
+                        : `${formatCalendarDate(day)} is outside your saved focus days`}
+                      className="console-hit"
+                      disabled={!openForBlocks}
+                      type="button"
+                      onClick={() => onAdd(day)}
+                    />
+                    {draftDay ? null : <span className="console-outside-label">Outside the draft</span>}
+
+                    {displayedFixedEvents
+                      .filter((entry) => dateInTimezone(entry.start_at, timezone) === day)
+                      .map((entry) => (
+                        <ConsoleFixedEvent
+                          entry={entry}
+                          key={entry.id}
+                          layout={laneLayout[`fixed:${entry.id}`]}
+                          startHour={startHour}
+                          dayMinutes={dayMinutes}
+                          timezone={timezone}
+                        />
+                      ))}
+
+                    {displayedBlocks
+                      .filter((block) => {
+                        const preview = dragPreview?.blockId === block.id ? dragPreview : null;
+                        const start = preview ? preview.startAt : block.start_at;
+                        return dateInTimezone(start, timezone) === day;
+                      })
+                      .map((block) => (
+                        <ConsoleDraftBlock
+                          block={block}
+                          dragging={draggingBlockId === block.id}
+                          key={block.id}
+                          layout={laneLayout[`draft:${block.id}`]}
+                          preview={dragPreview?.blockId === block.id ? dragPreview : null}
+                          reverting={revertingBlockId === block.id}
+                          saving={savingBlockId === block.id}
+                          startHour={startHour}
+                          dayMinutes={dayMinutes}
+                          timezone={timezone}
+                          onClick={() => openBlock(block)}
+                          onPointerCancel={cancelDrag}
+                          onPointerDown={(event) => beginDrag(block, event)}
+                          onPointerMove={moveDrag}
+                          onPointerUp={(event) => void finishDrag(event.pointerId)}
+                        />
+                      ))}
+                  </div>
+                );
+              })}
+
+              {currentTimeTop === null ? null : (
+                <>
+                  <div
+                    aria-hidden="true"
+                    className="console-now"
+                    style={{
+                      top: `${currentTimeTop}%`,
+                      left: `calc(${GUTTER_WIDTH}px + (100% - ${GUTTER_WIDTH}px) * ${days.indexOf(today) / columns})`,
+                      width: `calc((100% - ${GUTTER_WIDTH}px) / ${columns})`,
+                    }}
+                  />
+                  <div
+                    className="console-now-time"
+                    style={{ top: `${currentTimeTop}%`, width: `${GUTTER_WIDTH}px` }}
+                  >
+                    {currentClock(timezone)}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {!displayedBlocks.length && !displayedFixedEvents.length && !loading ? (
+            <p className="console-empty">
+              Nothing scheduled in this range. Click any open time to add a draft block.
+            </p>
+          ) : null}
+
+          {outsideFocusBlocks.length ? (
+            <div className="console-outside-focus" role="alert">
+              <strong>
+                {outsideFocusBlocks.length} draft {outsideFocusBlocks.length === 1 ? "block sits" : "blocks sit"} outside your focus hours.
+              </strong>
+              {outsideFocusBlocks.map((block) => (
+                <button key={block.id} type="button" onClick={() => onEdit(block)}>
+                  {block.title} · {formatBlockTime(block, timezone)}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {feedError ? (
+            <p className="console-notice error">Saved classes and commitments could not be loaded into this preview.</p>
+          ) : availability.error ? (
+            <p className="console-notice error">Focus hours could not be loaded into this preview.</p>
+          ) : loading ? (
+            <p className="console-notice">Loading classes, commitments, and focus hours…</p>
+          ) : null}
+
+          <footer className="console-foot">
+            <span><GripVertical size={13} /> Drag a block to move it</span>
+            {focusHours ? <span><Clock3 size={13} /> Focus hours {focusHours}</span> : null}
+            <span className="legend"><i /> dashed = editable draft</span>
+          </footer>
+        </div>
+      </div>
+
+      {moveError ? (
+        <p className="console-status error" role="alert"><span>{moveError}</span></p>
+      ) : moveStatus ? (
+        <div className="console-status" aria-live="polite">
           <span>{moveStatus}</span>
           {deletedBlock ? <button type="button" onClick={() => void undoDelete()}>Undo</button> : null}
         </div>
       ) : null}
-      {outsideFocusBlocks.length ? (
-        <div className="draft-calendar-outside-focus" role="alert">
-          <strong>{outsideFocusBlocks.length} draft {outsideFocusBlocks.length === 1 ? "block is" : "blocks are"} outside your current focus hours.</strong>
-          <span>Edit or regenerate {outsideFocusBlocks.length === 1 ? "it" : "them"} before accepting this draft.</span>
-          <div>
-            {outsideFocusBlocks.map((block) => (
-              <button key={block.id} type="button" onClick={() => onEdit(block)}>
-                {block.title} · {formatBlockTime(block, timezone)}
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
-      {fixedPlan.error ? (
-        <p className="draft-calendar-notice error">Saved classes and commitments could not be loaded into this preview.</p>
-      ) : availability.error ? (
-        <p className="draft-calendar-notice error">Focus hours could not be loaded into this preview.</p>
-      ) : fixedPlan.loading ? (
-        <p className="draft-calendar-notice">Loading classes and commitments into the draft calendar…</p>
-      ) : availability.loading ? (
-        <p className="draft-calendar-notice">Loading your focus hours…</p>
-      ) : null}
-      {!displayedBlocks.length && !displayedFixedEvents.length && !fixedPlan.loading ? (
-        <p className="draft-calendar-empty">No saved commitments or draft blocks appear in this week. Click any day column to add a block.</p>
-      ) : null}
-    </div>
+    </section>
   );
 }
 
-function DraftFixedBlock({
+function ConsoleFixedEvent({
   entry,
   layout,
-  timezone,
-  weekStart,
   startHour,
+  dayMinutes,
+  timezone,
 }: {
   entry: PlanningEntry;
   layout?: EventLane;
-  timezone: string;
-  weekStart: string;
   startHour: number;
+  dayMinutes: number;
+  timezone: string;
 }) {
   const start = timeParts(entry.start_at, timezone);
   const duration = Math.max(
     Math.ceil((new Date(entry.end_at).getTime() - new Date(entry.start_at).getTime()) / 1_800_000),
     1,
   );
-  const row = Math.max(
-    Math.floor((start.hour * 60 + start.minute - startHour * 60) / 30) + 1,
-    1,
-  );
-  const column = Math.min(
-    Math.max(dateDifference(weekStart, dateInTimezone(entry.start_at, timezone)) + 1, 1),
-    7,
-  );
+  const label = fixedEventLabel(entry);
 
   return (
     <article
-      aria-label={`${entry.title}, fixed ${fixedEventLabel(entry).toLowerCase()}, ${formatEntryTime(entry, timezone)}`}
-      className={`week-block ${fixedEventColor(entry)} draft-fixed-block density-${cardDensity(duration)}`}
-      style={eventGridStyle(column, row, duration, layout)}
+      aria-label={`${entry.title}, fixed ${label.toLowerCase()}, ${formatEntryTime(entry, timezone)}`}
+      className={`console-event ${fixedEventColor(entry)} density-${cardDensity(duration)}`}
+      style={eventStyle(start.hour * 60 + start.minute, duration * 30, startHour, dayMinutes, layout)}
       title={`${entry.title} · ${formatEntryTime(entry, timezone)}${entry.location ? ` · ${entry.location}` : ""}`}
     >
-      <p className="draft-event-meta-row">
-        <span className="draft-event-kind">
-          <span>{fixedEventIcon(entry)}</span>
-          {/* A class card is already a violet block with a graduation cap and a course code. */}
-          {entry.category === "class" ? null : fixedEventLabel(entry)}
+      <p className="console-event-meta">
+        <span className="console-event-kind">
+          {fixedEventIcon(entry)}
+          {entry.course_code ?? label}
         </span>
-        <span className="draft-event-time">{formatEntryTime(entry, timezone)}</span>
+        <span className="console-event-time">{formatEntryTime(entry, timezone)}</span>
       </p>
-      <strong className="draft-event-label">{entry.title}</strong>
-      {entry.location ? <span className="draft-event-location">{entry.location}</span> : null}
+      <strong className="console-event-title">{entry.title}</strong>
+      {entry.location ? <span className="console-event-sub">{entry.location}</span> : null}
     </article>
   );
 }
 
-function DraftBlock({
+function ConsoleDraftBlock({
   block,
   layout,
   preview,
   dragging,
   reverting,
   saving,
-  selected,
-  timezone,
-  weekStart,
   startHour,
+  dayMinutes,
+  timezone,
   onClick,
   onPointerDown,
   onPointerMove,
@@ -805,92 +638,91 @@ function DraftBlock({
   dragging: boolean;
   reverting: boolean;
   saving: boolean;
-  selected: boolean;
-  timezone: string;
-  weekStart: string;
   startHour: number;
+  dayMinutes: number;
+  timezone: string;
   onClick: () => void;
   onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerCancel: (event: ReactPointerEvent<HTMLElement>) => void;
 }) {
-  const displayedBlock = preview
-    ? { ...block, start_at: preview.startAt, end_at: preview.endAt }
-    : block;
-  const start = timeParts(displayedBlock.start_at, timezone);
-  const duration = Math.max(
-    Math.ceil((new Date(displayedBlock.end_at).getTime() - new Date(displayedBlock.start_at).getTime()) / 1_800_000),
-    1,
-  );
-  const row = Math.max(
-    Math.floor((start.hour * 60 + start.minute - startHour * 60) / 30) + 1,
-    1,
-  );
-  const column = Math.min(
-    Math.max(dateDifference(weekStart, dateInTimezone(displayedBlock.start_at, timezone)) + 1, 1),
-    7,
+  const shown = preview ? { ...block, start_at: preview.startAt, end_at: preview.endAt } : block;
+  const start = timeParts(shown.start_at, timezone);
+  const minutes = Math.max(
+    Math.round((new Date(shown.end_at).getTime() - new Date(shown.start_at).getTime()) / 60_000),
+    15,
   );
   const title = splitEventTitle(block.title);
 
   return (
-    <div
-      className={`week-block editable draft-block ${blockColor(block)} density-${cardDensity(duration)}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}${selected ? " selected" : ""}`}
-      style={eventGridStyle(column, row, duration, layout)}
-      title={`${block.title} · ${formatBlockTime(displayedBlock, timezone)}`}
+    <button
+      aria-label={`Edit ${block.title}, editable draft block, ${formatBlockTime(shown, timezone)}`}
+      className={`console-event editable ${blockColor(block)} density-${cardDensity(Math.ceil(minutes / 30))}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}`}
+      disabled={saving}
+      style={eventStyle(start.hour * 60 + start.minute, minutes, startHour, dayMinutes, layout)}
+      title={`${block.title} · ${formatBlockTime(shown, timezone)}`}
+      type="button"
+      onClick={onClick}
+      onPointerCancel={onPointerCancel}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
     >
-      <button
-        aria-label={`Drag ${block.title}`}
-        className="draft-drag-button"
-        disabled={saving}
-        title="Drag to move"
-        type="button"
-        onPointerCancel={onPointerCancel}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-      >
-        <GripVertical size={14} />
-      </button>
-      <button
-        aria-label={`Move or edit ${block.title}, ${formatBlockTime(displayedBlock, timezone)}`}
-        className="draft-block-main"
-        disabled={saving}
-        type="button"
-        onClick={onClick}
-      >
-        <p className="draft-event-meta-row">
-          {title.eyebrow ? <span className="draft-event-kind">{title.eyebrow}</span> : null}
-          <span className="draft-event-time">{formatBlockTime(displayedBlock, timezone)}</span>
-        </p>
-        <strong className="draft-event-label">{title.label}</strong>
-        {saving ? <LoaderCircle className="spin draft-block-state" size={13} /> : block.locked ? <Lock className="draft-block-state" size={13} /> : null}
-      </button>
-    </div>
+      <p className="console-event-meta">
+        <span className="console-event-kind">{title.eyebrow ?? "Draft"}</span>
+        <span className="console-event-time">{formatBlockTime(shown, timezone)}</span>
+      </p>
+      <strong className="console-event-title">{title.label}</strong>
+      <span className="console-grab" aria-hidden="true">
+        {saving
+          ? <LoaderCircle className="spin" size={12} />
+          : block.locked ? <Lock size={12} /> : <GripVertical size={12} />}
+      </span>
+    </button>
   );
 }
 
-function eventGridStyle(
-  column: number,
-  row: number,
-  duration: number,
+function fixedEventIcon(entry: PlanningEntry) {
+  if (entry.category === "class") return <GraduationCap size={11} />;
+  if (entry.category === "work") return <BriefcaseBusiness size={11} />;
+  return <Pin size={11} />;
+}
+
+function percentOf(minuteOfDay: number, startHour: number, dayMinutes: number) {
+  return ((minuteOfDay - startHour * 60) / dayMinutes) * 100;
+}
+
+function eventStyle(
+  startMinute: number,
+  minutes: number,
+  startHour: number,
+  dayMinutes: number,
   layout: EventLane | undefined,
 ): CSSProperties {
-  if (!layout || layout.laneCount <= 1) {
-    return { gridColumn: column, gridRow: `${row} / span ${duration}` };
-  }
-  const width = 100 / layout.laneCount;
+  const lanes = layout && layout.laneCount > 1 ? layout.laneCount : 1;
+  const lane = layout ? layout.lane : 0;
+  const width = 100 / lanes;
   return {
-    gridColumn: column,
-    gridRow: `${row} / span ${duration}`,
-    justifySelf: "start",
-    marginLeft: `calc(${width * layout.lane}% + 3px)`,
-    width: `calc(${width}% - 6px)`,
+    top: `calc(${percentOf(startMinute, startHour, dayMinutes)}% + 2px)`,
+    height: `calc(${(minutes / dayMinutes) * 100}% - 4px)`,
+    left: `calc(${width * lane}% + 4px)`,
+    width: `calc(${width}% - 8px)`,
   };
 }
 
-function fixedEventIcon(entry: PlanningEntry) {
-  if (entry.category === "class") return <GraduationCap size={13} />;
-  if (entry.category === "work") return <BriefcaseBusiness size={13} />;
-  return <Pin size={13} />;
+function currentTimeOffset(startHour: number, endHour: number, timezone: string) {
+  const now = timeParts(new Date().toISOString(), timezone);
+  const minutes = now.hour * 60 + now.minute;
+  if (minutes < startHour * 60 || minutes > endHour * 60) return null;
+  return ((minutes - startHour * 60) / Math.max((endHour - startHour) * 60, 1)) * 100;
+}
+
+function currentClock(timezone: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: timezone,
+  }).format(new Date()).replace(/\s/g, " ");
 }

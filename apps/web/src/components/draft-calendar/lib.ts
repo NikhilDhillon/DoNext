@@ -116,6 +116,7 @@ export function placementFromPointer(
   availability: AvailabilityWindow[],
   horizonStart: string,
   horizonEnd: string,
+  gutterWidth = 0,
 ): DragPreview | null {
   if (!grid || !days.length) return null;
   const bounds = grid.getBoundingClientRect();
@@ -125,7 +126,8 @@ export function placementFromPointer(
     0,
     days.length - 1,
   );
-  const dayIndex = originalDayIndex + Math.round((clientX - originX) / (bounds.width / 7));
+  const columnWidth = Math.max((bounds.width - gutterWidth) / days.length, 1);
+  const dayIndex = originalDayIndex + Math.round((clientX - originX) / columnWidth);
   if (dayIndex < 0 || dayIndex >= days.length) return null;
   const targetDate = days[dayIndex];
   if (!isDraftDay(targetDate, horizonStart, horizonEnd)) return null;

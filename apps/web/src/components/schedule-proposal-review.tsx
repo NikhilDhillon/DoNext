@@ -5,7 +5,6 @@ import {
   CalendarClock,
   Check,
   LoaderCircle,
-  Plus,
   RefreshCw,
   Sparkles,
   X,
@@ -313,10 +312,6 @@ export function ScheduleProposalReview({
         );
       })}
 
-      <div className="proposal-block-heading">
-        <div><h3>Draft calendar</h3></div>
-        <button className="primary-button draft-add-button" type="button" onClick={() => addBlock()}><Plus size={17} /> Add draft block</button>
-      </div>
       <DraftScheduleCalendar
         blocks={draft.blocks}
         horizonEnd={draft.horizon_end}
