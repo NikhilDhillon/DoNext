@@ -187,7 +187,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-cta:hover { background: #55e3ab; }
 
 .console-body { display: grid; grid-template-columns: minmax(0, 1fr); }
-.console-cal { display: flex; min-width: 0; flex-direction: column; }
+.console-cal { position: relative; display: flex; min-width: 0; flex-direction: column; }
 .console-head { position: sticky; z-index: 20; top: 0; display: grid; border-bottom: 1px solid var(--con-hair); background: var(--con-bg); }
 .console-head-gutter { display: grid; align-content: center; justify-items: end; border-right: 1px solid var(--con-hair-2); padding-right: 9px; color: var(--con-t3); font-size: 10.5px; font-weight: 600; }
 .console-dayhead { display: flex; align-items: baseline; gap: 7px; min-height: 46px; border-left: 1px solid var(--con-hair-2); padding: 9px 11px; }
@@ -203,7 +203,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-scroll::-webkit-scrollbar-thumb { border: 3px solid transparent; border-radius: 9px; background: rgba(255,255,255,.14); background-clip: content-box; }
 .console-grid { position: relative; display: grid; }
 .console-gutter { position: relative; border-right: 1px solid var(--con-hair-2); }
-.console-gutter > b { position: absolute; right: 9px; color: var(--con-t3); font-size: 10.5px; font-weight: 500; transform: translateY(-7px); }
+.console-gutter > b { position: absolute; right: 9px; padding-top: 3px; color: var(--con-t3); font-size: 10.5px; font-weight: 500; }
 .console-col { position: relative; border-left: 1px solid var(--con-hair-2); }
 .console-col.today { background: rgba(62,217,156,.02); }
 .console-col.outside { background: rgba(255,255,255,.014); }
@@ -212,7 +212,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-hit { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; }
 .console-hit:hover:not(:disabled) { background: rgba(62,217,156,.045); }
 .console-hit:disabled { cursor: default; }
-.console-outside-label { position: absolute; top: 10px; right: 0; left: 0; color: var(--con-t4); font-size: 10.5px; text-align: center; pointer-events: none; }
+.console-outside-label { position: absolute; top: 50%; right: 4px; left: 4px; color: var(--con-t4); font-size: 10.5px; text-align: center; transform: translateY(-50%); pointer-events: none; }
 
 .console-event { position: absolute; z-index: 4; overflow: hidden; border-radius: 8px; padding: 6px 8px 6px 12px; text-align: left; }
 .console-event::before { position: absolute; top: 0; bottom: 0; left: 0; width: 2.5px; background: currentColor; content: ""; }
@@ -249,7 +249,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .console-now { position: absolute; z-index: 15; height: 0; border-top: 1.5px solid var(--con-now); pointer-events: none; }
 .console-now::before { position: absolute; top: -3.5px; left: -3px; width: 7px; height: 7px; border-radius: 50%; background: var(--con-now); content: ""; }
-.console-now-time { position: absolute; z-index: 16; left: 0; padding-right: 8px; color: var(--con-now); font-size: 10.5px; font-weight: 700; text-align: right; transform: translateY(-50%); pointer-events: none; }
+.console-now-time { position: absolute; z-index: 16; left: 0; padding: 1px 8px 1px 0; background: var(--con-bg); color: var(--con-now); font-size: 10.5px; font-weight: 700; text-align: right; transform: translateY(-50%); pointer-events: none; }
 
 .console-foot { display: flex; align-items: center; gap: 14px; border-top: 1px solid var(--con-hair); padding: 8px 14px; color: var(--con-t3); font-size: 11px; }
 .console-foot span { display: inline-flex; align-items: center; gap: 6px; }
@@ -733,11 +733,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-inspector h4 { margin: 10px 0 2px; font-size: 15.5px; font-weight: 700; letter-spacing: -.02em; line-height: 1.26; }
 .console-inspector-when { margin: 0; color: var(--con-t2); font-size: 12px; }
 .console-steps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 13px; }
-.console-steps > div { border: 1px solid var(--con-hair); border-radius: 9px; padding: 7px 5px 8px 10px; }
+.console-steps > div { min-width: 0; border: 1px solid var(--con-hair); border-radius: 9px; padding: 7px 4px 8px 9px; }
 .console-steps p { margin: 0; color: var(--con-t3); font-size: 9.5px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
-.console-steps > div > span { display: flex; align-items: center; justify-content: space-between; margin-top: 2px; font-size: 13.5px; font-weight: 700; }
+.console-steps > div > span { display: flex; align-items: center; justify-content: space-between; gap: 4px; margin-top: 2px; font-size: 13px; font-weight: 700; white-space: nowrap; }
 .console-steps > div > span > span { display: flex; gap: 1px; }
-.console-steps button { display: grid; width: 26px; height: 26px; place-items: center; border-radius: 6px; color: var(--con-t2); }
+.console-steps button { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; border-radius: 6px; color: var(--con-t2); }
 .console-steps button:hover:not(:disabled) { background: var(--con-raise-2); color: var(--con-t1); }
 .console-steps button:disabled { color: var(--con-t4); cursor: not-allowed; }
 .console-inspector-actions { display: flex; gap: 6px; margin-top: 12px; }
@@ -776,7 +776,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 @media (max-width: 1180px) {
   .console-body.with-rail { grid-template-columns: minmax(0, 1fr); }
-  .console-rail { flex-direction: row; align-items: stretch; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--con-hair); }
+  .console-rail { flex-direction: row; align-items: stretch; gap: 8px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--con-hair); padding: 12px; }
   .console-meter { flex: 0 0 210px; }
   .console-rail-heading { display: none; }
   .console-rail-list { flex-direction: row; overflow: visible; }
@@ -785,7 +785,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 
 /* Draft calendar — open focus time as explicit targets */
-.console-open { position: absolute; z-index: 2; right: 6px; left: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed var(--con-hair); border-radius: 8px; color: var(--con-t3); font-size: 11.5px; font-weight: 620; }
+.console-open { position: absolute; z-index: 2; right: 6px; left: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed rgba(255,255,255,.16); border-radius: 8px; color: var(--con-t3); font-size: 11.5px; font-weight: 620; }
 .console-open:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.06); color: var(--con-acc); }
 
 /* Draft calendar — command palette */
@@ -809,10 +809,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 760px) {
   .console-cal > .console-head, .console-cal > .console-scroll, .console-foot { display: none; }
   .console-agenda { display: block; padding: 12px; }
-  .console-bar { flex-wrap: wrap; gap: 7px; }
+  .console-bar { flex-wrap: wrap; gap: 7px; min-height: 0; }
   .console-bar h3 { flex: 1 1 auto; font-size: 15px; }
-  .console-seg { order: 5; width: 100%; }
-  .console-seg button { flex: 1; min-height: 40px; }
+  .console-spacer { display: none; }
+  .console-seg, .console-kbd-button { display: none; }
   .console-btn, .console-kbd-button { min-height: 44px; }
   .console-btn.icon { width: 44px; }
   .console-cta { order: 6; width: 100%; justify-content: center; min-height: 46px; }
@@ -824,7 +824,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-agenda-days button > i { display: flex; width: 26px; gap: 2px; }
   .console-agenda-days button > i em { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.1); }
   .console-agenda-days button > i em.on { background: var(--con-study); }
-  .console-agenda-days button.today > strong { color: var(--con-now); }
+  .console-agenda-days button.today > strong { color: var(--con-acc); }
+  .console-agenda-days button.today::after { display: block; width: 4px; height: 4px; border-radius: 50%; background: var(--con-now); content: ""; }
   .console-agenda-days button.on { border-color: var(--con-acc); background: var(--con-acc-dim); }
   .console-agenda-days button.on > span, .console-agenda-days button.on > strong { color: var(--con-acc); }
   .console-agenda-days button.outside { border-style: dashed; background: transparent; }
@@ -836,7 +837,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-agenda-row { display: grid; grid-template-columns: 50px minmax(0, 1fr); align-items: start; gap: 11px; }
   .console-agenda-time { padding-top: 12px; color: var(--con-t3); font-size: 12px; font-weight: 680; text-align: right; }
   .console-agenda-time em { display: block; margin-top: 1px; color: var(--con-t4); font-size: 10px; font-style: normal; }
-  .console-agenda-open { display: flex; width: 100%; min-height: 48px; align-items: center; gap: 8px; border: 1px dashed var(--con-hair); border-radius: 11px; padding: 0 13px; color: var(--con-t3); font-size: 12.5px; font-weight: 620; text-align: left; }
+  .console-agenda-open { display: flex; width: 100%; min-height: 48px; align-items: center; gap: 8px; border: 1px dashed rgba(255,255,255,.16); border-radius: 11px; padding: 12px 13px; color: var(--con-t3); font-size: 12.5px; font-weight: 620; line-height: 1.35; text-align: left; }
   .console-agenda-open:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.06); color: var(--con-acc); }
   .console-agenda-event { position: relative; display: flex; width: 100%; min-height: 56px; align-items: center; gap: 10px; overflow: hidden; border-radius: 11px; padding: 11px 12px 11px 16px; text-align: left; }
   .console-agenda-event::before { position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: currentColor; content: ""; }
@@ -860,3 +861,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-status { bottom: 14px; }
   .console-palette { top: 60px; }
 }
+
+/* Draft calendar — cards squeezed by an overlap keep the title and defer the rest to the
+   tooltip and the inspector rather than truncating every line. */
+.console-event.density-tight .console-event-sub { display: none; }
+.console-event.narrow { padding: 6px 6px 6px 9px; }
+.console-event.narrow .console-event-meta, .console-event.narrow .console-event-sub { display: none; }
+.console-event.narrow .console-event-title { margin: 0; font-size: 11.5px; -webkit-line-clamp: 4; }

@@ -40,6 +40,7 @@ import {
   fixedEventColor,
   fixedEventLabel,
   focusBounds,
+  clockParts,
   formatBlockTime,
   formatCalendarDate,
   formatEntryTime,
@@ -148,7 +149,7 @@ export function DraftScheduleCalendar({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
-  const [agendaIndex, setAgendaIndex] = useState(0);
+  const [agendaIndex, setAgendaIndex] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [placement, setPlacement] = useState<PlacementSession | null>(null);
   const placementRef = useRef<PlacementSession | null>(null);
@@ -483,14 +484,14 @@ export function DraftScheduleCalendar({
 
   function goToToday() {
     closeInspector();
-    setAgendaIndex(Math.max(todayOffset - (columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset)), 0));
+    setAgendaIndex(null);
     if (todayOffset < 0 || todayOffset >= totalDays) return;
     setDayOffset(columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset));
   }
 
   function changeColumns(next: number) {
     closeInspector();
-    setAgendaIndex(0);
+    setAgendaIndex(null);
     const anchor = columns === 7 && next !== 7 && todayOffset >= offset && todayOffset < offset + 7
       ? todayOffset
       : offset;
@@ -649,7 +650,9 @@ export function DraftScheduleCalendar({
     }
   }
 
-  const agendaDate = days[Math.min(agendaIndex, days.length - 1)] ?? rangeStart;
+  const agendaDate = days[
+    Math.min(agendaIndex ?? Math.max(days.indexOf(today), 0), days.length - 1)
+  ] ?? rangeStart;
   const agendaOutside = !isDraftDay(agendaDate, horizonStart, horizonEnd);
   const agendaBlocks = displayedBlocks.filter(
     (block) => dateInTimezone(block.start_at, timezone) === agendaDate,
@@ -748,7 +751,7 @@ export function DraftScheduleCalendar({
           className="console-btn icon"
           disabled={offset <= 0}
           type="button"
-          onClick={() => setDayOffset(Math.max(offset - columns, 0))}
+          onClick={() => { setAgendaIndex(null); setDayOffset(Math.max(offset - columns, 0)); }}
         >
           <ChevronLeft size={16} />
         </button>
@@ -757,7 +760,7 @@ export function DraftScheduleCalendar({
           className="console-btn icon"
           disabled={offset >= maxOffset}
           type="button"
-          onClick={() => setDayOffset(Math.min(offset + columns, maxOffset))}
+          onClick={() => { setAgendaIndex(null); setDayOffset(Math.min(offset + columns, maxOffset)); }}
         >
           <ChevronRight size={16} />
         </button>
@@ -892,7 +895,9 @@ export function DraftScheduleCalendar({
                         <ConsoleFixedEvent
                           entry={entry}
                           key={entry.id}
+                          compactTime={columns >= 5 || (laneLayout[`fixed:${entry.id}`]?.laneCount ?? 1) > 1}
                           layout={laneLayout[`fixed:${entry.id}`]}
+                          narrow={columns >= 5 && (laneLayout[`fixed:${entry.id}`]?.laneCount ?? 1) > 1}
                           startHour={startHour}
                           dayMinutes={dayMinutes}
                           timezone={timezone}
@@ -903,9 +908,11 @@ export function DraftScheduleCalendar({
                       .map((block) => (
                         <ConsoleDraftBlock
                           block={block}
+                          compactTime={columns >= 5 || (laneLayout[`draft:${block.id}`]?.laneCount ?? 1) > 1}
                           dragging={draggingBlockId === block.id}
                           key={block.id}
                           layout={laneLayout[`draft:${block.id}`]}
+                          narrow={columns >= 5 && (laneLayout[`draft:${block.id}`]?.laneCount ?? 1) > 1}
                           preview={dragPreview?.blockId === block.id ? dragPreview : null}
                           reverting={revertingBlockId === block.id}
                           saving={savingBlockId === block.id || busyBlockId === block.id}
@@ -987,7 +994,7 @@ export function DraftScheduleCalendar({
               : "Open all day"}
             onAdd={() => onAdd(agendaDate)}
             onSelectBlock={openBlock}
-            onSelectDay={setAgendaIndex}
+            onSelectDay={(index) => setAgendaIndex(index)}
           />
 
           {selectedBlock ? (
@@ -1046,13 +1053,17 @@ export function DraftScheduleCalendar({
 
 function ConsoleFixedEvent({
   entry,
+  compactTime,
   layout,
+  narrow,
   startHour,
   dayMinutes,
   timezone,
 }: {
   entry: PlanningEntry;
+  compactTime: boolean;
   layout?: EventLane;
+  narrow: boolean;
   startHour: number;
   dayMinutes: number;
   timezone: string;
@@ -1067,7 +1078,7 @@ function ConsoleFixedEvent({
   return (
     <article
       aria-label={`${entry.title}, fixed ${label.toLowerCase()}, ${formatEntryTime(entry, timezone)}`}
-      className={`console-event ${fixedEventColor(entry)} density-${cardDensity(duration)}`}
+      className={`console-event ${fixedEventColor(entry)} density-${cardDensity(duration)}${narrow ? " narrow" : ""}`}
       style={eventStyle(start.hour * 60 + start.minute, duration * 30, startHour, dayMinutes, layout)}
       title={`${entry.title} · ${formatEntryTime(entry, timezone)}${entry.location ? ` · ${entry.location}` : ""}`}
     >
@@ -1076,7 +1087,9 @@ function ConsoleFixedEvent({
           {fixedEventIcon(entry)}
           {entry.course_code ?? label}
         </span>
-        <span className="console-event-time">{formatEntryTime(entry, timezone)}</span>
+        <span className="console-event-time">
+          {compactTime ? clockParts(entry.start_at, timezone).clock : formatEntryTime(entry, timezone)}
+        </span>
       </p>
       <strong className="console-event-title">{entry.title}</strong>
       {entry.location ? <span className="console-event-sub">{entry.location}</span> : null}
@@ -1086,7 +1099,9 @@ function ConsoleFixedEvent({
 
 function ConsoleDraftBlock({
   block,
+  compactTime,
   layout,
+  narrow,
   preview,
   dragging,
   reverting,
@@ -1103,7 +1118,9 @@ function ConsoleDraftBlock({
   onPointerCancel,
 }: {
   block: ScheduleBlock;
+  compactTime: boolean;
   layout?: EventLane;
+  narrow: boolean;
   preview: DragPreview | null;
   dragging: boolean;
   reverting: boolean;
@@ -1130,7 +1147,7 @@ function ConsoleDraftBlock({
   return (
     <button
       aria-label={`Edit ${block.title}, editable draft block, ${formatBlockTime(shown, timezone)}`}
-      className={`console-event editable ${blockColor(block)} density-${cardDensity(Math.ceil(minutes / 30))}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}${selected ? " selected" : ""}`}
+      className={`console-event editable ${blockColor(block)} density-${cardDensity(Math.ceil(minutes / 30))}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}${selected ? " selected" : ""}${narrow ? " narrow" : ""}`}
       disabled={saving}
       style={eventStyle(start.hour * 60 + start.minute, minutes, startHour, dayMinutes, layout)}
       title={`${block.title} · ${formatBlockTime(shown, timezone)}`}
@@ -1144,7 +1161,9 @@ function ConsoleDraftBlock({
     >
       <p className="console-event-meta">
         <span className="console-event-kind">{title.eyebrow ?? "Draft"}</span>
-        <span className="console-event-time">{formatBlockTime(shown, timezone)}</span>
+        <span className="console-event-time">
+          {compactTime ? clockParts(shown.start_at, timezone).clock : formatBlockTime(shown, timezone)}
+        </span>
       </p>
       <strong className="console-event-title">{title.label}</strong>
       <span className="console-grab" aria-hidden="true">
