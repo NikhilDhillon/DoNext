@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -1723,6 +1723,8 @@ def _scheduling_items(
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
     invalid_deadlines: dict[str, list[tuple[str, date]]] = {}
+    exam_items_by_course: dict[uuid.UUID, list[str]] = {}
+    pre_exam_completion_by_course: dict[uuid.UUID, datetime] = {}
     task_by_academic_item = {
         task.academic_item_id: task for task in tasks if task.academic_item_id is not None
     }
@@ -1932,6 +1934,14 @@ def _scheduling_items(
         )
         items.append(scheduling_item)
         links[identifier] = (task.id, None, "focus")
+        if task.course_id is not None:
+            if kind == "exam_prep":
+                exam_items_by_course.setdefault(task.course_id, []).append(identifier)
+            elif exam_relationship == "same_course_pre_exam" and task.required:
+                current = pre_exam_completion_by_course.get(task.course_id)
+                if current is None or preferred_completion_at > current:
+                    pre_exam_completion_by_course[task.course_id] = preferred_completion_at
+    items = _pace_early_exam_review(items, exam_items_by_course, pre_exam_completion_by_course)
     for course_code, invalid in sorted(invalid_deadlines.items()):
         examples = ", ".join(f"{name} ({deadline.isoformat()})" for name, deadline in invalid[:3])
         remainder = len(invalid) - 3
@@ -2117,6 +2127,45 @@ def _unscheduled_summary(
         )
         unresolved.append(entry)
     return unresolved
+
+
+# While a course still has required assignments due before its exam, early preparation is a
+# soft three-day cadence rather than packed work. Once those assignments are due to be done,
+# the cadence is dropped and the remaining estimate drives more frequent blocks.
+EARLY_REVIEW_CADENCE_DAYS = 3
+
+
+def _pace_early_exam_review(
+    items: list[SchedulingItem],
+    exam_items_by_course: dict[uuid.UUID, list[str]],
+    pre_exam_completion_by_course: dict[uuid.UUID, datetime],
+) -> list[SchedulingItem]:
+    phase_end_by_item: dict[str, datetime] = {}
+    for course_id, identifiers in exam_items_by_course.items():
+        completion = pre_exam_completion_by_course.get(course_id)
+        if completion is None:
+            continue
+        for identifier in identifiers:
+            phase_end_by_item[identifier] = completion
+    if not phase_end_by_item:
+        return items
+    paced: list[SchedulingItem] = []
+    for item in items:
+        phase_end = phase_end_by_item.get(item.id)
+        if phase_end is None:
+            paced.append(item)
+            continue
+        # The review phase can never outlast the exam it prepares for.
+        if item.due_at is not None:
+            phase_end = min(phase_end, item.due_at)
+        paced.append(
+            replace(
+                item,
+                review_cadence_days=EARLY_REVIEW_CADENCE_DAYS,
+                review_phase_end_at=phase_end,
+            )
+        )
+    return paced
 
 
 def _shortfall_reason(item: SchedulingItem, windows: list[SchedulingWindow]) -> tuple[str, str]:

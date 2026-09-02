@@ -346,3 +346,62 @@ def test_large_14_day_request_returns_a_non_empty_draft_within_five_seconds() ->
     assert result.placements
     assert sum(result.scheduled_minutes.values()) > 0
     assert result.status != "infeasible"
+
+
+def review_item(target_minutes: int, phase_end: datetime) -> SchedulingItem:
+    return SchedulingItem(
+        id="exam",
+        title="CSC 370 · Midterm prep",
+        target_minutes=target_minutes,
+        minimum_session_minutes=30,
+        preferred_session_minutes=45,
+        maximum_session_minutes=45,
+        priority_rank=3,
+        intensity="deep",
+        kind="exam_prep",
+        review_cadence_days=3,
+        review_phase_end_at=phase_end,
+    )
+
+
+def review_windows(days: int, hours: int) -> list[SchedulingWindow]:
+    return [
+        SchedulingWindow(
+            start_at=datetime(2026, 9, 1, 9, tzinfo=UTC) + timedelta(days=offset),
+            end_at=datetime(2026, 9, 1, 9 + hours, tzinfo=UTC) + timedelta(days=offset),
+            daily_capacity_minutes=hours * 60,
+        )
+        for offset in range(days)
+    ]
+
+
+def test_early_exam_review_keeps_a_three_day_cadence_then_intensifies() -> None:
+    # Nine usable days; the first six still sit inside the urgent same-course assignment phase.
+    phase_end = datetime(2026, 9, 6, 23, 59, tzinfo=UTC)
+    result = solve_schedule([review_item(360, phase_end)], review_windows(9, 5), 10)
+
+    days = sorted({placement.start_at.date() for placement in result.placements})
+    review_days = [day for day in days if day <= phase_end.date()]
+    review_minutes = sum(
+        round((placement.end_at - placement.start_at).total_seconds() / 60)
+        for placement in result.placements
+        if placement.start_at.date() <= phase_end.date()
+    )
+
+    assert result.scheduled_minutes["exam"] == 360
+    assert review_days
+    assert all(
+        (later - earlier).days >= 3
+        for earlier, later in zip(review_days, review_days[1:], strict=False)
+    )
+    assert review_minutes < 360 - review_minutes
+    assert [day for day in days if day > phase_end.date()]
+
+
+def test_early_exam_review_leaves_no_gap_longer_than_the_cadence() -> None:
+    phase_end = datetime(2026, 9, 10, 23, 59, tzinfo=UTC)
+    result = solve_schedule([review_item(270, phase_end)], review_windows(10, 3), 10)
+
+    days = sorted({placement.start_at.date() for placement in result.placements})
+    assert days
+    assert all((later - earlier).days <= 3 for earlier, later in zip(days, days[1:], strict=False))

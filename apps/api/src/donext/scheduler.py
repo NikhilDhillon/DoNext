@@ -37,6 +37,10 @@ class SchedulingItem:
     exam_relationship: str | None = None
     readiness_at: datetime | None = None
     preferred_completion_at: datetime | None = None
+    # While urgent same-course assignments are still underway, exam preparation is paced at
+    # this cadence instead of being packed. Both fields are unset once preparation intensifies.
+    review_cadence_days: int | None = None
+    review_phase_end_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,7 @@ def _greedy_baseline(
     used_by_day: dict[date, int] = defaultdict(int)
     blocks_by_day: dict[date, int] = defaultdict(int)
     item_dates: dict[tuple[str, date], int] = defaultdict(int)
+    item_days: dict[str, set[date]] = defaultdict(set)
     item_ready_at: dict[str, datetime] = {}
     scheduled = {item.id: 0 for item in items}
     placements: list[Placement] = []
@@ -231,6 +236,7 @@ def _greedy_baseline(
             minimum_break_minutes,
             policy,
             item_ready_at.get(session.item.id),
+            item_days[session.item.id],
         )
         if choice is None:
             continue
@@ -247,6 +253,7 @@ def _greedy_baseline(
         used_by_day[start_at.date()] += session.duration_minutes
         blocks_by_day[start_at.date()] += 1
         item_dates[(session.item.id, start_at.date())] += 1
+        item_days[session.item.id].add(start_at.date())
         scheduled[session.item.id] += session.duration_minutes
         item_ready_at[session.item.id] = occupied_end
         placements.append(_placement(session, start_at, segment.energy_level))
@@ -272,6 +279,7 @@ def _best_greedy_slot(
     minimum_break_minutes: int,
     policy: SchedulingPolicy | None,
     item_ready_at: datetime | None,
+    placed_days: set[date],
 ) -> tuple[int, datetime] | None:
     choices: list[tuple[tuple[object, ...], int, datetime]] = []
     occupied = session.duration_minutes + minimum_break_minutes
@@ -302,6 +310,7 @@ def _best_greedy_slot(
         score: tuple[object, ...]
         if session.item.kind == "exam_prep":
             score = (
+                _review_spacing_penalty(session.item, day, placed_days),
                 item_dates[(session.item.id, day)],
                 _preferred_time_penalty(start_at, policy),
                 start_at,
@@ -326,6 +335,21 @@ def _best_greedy_slot(
         return None
     _, index, start_at = min(choices, key=lambda value: value[0])
     return index, start_at
+
+
+def _in_review_phase(item: SchedulingItem, day: date) -> bool:
+    return item.review_phase_end_at is not None and day <= item.review_phase_end_at.date()
+
+
+# Early review is a soft preference for one block roughly every `review_cadence_days`. Days
+# closer than that are ranked last rather than forbidden, so a block still lands when the
+# spaced-out days have no opening.
+def _review_spacing_penalty(item: SchedulingItem, day: date, placed_days: set[date]) -> int:
+    cadence = item.review_cadence_days
+    if not cadence or not placed_days or not _in_review_phase(item, day):
+        return 0
+    nearest = min(abs((day - placed).days) for placed in placed_days)
+    return 1 if nearest < cadence else 0
 
 
 def _academic_sort_key(item: SchedulingItem) -> tuple[object, ...]:
@@ -506,7 +530,7 @@ def _optimize_sessions(
     model.add(academic_minutes == best_academic)
     model.add(academic_importance == best_importance)
 
-    exam_day_terms: list[cp_model.IntVar] = []
+    exam_day_active: dict[tuple[str, date], cp_model.IntVar] = {}
     for item in items:
         if item.kind != "exam_prep":
             continue
@@ -520,9 +544,61 @@ def _optimize_sessions(
                 continue
             active = model.new_bool_var(f"exam_day_{item.id}_{day.isoformat()}")
             model.add_max_equality(active, selections)
-            exam_day_terms.append(active)
-    if exam_day_terms:
-        exam_momentum = sum(exam_day_terms)
+            exam_day_active[(item.id, day)] = active
+
+    # Early review cadence: while urgent same-course assignments are still underway, every run
+    # of `review_cadence_days` consecutive usable days should contain at least one preparation
+    # block. Maximizing covered runs both spaces the early blocks out and, once preparation
+    # intensifies, leaves no excessive gap. It is a soft stage, so urgent assignment work that
+    # consumes the day's safe capacity simply leaves a run uncovered.
+    cadence_terms: list[cp_model.IntVar] = []
+    for item in items:
+        cadence = item.review_cadence_days
+        if item.kind != "exam_prep" or not cadence:
+            continue
+        review_days = [
+            day
+            for day in sorted(windows_by_day)
+            if (item.id, day) in exam_day_active and _in_review_phase(item, day)
+        ]
+        for index in range(len(review_days) - cadence + 1):
+            covered = model.new_bool_var(f"review_run_{item.id}_{index}")
+            model.add_max_equality(
+                covered,
+                [exam_day_active[(item.id, day)] for day in review_days[index : index + cadence]],
+            )
+            cadence_terms.append(covered)
+    if cadence_terms:
+        review_coverage = sum(cadence_terms)
+        model.maximize(review_coverage)
+        cadence_solver = _solver(max(time_limit_seconds * 0.08, 0.05))
+        cadence_status = cadence_solver.solve(model)
+        if cadence_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(review_coverage == cadence_solver.value(review_coverage))
+
+    # With the cadence presence fixed, keep the early phase light: total academic minutes are
+    # already locked, so minimizing the minutes that land inside the review phase moves the
+    # bulk of preparation past the urgent assignments, which is where the remaining estimate
+    # should drive more frequent blocks.
+    early_review_terms = [
+        alternative.selected * alternative.session.duration_minutes
+        for alternative in alternatives
+        if alternative.session.item.kind == "exam_prep"
+        and alternative.session.item.review_cadence_days
+        and _in_review_phase(alternative.session.item, alternative.day)
+    ]
+    if early_review_terms:
+        early_review_minutes = sum(early_review_terms)
+        model.minimize(early_review_minutes)
+        early_review_solver = _solver(max(time_limit_seconds * 0.06, 0.05))
+        early_review_status = early_review_solver.solve(model)
+        if early_review_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(early_review_minutes == early_review_solver.value(early_review_minutes))
+
+    if exam_day_active:
+        exam_momentum = sum(exam_day_active.values())
         model.maximize(exam_momentum)
         momentum_solver = _solver(max(time_limit_seconds * 0.15, 0.05))
         momentum_status = momentum_solver.solve(model)
