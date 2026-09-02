@@ -878,3 +878,109 @@ def test_impossible_plan_sacrifices_lower_same_day_weight_and_reports_exact_shor
     assert not any(block["task_id"] == low["task_id"] for block in proposal["blocks"])
     assert unresolved["remaining_minutes"] == 50
     assert unresolved["capacity_needed_minutes"] == 50
+
+
+def _course_with_four_assignments(
+    client: TestClient, semester: dict[str, object]
+) -> dict[str, dict[str, object]]:
+    course = create_course(client, semester["id"], "CSC 349A")
+    lecture = client.post(
+        "/api/v1/events",
+        json={
+            "title": "CSC 349A lecture",
+            "semester_id": semester["id"],
+            "course_id": course["id"],
+            "meeting_kind": "lecture",
+            "category": "class",
+            "start_at": "2026-09-02T09:00:00-07:00",
+            "end_at": "2026-09-02T10:00:00-07:00",
+        },
+    )
+    assert lecture.status_code == 201
+    due_dates = {
+        "one": "2026-09-14T12:29:00-07:00",
+        "two": "2026-10-09T12:29:00-07:00",
+        "three": "2026-10-30T12:29:00-07:00",
+        "four": "2026-11-27T12:29:00-08:00",
+    }
+    return {
+        label: create_item(
+            client, course["id"], "assignment", f"Assignment {label}", due_at, weight=10
+        )
+        for label, due_at in due_dates.items()
+    }
+
+
+def test_distant_assignments_start_in_deadline_order(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    # All four assignments unlock at the same lecture and carry the same weight and estimate,
+    # so nothing but the deadline separates them.
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 2, 8, tzinfo=UTC))
+    register(client)
+    semester = create_semester(client)
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": day,
+                    "start_time": "08:00:00",
+                    "end_time": "11:30:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+                for day in range(5)
+            ]
+        },
+    )
+    assignments = _course_with_four_assignments(client, semester)
+    order = ["one", "two", "three", "four"]
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    first_start: dict[str, datetime] = {}
+    scheduled: dict[str, int] = {label: 0 for label in order}
+    for block in sorted(proposal["blocks"], key=lambda value: value["start_at"]):
+        for label, assignment in assignments.items():
+            if block["task_id"] != assignment["task_id"]:
+                continue
+            first_start.setdefault(label, datetime.fromisoformat(block["start_at"]))
+            scheduled[label] += round(
+                (
+                    datetime.fromisoformat(block["end_at"])
+                    - datetime.fromisoformat(block["start_at"])
+                ).total_seconds()
+                / 60
+            )
+
+    assert scheduled == dict.fromkeys(order, 150)
+    starts = [first_start[label] for label in order]
+    assert starts == sorted(starts), first_start
+    assert len(set(starts)) == len(starts)
+
+
+def test_distant_assignment_slack_separates_deadlines_beyond_the_horizon(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 2, 8, tzinfo=UTC))
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    assignments = _course_with_four_assignments(client, semester)
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+
+    slack = {
+        label: block["reason_details"]["slack_minutes"]
+        for label, assignment in assignments.items()
+        for block in proposal["blocks"]
+        if block["task_id"] == assignment["task_id"]
+    }
+    # Capacity measured only to the horizon end is the same window for every deadline past it,
+    # which used to collapse these onto one value and leave the scheduler unable to rank them.
+    ordered = [slack[label] for label in ("one", "two", "three", "four")]
+    assert ordered == sorted(ordered)
+    assert len(set(ordered)) == 4

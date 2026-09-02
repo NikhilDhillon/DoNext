@@ -1004,3 +1004,101 @@ def test_greedy_and_optimized_paths_satisfy_the_same_hard_constraints(
     for result in (optimized, greedy):
         assert result.scheduled_minutes["task:early"] == 150
         assert result.scheduled_minutes["task:late"] == 200
+
+
+def distant_assignment(
+    identifier: str,
+    due_at: datetime,
+    *,
+    slack_minutes: int = 5010,
+    minutes: int = 150,
+) -> SchedulingItem:
+    """A distant assignment shaped like production, where slack ties across every one of them."""
+    return SchedulingItem(
+        id=identifier,
+        title=identifier,
+        target_minutes=minutes,
+        minimum_session_minutes=25,
+        preferred_session_minutes=50,
+        maximum_session_minutes=90,
+        priority_rank=2,
+        intensity="moderate",
+        kind="distant_task",
+        importance_rank=1_095_992,
+        due_at=due_at,
+        earliest_start_at=datetime(2026, 9, 9, 10, 0, tzinfo=UTC),
+        latest_end_at=due_at,
+        required=True,
+        risk_tier=1,
+        slack_minutes=slack_minutes,
+        weight_percent=10.0,
+        preferred_completion_at=due_at - timedelta(hours=24),
+    )
+
+
+def capped_days(count: int, capacity_minutes: int) -> list[SchedulingWindow]:
+    return [
+        SchedulingWindow(
+            datetime(2026, 9, 9 + offset, 10, 0, tzinfo=UTC),
+            datetime(2026, 9, 9 + offset, 16, 0, tzinfo=UTC),
+            daily_capacity_minutes=capacity_minutes,
+        )
+        for offset in range(count)
+    ]
+
+
+def test_distant_assignments_are_worked_in_deadline_order() -> None:
+    # Every distant assignment carries the same slack, because slack cannot see past the
+    # horizon end. Deadline order still has to decide which one gets the scarce capacity.
+    items = [
+        distant_assignment("task:october", datetime(2026, 10, 10, 12, 29, tzinfo=UTC)),
+        distant_assignment("task:november", datetime(2026, 11, 28, 13, 29, tzinfo=UTC)),
+        distant_assignment("task:december", datetime(2026, 12, 12, 13, 29, tzinfo=UTC)),
+    ]
+    # Room for six of the nine sessions, so the last deadline has to be the one left out.
+    result = solve_schedule(items, capped_days(3, 100), minimum_break_minutes=10)
+
+    assert result.used_baseline is False
+    assert result.scheduled_minutes["task:october"] == 150
+    assert result.scheduled_minutes["task:november"] == 150
+    assert result.scheduled_minutes["task:december"] == 0
+    assert result.placements[0].item_id == "task:october"
+
+
+def test_a_later_distant_deadline_never_starts_before_a_nearer_one() -> None:
+    items = [
+        distant_assignment("task:october", datetime(2026, 10, 10, 12, 29, tzinfo=UTC)),
+        distant_assignment("task:november", datetime(2026, 11, 28, 13, 29, tzinfo=UTC)),
+        distant_assignment("task:december", datetime(2026, 12, 12, 13, 29, tzinfo=UTC)),
+    ]
+    result = solve_schedule(items, capped_days(6, 100), minimum_break_minutes=10)
+
+    first_start = {}
+    for placement in result.placements:
+        first_start.setdefault(placement.item_id, placement.start_at)
+    assert first_start["task:october"] < first_start["task:november"] < first_start["task:december"]
+
+
+def test_ranking_distant_work_does_not_take_capacity_from_a_flexible_goal() -> None:
+    goal = SchedulingItem(
+        "goal:gym",
+        "Gym",
+        180,
+        30,
+        60,
+        60,
+        3,
+        "moderate",
+        "goal",
+        frozenset(datetime(2026, 9, 9 + offset, 10, 0, tzinfo=UTC).date() for offset in range(3)),
+    )
+    items = [
+        goal,
+        distant_assignment("task:october", datetime(2026, 10, 10, 12, 29, tzinfo=UTC)),
+        distant_assignment("task:november", datetime(2026, 11, 28, 13, 29, tzinfo=UTC)),
+    ]
+    result = solve_schedule(items, capped_days(3, 120), minimum_break_minutes=10)
+
+    assert result.scheduled_minutes["goal:gym"] == 180
+    assert result.scheduled_minutes["task:november"] == 0
+    assert result.scheduled_minutes["task:october"] > 0
