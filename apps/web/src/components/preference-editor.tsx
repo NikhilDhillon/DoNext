@@ -64,15 +64,12 @@ export function PreferenceEditor() {
         method: "PATCH",
         body: JSON.stringify({
           minimum_sleep_minutes: Number(form.get("minimum_sleep_hours")) * 60,
-          preferred_sleep_minutes: Number(form.get("preferred_sleep_hours")) * 60,
           default_wake_time: form.get("default_wake_time"),
           default_sleep_time: form.get("default_sleep_time"),
           maximum_daily_focus_minutes: Number(form.get("maximum_daily_focus_minutes")),
           preferred_session_minutes: Number(form.get("preferred_session_minutes")),
           minimum_break_minutes: Number(form.get("minimum_break_minutes")),
           freeze_window_minutes: Number(form.get("freeze_window_hours")) * 60,
-          preserve_free_time_percent: Number(form.get("preserve_free_time_percent")),
-          auto_apply_low_impact_changes: form.get("auto_apply_low_impact_changes") === "on",
         }),
       });
       const availabilityRequest = apiRequest<AvailabilityWindow[]>("/availability", {
@@ -135,7 +132,7 @@ export function PreferenceEditor() {
       <form className="preference-form" onSubmit={savePreferences}>
         <section className="preference-section">
           <div className="preference-heading"><span><MoonStar size={20} /></span><div><h2>Sleep protection</h2><p>Sleep is a hard planning boundary, not spare capacity.</p></div></div>
-          <div className="form-row"><label><span>Minimum sleep</span><select name="minimum_sleep_hours" defaultValue={value.minimum_sleep_minutes / 60}><option value="6">6 hours</option><option value="6.5">6.5 hours</option><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option><option value="9">9 hours</option></select></label><label><span>Preferred sleep</span><select name="preferred_sleep_hours" defaultValue={value.preferred_sleep_minutes / 60}><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option><option value="9">9 hours</option><option value="9.5">9.5 hours</option><option value="10">10 hours</option></select></label></div>
+          <div className="form-row"><label><span>Minimum sleep</span><select name="minimum_sleep_hours" defaultValue={value.minimum_sleep_minutes / 60}><option value="6">6 hours</option><option value="6.5">6.5 hours</option><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option><option value="9">9 hours</option></select></label><div className="preference-help"><strong>{formatMinutes(sleepDurationMinutes(value.default_sleep_time, value.default_wake_time))}</strong> preferred sleep, derived from your typical bedtime and wake time.</div></div>
           <div className="form-row"><label><span>Typical bedtime</span><input name="default_sleep_time" type="time" defaultValue={value.default_sleep_time.slice(0, 5)} required /></label><label><span>Typical wake time</span><input name="default_wake_time" type="time" defaultValue={value.default_wake_time.slice(0, 5)} required /></label></div>
         </section>
 
@@ -165,8 +162,8 @@ export function PreferenceEditor() {
 
         <section className="preference-section">
           <div className="preference-heading"><span><ShieldCheck size={20} /></span><div><h2>Schedule stability</h2><p>Keep near-term commitments stable and preserve unscheduled breathing room.</p></div></div>
-          <div className="form-row"><label><span>Freeze window</span><select name="freeze_window_hours" defaultValue={value.freeze_window_minutes / 60}><option value="0">No freeze window</option><option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></label><label><span>Preserve as free time</span><select name="preserve_free_time_percent" defaultValue={value.preserve_free_time_percent}><option value="0">No minimum</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option></select></label></div>
-          <label className="checkbox-field"><input name="auto_apply_low_impact_changes" type="checkbox" defaultChecked={value.auto_apply_low_impact_changes} /><span><strong>Automatically apply low-impact changes</strong><small>Saved for a later phase. Phase 3 always requires your review.</small></span></label>
+          <label><span>Freeze window</span><select name="freeze_window_hours" defaultValue={value.freeze_window_minutes / 60}><option value="0">No freeze window</option><option value="1">1 hour</option><option value="2">2 hours</option><option value="4">4 hours</option><option value="6">6 hours</option><option value="12">12 hours</option><option value="24">24 hours</option></select></label>
+          <p className="preference-help">DoNext retains a one-hour rollover buffer each day. Only overdue work or work due within 48 hours may use it automatically.</p>
         </section>
 
         <section className="preference-section compact-section"><div className="preference-heading"><span><Bell size={20} /></span><div><h2>Reminders</h2><p>Notification controls will arrive with completion tracking.</p></div></div><span className="coming-soon-label">Phase 2</span></section>
@@ -192,4 +189,18 @@ export function PreferenceEditor() {
       </FormDialog>
     </main>
   );
+}
+
+function sleepDurationMinutes(bedtime: string, wakeTime: string) {
+  const [bedHour, bedMinute] = bedtime.split(":").map(Number);
+  const [wakeHour, wakeMinute] = wakeTime.split(":").map(Number);
+  const bed = bedHour * 60 + bedMinute;
+  const wake = wakeHour * 60 + wakeMinute;
+  return (wake - bed + 1440) % 1440 || 1440;
+}
+
+function formatMinutes(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
 }

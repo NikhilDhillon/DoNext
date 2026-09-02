@@ -34,6 +34,7 @@ from donext.schemas import (
     SemesterRead,
     SemesterRisk,
     SemesterWeekRead,
+    sleep_window_minutes,
 )
 
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
@@ -325,7 +326,7 @@ def build_planning_view(
                 focus_intervals.append(clipped)
         open_intervals = subtract_intervals(available, commitment_intervals)
         open_minutes = interval_minutes(open_intervals)
-        protected_minutes = round(open_minutes * preferences.preserve_free_time_percent / 100)
+        protected_minutes = min(60, open_minutes)
         usable_minutes = max(open_minutes - protected_minutes, 0)
         planned_minutes = interval_minutes(merge_intervals(focus_intervals))
         days.append(
@@ -338,7 +339,9 @@ def build_planning_view(
                     planned_focus_minutes=planned_minutes,
                     protected_free_minutes=protected_minutes,
                     remaining_focus_minutes=max(usable_minutes - planned_minutes, 0),
-                    preferred_sleep_minutes=preferences.preferred_sleep_minutes,
+                    derived_preferred_sleep_minutes=sleep_window_minutes(
+                        preferences.default_sleep_time, preferences.default_wake_time
+                    ),
                 ),
             )
         )

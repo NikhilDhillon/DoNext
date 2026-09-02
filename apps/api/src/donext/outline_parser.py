@@ -1350,7 +1350,7 @@ def _estimated_minutes(kind: str) -> int:
     return {
         "exam": 480,
         "quiz": 120,
-        "assignment": 240,
+        "assignment": 150,
         "project": 720,
         "paper": 480,
         "lab": 180,

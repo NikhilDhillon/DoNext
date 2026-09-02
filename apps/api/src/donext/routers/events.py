@@ -7,6 +7,7 @@ from sqlalchemy import select
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import FixedEvent
+from donext.routers.courses import owned_course
 from donext.routers.semesters import owned_semester
 from donext.schemas import FixedEventCreate, FixedEventRead, FixedEventUpdate
 
@@ -39,6 +40,10 @@ def list_events(
 def create_event(payload: FixedEventCreate, db: DbSession, current_user: CurrentUser) -> FixedEvent:
     if payload.semester_id:
         owned_semester(db, current_user.id, payload.semester_id)
+    if payload.course_id:
+        course = owned_course(db, current_user.id, payload.course_id)
+        if payload.semester_id != course.semester_id:
+            raise ApiError("VALIDATION_ERROR", "Class course and semester must match.", 422)
     event = FixedEvent(user_id=current_user.id, **payload.model_dump())
     db.add(event)
     db.commit()
@@ -63,6 +68,15 @@ def update_event(
     semester_id = values.get("semester_id", event.semester_id)
     if semester_id:
         owned_semester(db, current_user.id, semester_id)
+    course_id = values.get("course_id", event.course_id)
+    category = values.get("category", event.category)
+    meeting_kind = values.get("meeting_kind", event.meeting_kind)
+    if category == "class" and (course_id is None or meeting_kind is None):
+        raise ApiError("VALIDATION_ERROR", "Class events require a course and meeting type.", 422)
+    if course_id:
+        course = owned_course(db, current_user.id, course_id)
+        if semester_id != course.semester_id:
+            raise ApiError("VALIDATION_ERROR", "Class course and semester must match.", 422)
     start_at = values.get("start_at", event.start_at)
     end_at = values.get("end_at", event.end_at)
     if end_at <= start_at:

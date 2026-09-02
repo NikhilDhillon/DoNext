@@ -274,6 +274,8 @@ def test_core_planning_crud(client: TestClient) -> None:
         json={
             "title": "Algorithms lecture",
             "semester_id": semester["id"],
+            "course_id": course["id"],
+            "meeting_kind": "lecture",
             "category": "class",
             "start_at": "2026-09-08T09:00:00-07:00",
             "end_at": "2026-09-08T10:20:00-07:00",
@@ -370,26 +372,28 @@ def test_planning_preferences_can_be_read_and_updated(client: TestClient) -> Non
 
     defaults = client.get("/api/v1/preferences")
     assert defaults.status_code == 200
-    assert defaults.json()["preferred_sleep_minutes"] == 480
-    assert defaults.json()["preserve_free_time_percent"] == 15
+    assert defaults.json()["minimum_sleep_minutes"] == 420
+    assert "preferred_sleep_minutes" not in defaults.json()
+    assert "preserve_free_time_percent" not in defaults.json()
 
     updated = client.patch(
         "/api/v1/preferences",
         json={
             "minimum_sleep_minutes": 450,
-            "preferred_sleep_minutes": 510,
             "preferred_session_minutes": 45,
             "freeze_window_minutes": 180,
-            "preserve_free_time_percent": 20,
         },
     )
     assert updated.status_code == 200
-    assert updated.json()["preferred_sleep_minutes"] == 510
     assert updated.json()["freeze_window_minutes"] == 180
 
     invalid = client.patch(
         "/api/v1/preferences",
-        json={"minimum_sleep_minutes": 540, "preferred_sleep_minutes": 480},
+        json={
+            "minimum_sleep_minutes": 540,
+            "default_sleep_time": "01:00:00",
+            "default_wake_time": "08:00:00",
+        },
     )
     assert invalid.status_code == 422
     assert invalid.json()["error"]["code"] == "VALIDATION_ERROR"

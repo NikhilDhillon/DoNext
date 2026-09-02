@@ -1,10 +1,9 @@
 import hashlib
 import json
 import logging
-import math
 import uuid
 from collections import Counter
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
@@ -13,17 +12,23 @@ from fastapi import APIRouter
 from sqlalchemy import Table, func, select
 from sqlalchemy.orm import selectinload
 
-from donext.academic_planning import AcademicPlanningInput, plan_academic_sessions
+from donext.academic_impact import calculate_weights
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
     AcademicItemType,
+    AssessmentGroup,
     AvailabilityWindow,
     Course,
+    CourseDeliveryMode,
+    EstimateOrigin,
     FixedEvent,
     Goal,
     GoalStatus,
+    GradingScheme,
+    GradingSchemeComponent,
+    MeetingKind,
     ScheduledBlock,
     ScheduleStatus,
     ScheduleVersion,
@@ -53,34 +58,29 @@ from donext.schedule_revision import (
 from donext.scheduler import (
     SchedulingItem,
     SchedulingPolicy,
+    SchedulingResult,
     SchedulingWindow,
-    SessionBlueprint,
-    session_durations,
     solve_schedule,
 )
 from donext.schemas import (
+    ExtraFocusDecision,
+    GenerationBlockingInput,
+    GenerationExamRequirement,
     ProposalSummaryRead,
     ScheduleBlockCreate,
     ScheduleBlockRead,
     ScheduleBlockUpdate,
+    ScheduleGenerationRequirementsRead,
+    ScheduleProposalGenerate,
     ScheduleProposalRead,
     ScheduleRevisionRequest,
+    sleep_window_minutes,
 )
 
 router = APIRouter(tags=["schedule proposals"])
 logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"optional": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
-PLANNING_LEAD_DAYS = {
-    AcademicItemType.final_exam: 28,
-    AcademicItemType.midterm: 28,
-    AcademicItemType.project: 21,
-    AcademicItemType.presentation: 21,
-    AcademicItemType.assignment: 14,
-    AcademicItemType.lab: 14,
-    AcademicItemType.quiz: 7,
-    AcademicItemType.reading: 7,
-    AcademicItemType.other: 14,
-}
+ROLLOVER_BUFFER_MINUTES = 60
 COMPLETE_TIMEOUT_WARNING = "Everything fits. Regenerate for a different arrangement."
 PARTIAL_TIMEOUT_WARNING = (
     "Some work did not fit \u2014 see unresolved items below. "
@@ -89,70 +89,40 @@ PARTIAL_TIMEOUT_WARNING = (
 
 
 @dataclass(frozen=True)
-class CourseMeetings:
-    """When a course actually meets, used to keep preparation behind its first lecture."""
-
-    first_meeting: date | None
-    horizon_dates: tuple[date, ...]
+class CourseReadiness:
+    ready_at: datetime | None
+    source: Literal["lecture", "asynchronous", "missing"]
 
 
-def _titles_course(title: str, code: str) -> bool:
-    """Class events carry no course id, so they are matched by the code that titles them.
-
-    The boundary check stops a shorter code such as "CSC 37" from claiming "CSC 370".
-    """
-    normalized_title = " ".join(title.split()).casefold()
-    normalized_code = " ".join(code.split()).casefold()
-    if not normalized_code or not normalized_title.startswith(normalized_code):
-        return False
-    remainder = normalized_title[len(normalized_code) :]
-    return not remainder or not remainder[0].isalnum()
-
-
-def _lecture_ready_dates(
-    candidate_dates: tuple[date, ...], first_meeting: date | None
-) -> tuple[date, ...]:
-    """Drop dates before a course has met, so preparation never precedes the first lecture.
-
-    When the clamp would leave nowhere to work at all - an assessment falling due before its
-    course begins - the deadline wins and the original dates stand, rather than silently
-    dropping the assessment out of the plan.
-    """
-    if first_meeting is None:
-        return candidate_dates
-    lecture_ready = tuple(value for value in candidate_dates if value >= first_meeting)
-    return lecture_ready or candidate_dates
-
-
-def _course_meetings(
+def _course_readiness(
     events: list[FixedEvent],
-    occurrences: list[EventOccurrence],
     courses: list[Course],
     timezone: ZoneInfo,
-) -> dict[uuid.UUID, CourseMeetings]:
-    meetings: dict[uuid.UUID, CourseMeetings] = {}
+) -> dict[uuid.UUID, CourseReadiness]:
+    readiness: dict[uuid.UUID, CourseReadiness] = {}
     for course in courses:
-        # The first meeting comes from each series' own start, not from the expanded
-        # occurrences, which only cover the horizon and would misreport a course that
-        # began earlier in the term.
-        series_starts = [
-            aware(event.start_at).astimezone(timezone).date()
+        if course.delivery_mode == CourseDeliveryMode.asynchronous:
+            ready_at = (
+                aware(course.first_content_available_at).astimezone(timezone)
+                if course.first_content_available_at is not None
+                else None
+            )
+            readiness[course.id] = CourseReadiness(
+                ready_at, "asynchronous" if ready_at else "missing"
+            )
+            continue
+        lecture_ends = [
+            aware(event.end_at).astimezone(timezone)
             for event in events
-            if event.category == "class" and _titles_course(event.title, course.code)
+            if event.category == "class"
+            and event.course_id == course.id
+            and event.meeting_kind == MeetingKind.lecture
         ]
-        horizon_dates = sorted(
-            {
-                occurrence.start_at.astimezone(timezone).date()
-                for occurrence in occurrences
-                if occurrence.event.category == "class"
-                and _titles_course(occurrence.event.title, course.code)
-            }
+        readiness[course.id] = CourseReadiness(
+            min(lecture_ends) if lecture_ends else None,
+            "lecture" if lecture_ends else "missing",
         )
-        meetings[course.id] = CourseMeetings(
-            first_meeting=min(series_starts) if series_starts else None,
-            horizon_dates=tuple(horizon_dates),
-        )
-    return meetings
+    return readiness
 
 
 class FingerprintRecord(Protocol):
@@ -219,15 +189,134 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
     )
 
 
+def _horizon(semester: Semester, timezone: ZoneInfo) -> tuple[date, date]:
+    today = datetime.now(UTC).astimezone(timezone).date()
+    start = max(today, semester.start_date)
+    return start, min(start + timedelta(days=13), semester.end_date)
+
+
+def _generation_requirements(
+    db: DbSession, user: User, semester: Semester
+) -> ScheduleGenerationRequirementsRead:
+    timezone = resolve_timezone(user.timezone)
+    horizon_start, horizon_end = _horizon(semester, timezone)
+    courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
+    course_by_id = {course.id: course for course in courses}
+    course_ids = list(course_by_id)
+    items = (
+        list(db.scalars(select(AcademicItem).where(AcademicItem.course_id.in_(course_ids))))
+        if course_ids
+        else []
+    )
+    tasks = list(
+        db.scalars(
+            select(Task).where(
+                Task.user_id == user.id,
+                Task.academic_item_id.in_([item.id for item in items]),
+                Task.status.in_((TaskStatus.pending, TaskStatus.in_progress)),
+            )
+        )
+    )
+    task_by_item = {task.academic_item_id: task for task in tasks}
+    events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == user.id)))
+    readiness = _course_readiness(events, courses, timezone)
+    exams: list[GenerationExamRequirement] = []
+    blocking: list[GenerationBlockingInput] = []
+    blocked_courses: set[uuid.UUID] = set()
+    for item in items:
+        task = task_by_item.get(item.id)
+        if item.due_at is None or task is None:
+            continue
+        due_at = aware(item.due_at).astimezone(timezone)
+        if (
+            item.item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}
+            and horizon_start <= due_at.date() <= horizon_end
+            and task.estimate_origin == EstimateOrigin.pending_exam
+        ):
+            course = course_by_id[item.course_id]
+            exams.append(
+                GenerationExamRequirement(
+                    academic_item_id=item.id,
+                    task_id=task.id,
+                    course_code=course.code,
+                    name=item.name,
+                    due_at=due_at,
+                    default_minutes=480,
+                )
+            )
+        if item.item_type == AcademicItemType.assignment:
+            course_readiness = readiness.get(item.course_id)
+            if (
+                course_readiness is None or course_readiness.ready_at is None
+            ) and item.course_id not in blocked_courses:
+                blocked_courses.add(item.course_id)
+                course = course_by_id[item.course_id]
+                blocking.append(
+                    GenerationBlockingInput(
+                        code="COURSE_READINESS_MISSING",
+                        course_id=course.id,
+                        message=(
+                            f"{course.code} needs a lecture or asynchronous content-available "
+                            "time before assignments can be scheduled."
+                        ),
+                    )
+                )
+    return ScheduleGenerationRequirementsRead(
+        horizon_start=horizon_start,
+        horizon_end=horizon_end,
+        exams=exams,
+        blocking_inputs=blocking,
+    )
+
+
+@router.get(
+    "/semesters/{semester_id}/schedule/generation-requirements",
+    response_model=ScheduleGenerationRequirementsRead,
+)
+def generation_requirements(
+    semester_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> ScheduleGenerationRequirementsRead:
+    semester = owned_semester(db, current_user.id, semester_id)
+    return _generation_requirements(db, current_user, semester)
+
+
 @router.post(
     "/semesters/{semester_id}/schedule/proposals",
     response_model=ScheduleProposalRead,
     status_code=201,
 )
 def generate_proposal(
-    semester_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+    semester_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+    payload: ScheduleProposalGenerate | None = None,
 ) -> ScheduleProposalRead:
-    proposal = _build_proposal(db, current_user, semester_id)
+    semester = owned_semester(db, current_user.id, semester_id)
+    requirements = _generation_requirements(db, current_user, semester)
+    if requirements.exams:
+        raise ApiError(
+            "SCHEDULER_ESTIMATE_REQUIRED",
+            "Choose preparation time for the exams inside this plan.",
+            409,
+            {"exams": [exam.model_dump(mode="json") for exam in requirements.exams]},
+        )
+    if requirements.blocking_inputs:
+        raise ApiError(
+            "SCHEDULER_INPUT_INCOMPLETE",
+            "Confirm course readiness before generating this schedule.",
+            422,
+            {
+                "blocking_inputs": [
+                    item.model_dump(mode="json") for item in requirements.blocking_inputs
+                ]
+            },
+        )
+    proposal = _build_proposal(
+        db,
+        current_user,
+        semester_id,
+        extra_focus_decision=payload.extra_focus_decision if payload else None,
+    )
     db.commit()
     return proposal_read(db, current_user, owned_proposal(db, current_user.id, proposal.id))
 
@@ -239,12 +328,11 @@ def _build_proposal(
     *,
     revision_of: ScheduleVersion | None = None,
     interpretation: RevisionInterpretation | None = None,
+    extra_focus_decision: ExtraFocusDecision | None = None,
 ) -> ScheduleVersion:
     semester = owned_semester(db, current_user.id, semester_id)
     timezone = resolve_timezone(current_user.timezone)
-    today = datetime.now(UTC).astimezone(timezone).date()
-    horizon_start = max(today, semester.start_date)
-    horizon_end = min(horizon_start + timedelta(days=13), semester.end_date)
+    horizon_start, horizon_end = _horizon(semester, timezone)
     if horizon_end < horizon_start:
         raise ApiError("SCHEDULER_INPUT_INCOMPLETE", "The semester has already ended.", 422)
 
@@ -270,6 +358,7 @@ def _build_proposal(
             ScheduleVersion.user_id == current_user.id
         )
     )
+    current_input_fingerprint = input_fingerprint(db, current_user, semester_id)
     proposal = ScheduleVersion(
         user_id=current_user.id,
         semester_id=semester_id,
@@ -284,7 +373,7 @@ def _build_proposal(
         status=ScheduleStatus.proposed,
         horizon_start=horizon_start,
         horizon_end=horizon_end,
-        input_fingerprint=input_fingerprint(db, current_user, semester_id),
+        input_fingerprint=current_input_fingerprint,
         revision_feedback=(
             {
                 "policy": interpretation.policy.model_dump(mode="json"),
@@ -327,7 +416,8 @@ def _build_proposal(
     preferred_session_minutes = _preferred_session_minutes(
         preferences.preferred_session_minutes, policy
     )
-    items, item_links, warnings, academic_planning_source = _scheduling_items(
+    courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
+    items, item_links, warnings = _scheduling_items(
         db,
         current_user.id,
         semester,
@@ -336,24 +426,147 @@ def _build_proposal(
         preserved,
         preferred_session_minutes,
         timezone,
-        tuple(sorted({window.start_at.date() for window in windows})),
-        _course_meetings(
-            events,
-            occurrences,
-            list(db.scalars(select(Course).where(Course.semester_id == semester.id))),
-            timezone,
-        ),
+        windows,
+        _course_readiness(events, courses, timezone),
     )
-    if policy is not None:
-        items = _apply_item_adjustments(items, item_links, policy)
     scheduler_policy = _scheduler_policy(policy)
+    solve_seconds = 3.0 if revision_of is not None else 5.0
     result = solve_schedule(
         items,
         windows,
         preferences.minimum_break_minutes,
-        time_limit_seconds=3.0 if revision_of is not None else 5.0,
+        time_limit_seconds=solve_seconds,
         policy=scheduler_policy,
     )
+    used_windows = windows
+    used_buffer = False
+    used_extra_focus = False
+    sleep_reduction = 0
+
+    urgent_shortfall = any(
+        item.risk_tier >= 4
+        and item.kind in {"task", "exam_prep"}
+        and result.scheduled_minutes[item.id] < item.target_minutes
+        for item in items
+    )
+    if urgent_shortfall:
+        buffer_windows = _scheduling_windows(
+            horizon_start,
+            horizon_end,
+            availability,
+            occurrences,
+            preserved,
+            preferences,
+            timezone,
+            freeze_until.astimezone(timezone),
+            release_buffer=True,
+        )
+        if policy is not None:
+            buffer_windows = _apply_avoid_time_ranges(buffer_windows, policy, timezone)
+        buffer_result = solve_schedule(
+            items,
+            buffer_windows,
+            preferences.minimum_break_minutes,
+            time_limit_seconds=solve_seconds,
+            policy=scheduler_policy,
+        )
+        if _required_academic_minutes(items, buffer_result) > _required_academic_minutes(
+            items, result
+        ):
+            result = buffer_result
+            used_windows = buffer_windows
+            used_buffer = True
+
+    if _required_academic_shortfall(items, result):
+        extra_windows = _scheduling_windows(
+            horizon_start,
+            horizon_end,
+            availability,
+            occurrences,
+            preserved,
+            preferences,
+            timezone,
+            freeze_until.astimezone(timezone),
+            release_buffer=used_buffer,
+            remove_focus_cap=True,
+        )
+        if policy is not None:
+            extra_windows = _apply_avoid_time_ranges(extra_windows, policy, timezone)
+        extra_result = solve_schedule(
+            items,
+            extra_windows,
+            preferences.minimum_break_minutes,
+            time_limit_seconds=solve_seconds,
+            policy=scheduler_policy,
+        )
+        extra_by_day = _additional_minutes_by_day(result, extra_result, timezone)
+        if extra_by_day and _required_academic_minutes(
+            items, extra_result
+        ) > _required_academic_minutes(items, result):
+            request_fingerprint = _extra_focus_fingerprint(current_input_fingerprint, extra_by_day)
+            decision_matches = (
+                extra_focus_decision is not None
+                and extra_focus_decision.request_fingerprint == request_fingerprint
+            )
+            if extra_focus_decision is None or not decision_matches:
+                protected = _protected_work(items, result)
+                db.rollback()
+                raise ApiError(
+                    "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED",
+                    "Required academic work needs focus time above your preferred limit.",
+                    409,
+                    {
+                        "request_fingerprint": request_fingerprint,
+                        "total_extra_minutes": sum(extra_by_day.values()),
+                        "extra_minutes_by_day": [
+                            {"date": day.isoformat(), "minutes": minutes}
+                            for day, minutes in sorted(extra_by_day.items())
+                        ],
+                        "resulting_focus_by_day": _scheduled_minutes_by_day(extra_result, timezone),
+                        "protected_work": protected,
+                    },
+                )
+            if extra_focus_decision.approved:
+                result = extra_result
+                used_windows = extra_windows
+                used_extra_focus = True
+
+    if _required_academic_shortfall(items, result):
+        preferred_sleep = sleep_window_minutes(
+            preferences.default_sleep_time, preferences.default_wake_time
+        )
+        maximum_reduction = max(preferred_sleep - preferences.minimum_sleep_minutes, 0)
+        for reduction in range(15, maximum_reduction + 1, 15):
+            sleep_windows = _scheduling_windows(
+                horizon_start,
+                horizon_end,
+                availability,
+                occurrences,
+                preserved,
+                preferences,
+                timezone,
+                freeze_until.astimezone(timezone),
+                release_buffer=used_buffer,
+                remove_focus_cap=used_extra_focus,
+                sleep_reduction_minutes=reduction,
+            )
+            if policy is not None:
+                sleep_windows = _apply_avoid_time_ranges(sleep_windows, policy, timezone)
+            sleep_result = solve_schedule(
+                items,
+                sleep_windows,
+                preferences.minimum_break_minutes,
+                time_limit_seconds=min(solve_seconds, 1.0),
+                policy=scheduler_policy,
+            )
+            if _required_academic_minutes(items, sleep_result) > _required_academic_minutes(
+                items, result
+            ):
+                result = sleep_result
+                used_windows = sleep_windows
+                sleep_reduction = reduction
+            if not _required_academic_shortfall(items, result):
+                break
     for placement in result.placements:
         task_id, goal_id, block_type = item_links[placement.item_id]
         db.add(
@@ -370,11 +583,20 @@ def _build_proposal(
                 source="generated",
                 stability_weight=0.5,
                 reason_code=placement.reason_code,
-                reason_details=placement.reason_details,
+                reason_details=_placement_capacity_details(
+                    placement.reason_details,
+                    placement.start_at,
+                    windows,
+                    result,
+                    timezone,
+                    used_buffer,
+                    used_extra_focus,
+                    sleep_reduction,
+                ),
             )
         )
     scheduled_total = sum(result.scheduled_minutes.values())
-    unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links, windows)
+    unscheduled = _unscheduled_summary(items, result.scheduled_minutes, item_links, used_windows)
     if result.timed_out:
         warnings.append(_solver_timeout_warning(has_unscheduled=bool(unscheduled)))
     proposal.generation_summary = ProposalSummaryRead(
@@ -387,7 +609,33 @@ def _build_proposal(
         eligible_capacity_minutes=result.eligible_capacity_minutes,
         protected_free_minutes=result.protected_free_minutes,
         solver_runtime_ms=result.runtime_ms,
-        academic_planning_source=academic_planning_source,
+        academic_requested_minutes=sum(
+            item.target_minutes for item in items if item.kind in {"task", "exam_prep"}
+        ),
+        academic_scheduled_minutes=sum(
+            result.scheduled_minutes[item.id]
+            for item in items
+            if item.kind in {"task", "exam_prep"}
+        ),
+        opportunistic_scheduled_minutes=sum(
+            result.scheduled_minutes[item.id] for item in items if item.kind == "distant_task"
+        ),
+        exam_preparation=_exam_summary(db, items, item_links, result),
+        flexible_adjustments=_flexible_adjustments(items, result),
+        rollover_by_day=_rollover_summary(windows, result, timezone, used_buffer),
+        extra_focus_by_day=(
+            _additional_minutes_summary(windows, result, timezone, used_buffer)
+            if used_extra_focus
+            else []
+        ),
+        sleep_by_day=_sleep_summary(
+            horizon_start,
+            horizon_end,
+            preferences,
+            sleep_reduction,
+            result,
+            timezone,
+        ),
         preserved_blocks=len(preserved),
         generated_blocks=len(result.placements),
         warnings=warnings,
@@ -738,6 +986,60 @@ def input_fingerprint(db: DbSession, user: User, semester_id: uuid.UUID) -> str:
                 name = str(column.name)
                 if name not in {"id", "created_at", "updated_at", "user_id"}:
                     rows.append(getattr(record, name))
+    courses = list(
+        db.scalars(select(Course).where(Course.semester_id == semester_id).order_by(Course.id))
+    )
+    course_ids = [course.id for course in courses]
+    academic_items = (
+        list(
+            db.scalars(
+                select(AcademicItem)
+                .where(AcademicItem.course_id.in_(course_ids))
+                .order_by(AcademicItem.id)
+            )
+        )
+        if course_ids
+        else []
+    )
+    groups = (
+        list(
+            db.scalars(
+                select(AssessmentGroup)
+                .where(AssessmentGroup.course_id.in_(course_ids))
+                .order_by(AssessmentGroup.id)
+            )
+        )
+        if course_ids
+        else []
+    )
+    schemes = (
+        list(
+            db.scalars(
+                select(GradingScheme)
+                .where(GradingScheme.course_id.in_(course_ids))
+                .order_by(GradingScheme.id)
+            )
+        )
+        if course_ids
+        else []
+    )
+    scheme_ids = [scheme.id for scheme in schemes]
+    components = (
+        list(
+            db.scalars(
+                select(GradingSchemeComponent)
+                .where(GradingSchemeComponent.grading_scheme_id.in_(scheme_ids))
+                .order_by(GradingSchemeComponent.id)
+            )
+        )
+        if scheme_ids
+        else []
+    )
+    for source_record in [*courses, *academic_items, *groups, *schemes, *components]:
+        for source_column in source_record.__table__.columns:
+            name = str(source_column.name)
+            if name not in {"created_at", "updated_at"}:
+                rows.append(getattr(source_record, name))
     accepted = _accepted_schedule(db, user.id, semester_id)
     if accepted:
         rows.extend((accepted.id, accepted.updated_at))
@@ -828,6 +1130,10 @@ def _scheduling_windows(
     preferences: UserPreference,
     timezone: ZoneInfo,
     not_before: datetime,
+    *,
+    release_buffer: bool = False,
+    remove_focus_cap: bool = False,
+    sleep_reduction_minutes: int = 0,
 ) -> list[SchedulingWindow]:
     windows: list[SchedulingWindow] = []
     for offset in range((end_date - start_date).days + 1):
@@ -855,6 +1161,10 @@ def _scheduling_windows(
             sleep_start_date, preferences.default_sleep_time, tzinfo=timezone
         )
         wake = datetime.combine(current, preferences.default_wake_time, tzinfo=timezone)
+        later_bedtime = sleep_reduction_minutes // 2
+        earlier_wake = sleep_reduction_minutes - later_bedtime
+        sleep_start += timedelta(minutes=later_bedtime)
+        wake -= timedelta(minutes=earlier_wake)
         day_end = datetime.combine(current + timedelta(days=1), time.min, tzinfo=timezone)
         exclusions.extend(
             [
@@ -864,12 +1174,16 @@ def _scheduling_windows(
         )
         open_intervals = subtract_intervals(available, exclusions)
         open_minutes = interval_minutes(open_intervals)
-        focus_limited_minutes = min(open_minutes, preferences.maximum_daily_focus_minutes)
-        usable = math.floor(
-            focus_limited_minutes * (100 - preferences.preserve_free_time_percent) / 100
+        focus_limited_minutes = (
+            open_minutes
+            if remove_focus_cap
+            else min(open_minutes, preferences.maximum_daily_focus_minutes)
         )
+        protected_free = (
+            0 if release_buffer else min(ROLLOVER_BUFFER_MINUTES, focus_limited_minutes)
+        )
+        usable = max(focus_limited_minutes - protected_free, 0)
         usable -= usable % 5
-        protected_free = focus_limited_minutes - usable
         for start_at, end_at in open_intervals:
             duration = round((end_at - start_at).total_seconds() / 60)
             duration -= duration % 5
@@ -941,30 +1255,6 @@ def _preferred_session_minutes(current: int, policy: ScheduleRevisionPolicy | No
     return min(max(current + change, 15), 240)
 
 
-def _apply_item_adjustments(
-    items: list[SchedulingItem],
-    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
-    policy: ScheduleRevisionPolicy,
-) -> list[SchedulingItem]:
-    adjustments = {adjustment.source_id: adjustment for adjustment in policy.item_adjustments}
-    revised: list[SchedulingItem] = []
-    for item in items:
-        task_id, goal_id, _block_type = links[item.id]
-        source_id = f"task:{task_id}" if task_id is not None else f"goal:{goal_id}"
-        adjustment = adjustments.get(source_id)
-        if adjustment is None:
-            revised.append(item)
-            continue
-        direction = 1 if adjustment.direction == "more" else -1
-        revised.append(
-            replace(
-                item,
-                priority_rank=min(max(item.priority_rank + direction * adjustment.weight, 0), 4),
-            )
-        )
-    return revised
-
-
 def _scheduler_policy(policy: ScheduleRevisionPolicy | None) -> SchedulingPolicy | None:
     if policy is None:
         return None
@@ -976,6 +1266,275 @@ def _scheduler_policy(policy: ScheduleRevisionPolicy | None) -> SchedulingPolicy
     )
 
 
+def _required_academic_minutes(items: list[SchedulingItem], result: SchedulingResult) -> int:
+    scheduled = result.scheduled_minutes
+    return sum(
+        scheduled[item.id] for item in items if item.required and item.kind in {"task", "exam_prep"}
+    )
+
+
+def _required_academic_shortfall(items: list[SchedulingItem], result: SchedulingResult) -> bool:
+    scheduled = result.scheduled_minutes
+    return any(
+        item.required
+        and item.kind in {"task", "exam_prep"}
+        and scheduled[item.id] < item.target_minutes
+        for item in items
+    )
+
+
+def _scheduled_minutes_by_day(
+    result: SchedulingResult, timezone: ZoneInfo
+) -> list[dict[str, object]]:
+    totals: dict[date, int] = {}
+    for placement in result.placements:
+        start_at = placement.start_at.astimezone(timezone)
+        end_at = placement.end_at.astimezone(timezone)
+        totals[start_at.date()] = totals.get(start_at.date(), 0) + round(
+            (end_at - start_at).total_seconds() / 60
+        )
+    return [
+        {"date": day.isoformat(), "minutes": minutes} for day, minutes in sorted(totals.items())
+    ]
+
+
+def _additional_minutes_by_day(
+    baseline: SchedulingResult, expanded: SchedulingResult, timezone: ZoneInfo
+) -> dict[date, int]:
+    def totals(result: SchedulingResult) -> dict[date, int]:
+        return {
+            date.fromisoformat(cast(str, row["date"])): cast(int, row["minutes"])
+            for row in _scheduled_minutes_by_day(result, timezone)
+        }
+
+    baseline_totals = totals(baseline)
+    return {
+        day: minutes - baseline_totals.get(day, 0)
+        for day, minutes in totals(expanded).items()
+        if minutes > baseline_totals.get(day, 0)
+    }
+
+
+def _extra_focus_fingerprint(input_value: str, extra_by_day: dict[date, int]) -> str:
+    encoded = json.dumps(
+        [input_value, [(day.isoformat(), value) for day, value in sorted(extra_by_day.items())]],
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _protected_work(
+    items: list[SchedulingItem], result: SchedulingResult
+) -> list[dict[str, object]]:
+    scheduled = result.scheduled_minutes
+    return [
+        {
+            "id": item.id,
+            "name": item.title,
+            "deadline": item.due_at.isoformat() if item.due_at else None,
+            "remaining_minutes": item.target_minutes - scheduled[item.id],
+        }
+        for item in items
+        if item.required
+        and item.kind in {"task", "exam_prep"}
+        and scheduled[item.id] < item.target_minutes
+    ]
+
+
+def _window_cap_by_day(windows: list[SchedulingWindow]) -> dict[date, int]:
+    result: dict[date, int] = {}
+    for window in windows:
+        day = window.start_at.date()
+        if window.daily_capacity_minutes is not None:
+            result[day] = window.daily_capacity_minutes
+    return result
+
+
+def _rollover_summary(
+    normal_windows: list[SchedulingWindow],
+    result: SchedulingResult,
+    timezone: ZoneInfo,
+    used_buffer: bool,
+) -> list[dict[str, object]]:
+    normal_caps = _window_cap_by_day(normal_windows)
+    protected = {
+        day: max(
+            window.protected_free_minutes
+            for window in normal_windows
+            if window.start_at.date() == day
+        )
+        for day in normal_caps
+    }
+    scheduled = {
+        date.fromisoformat(cast(str, row["date"])): cast(int, row["minutes"])
+        for row in _scheduled_minutes_by_day(result, timezone)
+    }
+    return [
+        {
+            "date": day.isoformat(),
+            "retained_minutes": protected[day] - consumed,
+            "consumed_minutes": consumed,
+        }
+        for day, cap in sorted(normal_caps.items())
+        if (
+            consumed := min(
+                max(scheduled.get(day, 0) - cap, 0) if used_buffer else 0,
+                protected[day],
+            )
+        )
+        or cap >= 0
+    ]
+
+
+def _additional_minutes_summary(
+    normal_windows: list[SchedulingWindow],
+    result: SchedulingResult,
+    timezone: ZoneInfo,
+    used_buffer: bool,
+) -> list[dict[str, object]]:
+    caps = _window_cap_by_day(normal_windows)
+    return [
+        {
+            "date": cast(str, row["date"]),
+            "approved_minutes": extra,
+            "used_minutes": extra,
+        }
+        for row in _scheduled_minutes_by_day(result, timezone)
+        if (
+            extra := max(
+                cast(int, row["minutes"])
+                - caps.get(date.fromisoformat(cast(str, row["date"])), 0)
+                - (ROLLOVER_BUFFER_MINUTES if used_buffer else 0),
+                0,
+            )
+        )
+    ]
+
+
+def _placement_capacity_details(
+    original: dict[str, object],
+    start_at: datetime,
+    normal_windows: list[SchedulingWindow],
+    result: SchedulingResult,
+    timezone: ZoneInfo,
+    used_buffer: bool,
+    used_extra_focus: bool,
+    sleep_reduction: int,
+) -> dict[str, object]:
+    day = start_at.astimezone(timezone).date()
+    caps = _window_cap_by_day(normal_windows)
+    totals = {
+        date.fromisoformat(cast(str, row["date"])): cast(int, row["minutes"])
+        for row in _scheduled_minutes_by_day(result, timezone)
+    }
+    above_normal = max(totals.get(day, 0) - caps.get(day, 0), 0)
+    return {
+        **original,
+        "rollover_capacity_used": used_buffer and above_normal > 0,
+        "extra_focus_capacity_used": (
+            used_extra_focus and above_normal > (ROLLOVER_BUFFER_MINUTES if used_buffer else 0)
+        ),
+        "reduced_sleep_capacity_used": sleep_reduction > 0,
+        "sleep_reduction_minutes": sleep_reduction,
+    }
+
+
+def _sleep_summary(
+    start_date: date,
+    end_date: date,
+    preferences: UserPreference,
+    reduction: int,
+    result: SchedulingResult,
+    timezone: ZoneInfo,
+) -> list[dict[str, object]]:
+    if reduction <= 0:
+        return []
+    preferred = sleep_window_minutes(preferences.default_sleep_time, preferences.default_wake_time)
+    summary: list[dict[str, object]] = []
+    later_limit = reduction // 2
+    earlier_limit = reduction - later_limit
+    for offset in range((end_date - start_date).days + 1):
+        day = start_date + timedelta(days=offset)
+        wake = datetime.combine(day, preferences.default_wake_time, tzinfo=timezone)
+        sleep_day = day + timedelta(days=1) if preferences.default_sleep_time == time.min else day
+        bedtime = datetime.combine(sleep_day, preferences.default_sleep_time, tzinfo=timezone)
+        earlier_used = 0
+        later_used = 0
+        for placement in result.placements:
+            block_start = placement.start_at.astimezone(timezone)
+            block_end = placement.end_at.astimezone(timezone)
+            if block_start.date() != day:
+                continue
+            if block_start < wake:
+                earlier_used = max(
+                    earlier_used,
+                    min(round((wake - block_start).total_seconds() / 60), earlier_limit),
+                )
+            if block_end > bedtime:
+                later_used = max(
+                    later_used,
+                    min(round((block_end - bedtime).total_seconds() / 60), later_limit),
+                )
+        actual_reduction = earlier_used + later_used
+        if actual_reduction <= 0:
+            continue
+        summary.append(
+            {
+                "date": day.isoformat(),
+                "preferred_minutes": preferred,
+                "planned_minutes": preferred - actual_reduction,
+                "reduction_minutes": actual_reduction,
+                "minimum_minutes": preferences.minimum_sleep_minutes,
+            }
+        )
+    return summary
+
+
+def _exam_summary(
+    db: DbSession,
+    items: list[SchedulingItem],
+    links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
+    result: SchedulingResult,
+) -> list[dict[str, object]]:
+    scheduled = result.scheduled_minutes
+    summary: list[dict[str, object]] = []
+    for item in items:
+        if item.kind != "exam_prep":
+            continue
+        task_id = links[item.id][0]
+        task = db.get(Task, task_id) if task_id else None
+        summary.append(
+            {
+                "task_id": task_id,
+                "name": item.title,
+                "deadline": item.due_at,
+                "total_estimate_minutes": item.target_minutes,
+                "remaining_prep_minutes": item.target_minutes - scheduled[item.id],
+                "estimate_source": task.estimate_origin.value if task else "manual",
+                "scheduled_prep_minutes": scheduled[item.id],
+            }
+        )
+    return summary
+
+
+def _flexible_adjustments(
+    items: list[SchedulingItem], result: SchedulingResult
+) -> list[dict[str, object]]:
+    scheduled = result.scheduled_minutes
+    return [
+        {
+            "id": item.id,
+            "name": item.title,
+            "requested_minutes": item.target_minutes,
+            "scheduled_minutes": scheduled[item.id],
+            "reduced_minutes": item.target_minutes - scheduled[item.id],
+            "omitted": scheduled[item.id] == 0,
+        }
+        for item in items
+        if item.kind in {"goal", "flexible_commitment"} and scheduled[item.id] < item.target_minutes
+    ]
+
+
 def _scheduling_items(
     db: DbSession,
     user_id: uuid.UUID,
@@ -985,13 +1544,12 @@ def _scheduling_items(
     preserved: list[ScheduledBlock],
     preferred_session_minutes: int,
     timezone: ZoneInfo,
-    available_dates: tuple[date, ...],
-    class_meetings: dict[uuid.UUID, CourseMeetings],
+    windows: list[SchedulingWindow],
+    course_readiness: dict[uuid.UUID, CourseReadiness],
 ) -> tuple[
     list[SchedulingItem],
     dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
     list[str],
-    Literal["openai", "fallback", "mixed", "none"],
 ]:
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
     course_ids = {course.id for course in courses}
@@ -1000,6 +1558,28 @@ def _scheduling_items(
         db.scalars(select(AcademicItem).where(AcademicItem.course_id.in_(course_ids)))
     )
     academic_items_by_id = {item.id: item for item in academic_items}
+    weights_by_item: dict[object, object] = {}
+    for course in courses:
+        course_items = [item for item in academic_items if item.course_id == course.id]
+        groups = list(
+            db.scalars(select(AssessmentGroup).where(AssessmentGroup.course_id == course.id))
+        )
+        schemes = list(
+            db.scalars(select(GradingScheme).where(GradingScheme.course_id == course.id))
+        )
+        scheme_ids = [scheme.id for scheme in schemes]
+        components = (
+            list(
+                db.scalars(
+                    select(GradingSchemeComponent).where(
+                        GradingSchemeComponent.grading_scheme_id.in_(scheme_ids)
+                    )
+                )
+            )
+            if scheme_ids
+            else []
+        )
+        weights_by_item.update(calculate_weights(course_items, groups, schemes, components))
     goals = list(
         db.scalars(
             select(Goal).where(
@@ -1033,8 +1613,34 @@ def _scheduling_items(
     items: list[SchedulingItem] = []
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
-    academic_planning_inputs: list[AcademicPlanningInput] = []
     invalid_deadlines: dict[str, list[tuple[str, date]]] = {}
+    task_by_academic_item = {
+        task.academic_item_id: task for task in tasks if task.academic_item_id is not None
+    }
+    active_exams_by_course: dict[uuid.UUID, list[tuple[AcademicItem, Task]]] = {}
+    for academic_item in academic_items:
+        exam_task = task_by_academic_item.get(academic_item.id)
+        if (
+            exam_task is None
+            or academic_item.due_at is None
+            or academic_item.item_type
+            not in {AcademicItemType.midterm, AcademicItemType.final_exam}
+        ):
+            continue
+        exam_due = aware(academic_item.due_at).astimezone(timezone)
+        if horizon_start <= exam_due.date() <= horizon_end:
+            active_exams_by_course.setdefault(academic_item.course_id, []).append(
+                (academic_item, exam_task)
+            )
+    capacity_by_day: dict[date, int] = {}
+    for window in windows:
+        day = window.start_at.date()
+        duration = round((window.end_at - window.start_at).total_seconds() / 60)
+        raw = capacity_by_day.get(day, 0) + duration
+        capacity_by_day[day] = min(
+            raw,
+            window.daily_capacity_minutes if window.daily_capacity_minutes is not None else raw,
+        )
     for task in sorted(
         tasks,
         key=lambda value: (
@@ -1043,7 +1649,9 @@ def _scheduling_items(
             value.name,
         ),
     ):
-        if task.course_id not in course_ids and task.goal_id not in goal_ids:
+        if task.course_id is not None and task.course_id not in course_ids:
+            continue
+        if task.goal_id is not None and task.goal_id not in goal_ids:
             continue
         if task.deadline_at is None:
             warnings.append(f'"{task.name}" has no confirmed deadline and was not scheduled.')
@@ -1056,23 +1664,68 @@ def _scheduling_items(
             course_code = course_codes.get(task.course_id, "Course")
             invalid_deadlines.setdefault(course_code, []).append((task.name, due_date))
             continue
-        academic_item = (
+        linked_item = (
             academic_items_by_id.get(task.academic_item_id) if task.academic_item_id else None
         )
-        lead_days = PLANNING_LEAD_DAYS[
-            academic_item.item_type if academic_item else AcademicItemType.other
-        ]
-        planning_start_date = due_date - timedelta(days=lead_days - 1)
-        earliest_start_at = datetime.combine(
-            max(semester.start_date, planning_start_date), time.min, tzinfo=timezone
+        item_type = linked_item.item_type if linked_item else AcademicItemType.other
+        is_exam = item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}
+        is_quiz = item_type == AcademicItemType.quiz
+        is_assignment = item_type == AcademicItemType.assignment
+        if is_exam and not (horizon_start <= due_date <= horizon_end):
+            continue
+        if is_exam and task.estimate_origin == EstimateOrigin.pending_exam:
+            warnings.append(f'"{task.name}" needs a preparation estimate before scheduling.')
+            continue
+        if not is_assignment and not is_exam and not is_quiz and due_date > horizon_end:
+            continue
+        if is_quiz and due_date > horizon_end:
+            continue
+
+        earliest_start_at = datetime.combine(semester.start_date, time.min, tzinfo=timezone)
+        readiness = course_readiness.get(task.course_id) if task.course_id else None
+        if is_assignment:
+            if readiness is None or readiness.ready_at is None:
+                course_code = (
+                    course_codes.get(task.course_id, "Course") if task.course_id else "Course"
+                )
+                warnings.append(
+                    f'"{task.name}" is blocked because {course_code} has no confirmed '
+                    "first lecture."
+                )
+                continue
+            if due_at <= readiness.ready_at:
+                warnings.append(
+                    f'"{task.name}" is due before its course becomes ready; '
+                    "correct the course data."
+                )
+                continue
+            earliest_start_at = max(earliest_start_at, readiness.ready_at)
+
+        exam_relationship: str | None = None
+        active_course_exams = (
+            active_exams_by_course.get(task.course_id, []) if task.course_id else []
         )
+        active_course_exams.sort(key=lambda value: aware(value[0].due_at))  # type: ignore[arg-type]
+        if is_assignment and active_course_exams:
+            following_exam = next(
+                (
+                    exam
+                    for exam, _exam_task in active_course_exams
+                    if exam.due_at is not None and due_at <= aware(exam.due_at).astimezone(timezone)
+                ),
+                None,
+            )
+            if following_exam is not None:
+                exam_relationship = "same_course_pre_exam"
+            else:
+                # Post-exam assignments re-enter only after the active exam task is complete.
+                continue
         if task.earliest_start_at is not None:
             earliest_start_at = max(
                 earliest_start_at, aware(task.earliest_start_at).astimezone(timezone)
             )
-        if due_date >= horizon_start and earliest_start_at.date() > horizon_end:
+        if earliest_start_at.date() > horizon_end:
             continue
-        days_to_due = max((due_date - horizon_start).days + 1, 1)
         remaining = max(task.remaining_minutes - preserved_minutes.get(task.id, 0), 0)
         if not remaining:
             continue
@@ -1082,81 +1735,92 @@ def _scheduling_items(
                 f'"{task.name}" was due {due_date.isoformat()} and is being scheduled '
                 "as overdue work."
             )
-        if due_date <= horizon_end:
-            target = remaining
-        else:
-            target = max(
-                task.minimum_session_minutes,
-                math.ceil(remaining * 14 / days_to_due / 5) * 5,
-            )
-            target = min(target, remaining)
+        target = remaining
         identifier = f"task:{task.id}"
-        weight_percent = 0.0
-        if academic_item is not None:
-            weight_percent = (
-                academic_item.direct_weight_percent
-                if academic_item.direct_weight_percent is not None
-                else academic_item.relative_weight_percent or 0.0
-            )
+        weight_result = weights_by_item.get(linked_item.id) if linked_item else None
+        weight_percent = getattr(weight_result, "effective", None)
+        weight_origin = getattr(weight_result, "origin", None)
+        if weight_origin is not None and getattr(weight_origin, "value", "unknown") == "unknown":
+            weight_percent = None
+        preferred_completion_at = (
+            due_at - timedelta(hours=24) if is_assignment and not overdue else due_at
+        )
+        capacity_deadline = max(preferred_completion_at, earliest_start_at)
+        capacity_before_due = sum(
+            minutes
+            for day, minutes in capacity_by_day.items()
+            if earliest_start_at.date() <= day <= min(capacity_deadline.date(), horizon_end)
+        )
+        slack_minutes = capacity_before_due - remaining
+        urgent_48h = due_at <= datetime.combine(
+            horizon_start + timedelta(days=2), time.min, tzinfo=timezone
+        )
+        if overdue:
+            risk_tier = 5
+        elif urgent_48h:
+            risk_tier = 4
+        elif exam_relationship:
+            risk_tier = 3
+        elif slack_minutes <= 0:
+            risk_tier = 2
+        else:
+            risk_tier = 1
+        importance_rank = (
+            risk_tier * 1_000_000
+            + max(100_000 - max(slack_minutes, -100_000), 0)
+            + round(weight_percent or 0) * 100
+            + PRIORITY_RANK[task.priority.value]
+        )
+        course_code = course_codes.get(task.course_id, "Course") if task.course_id else "Course"
+        exam_name = "Final exam" if item_type == AcademicItemType.final_exam else "Midterm"
+        title = (
+            f"{course_code} · {exam_name} prep"
+            if is_exam
+            else f"{course_code} · Quiz prep"
+            if is_quiz
+            else f"{course_code} · {task.name}"
+            if linked_item is not None
+            else task.name
+        )
+        if is_assignment and due_date > horizon_end:
+            kind = "distant_task"
+        elif is_exam:
+            kind = "exam_prep"
+        else:
+            kind = "task"
         scheduling_item = SchedulingItem(
             id=identifier,
-            title=task.name,
+            title=title,
             target_minutes=target,
             minimum_session_minutes=task.minimum_session_minutes,
-            preferred_session_minutes=task.preferred_session_minutes,
+            preferred_session_minutes=(
+                min(
+                    max(45, task.minimum_session_minutes),
+                    task.maximum_session_minutes,
+                )
+                if is_exam
+                else task.preferred_session_minutes
+            ),
             maximum_session_minutes=task.maximum_session_minutes,
             priority_rank=PRIORITY_RANK[task.priority.value],
             intensity=task.intensity.value,
-            importance_rank=_task_importance_rank(
-                due_date,
-                horizon_start,
-                task.required,
-                PRIORITY_RANK[task.priority.value],
-                weight_percent,
-            ),
+            kind=kind,
+            importance_rank=importance_rank,
             due_at=due_at,
             earliest_start_at=max(
                 earliest_start_at,
                 datetime.combine(horizon_start, time.min, tzinfo=timezone),
             ),
             latest_end_at=None if overdue else due_at,
+            required=task.required,
+            risk_tier=risk_tier,
+            slack_minutes=slack_minutes,
+            weight_percent=weight_percent,
+            exam_relationship=exam_relationship,
+            readiness_at=readiness.ready_at if readiness else None,
+            preferred_completion_at=preferred_completion_at,
         )
         items.append(scheduling_item)
-        if academic_item is not None and not overdue:
-            planning_earliest_date = max(
-                earliest_start_at,
-                datetime.combine(horizon_start, time.min, tzinfo=timezone),
-            ).date()
-            candidate_dates = tuple(
-                value
-                for value in available_dates
-                if planning_earliest_date <= value <= min(due_date, horizon_end)
-            )
-            meetings = class_meetings.get(task.course_id) if task.course_id else None
-            candidate_dates = _lecture_ready_dates(
-                candidate_dates, meetings.first_meeting if meetings else None
-            )
-            if candidate_dates:
-                academic_planning_inputs.append(
-                    AcademicPlanningInput(
-                        source_id=identifier,
-                        course_code=(
-                            course_codes.get(task.course_id, "Course")
-                            if task.course_id is not None
-                            else "Course"
-                        ),
-                        assessment_name=task.name,
-                        assessment_type=academic_item.item_type.value,
-                        due_date=due_date,
-                        session_durations=tuple(session_durations(scheduling_item)),
-                        available_dates=candidate_dates,
-                        class_meeting_dates=tuple(
-                            value
-                            for value in (meetings.horizon_dates if meetings else ())
-                            if candidate_dates[0] <= value <= candidate_dates[-1]
-                        ),
-                    )
-                )
         links[identifier] = (task.id, None, "focus")
     for course_code, invalid in sorted(invalid_deadlines.items()):
         examples = ", ".join(f"{name} ({deadline.isoformat()})" for name, deadline in invalid[:3])
@@ -1264,27 +1928,7 @@ def _scheduling_items(
                 )
             )
             links[identifier] = (None, goal.id, "goal")
-    academic_plan = plan_academic_sessions(academic_planning_inputs)
-    if academic_plan.sessions_by_source:
-        items = [
-            replace(
-                item,
-                session_blueprints=tuple(
-                    SessionBlueprint(
-                        title=session.title,
-                        duration_minutes=session.duration_minutes,
-                        preferred_dates=frozenset({session.preferred_date}),
-                        planning_source=session.source,
-                        phase=session.phase,
-                    )
-                    for session in academic_plan.sessions_by_source[item.id]
-                ),
-            )
-            if item.id in academic_plan.sessions_by_source
-            else item
-            for item in items
-        ]
-    return items, links, warnings, academic_plan.source
+    return items, links, warnings
 
 
 def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[frozenset[date]]:
@@ -1301,19 +1945,6 @@ def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[fro
             date_sets.append(eligible_dates)
         week_start += timedelta(days=7)
     return date_sets
-
-
-def _task_importance_rank(
-    due_date: date,
-    horizon_start: date,
-    required: bool,
-    priority_rank: int,
-    weight_percent: float,
-) -> int:
-    days_to_due = max((due_date - horizon_start).days, 0)
-    deadline_rank = max(366 - min(days_to_due, 365), 1)
-    required_rank = 1_000_000 if required else 0
-    return required_rank + deadline_rank * 1000 + priority_rank * 100 + round(weight_percent)
 
 
 def _unscheduled_summary(
@@ -1353,7 +1984,12 @@ def _unscheduled_summary(
                 {
                     "id": item.id,
                     "name": item.title,
+                    "deadline": item.due_at.isoformat() if item.due_at else None,
+                    "requested_minutes": item.target_minutes,
+                    "scheduled_minutes": scheduled,
                     "remaining_minutes": remaining,
+                    "capacity_needed_minutes": remaining,
+                    "blocking_constraints": [reason_code],
                     "reason_code": reason_code,
                     "reason": reason,
                 }
@@ -1388,7 +2024,7 @@ def _shortfall_reason(item: SchedulingItem, windows: list[SchedulingWindow]) -> 
             "NO_ELIGIBLE_DAY",
             "Its selected weekdays have no opening inside the current focus hours.",
         )
-    if item.kind == "task":
+    if item.kind in {"task", "exam_prep", "distant_task"}:
         return (
             "ACADEMIC_CAPACITY_LIMIT",
             "Earlier or higher-impact deadlines used the remaining eligible focus capacity.",

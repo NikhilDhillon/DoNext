@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 
 import donext.scheduler as scheduler
-from donext.scheduler import SchedulingItem, SchedulingWindow, SessionBlueprint, solve_schedule
+from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
 
 
 def task(
@@ -171,134 +171,6 @@ def test_solver_respects_task_start_and_deadline_boundaries() -> None:
     assert all(placement.end_at <= deadline for placement in result.placements)
 
 
-def test_solver_uses_academic_session_label_and_preferred_date() -> None:
-    preferred = date(2026, 9, 11)
-    item = SchedulingItem(
-        id="midterm",
-        title="Midterm Exam",
-        target_minutes=50,
-        minimum_session_minutes=25,
-        preferred_session_minutes=50,
-        maximum_session_minutes=90,
-        priority_rank=3,
-        intensity="deep",
-        session_blueprints=(
-            SessionBlueprint(
-                title="CSC 370 · Practice for Midterm Exam",
-                duration_minutes=50,
-                preferred_dates=frozenset({preferred}),
-                phase="practice",
-            ),
-        ),
-    )
-    windows = [
-        SchedulingWindow(
-            datetime(2026, 9, 9, 16, 0, tzinfo=UTC),
-            datetime(2026, 9, 9, 18, 0, tzinfo=UTC),
-        ),
-        SchedulingWindow(
-            datetime(2026, 9, 11, 16, 0, tzinfo=UTC),
-            datetime(2026, 9, 11, 18, 0, tzinfo=UTC),
-        ),
-    ]
-
-    result = solve_schedule([item], windows, minimum_break_minutes=10)
-
-    assert result.placements[0].start_at.date() == preferred
-    assert result.placements[0].title == "CSC 370 · Practice for Midterm Exam"
-    assert result.placements[0].reason_details["academic_phase"] == "practice"
-    assert result.placements[0].reason_details["academic_planning_source"] == "fallback"
-
-
-@pytest.mark.parametrize(
-    ("titles", "phases"),
-    [
-        (
-            ("Plan Assignment", "Work on Assignment", "Review Assignment"),
-            ("draft", "develop", "revise"),
-        ),
-        (
-            ("Outline Project", "Build Project", "Refine Project"),
-            ("draft", "develop", "revise"),
-        ),
-        (
-            ("Review Exam Material", "Practise Problems", "Final Exam Review"),
-            ("review", "practice", "final_review"),
-        ),
-        (
-            ("Research Roles", "Prepare Applications", "Check Applications"),
-            ("research", "prepare", "check"),
-        ),
-    ],
-    ids=["assignment", "project", "exam", "general-work"],
-)
-@pytest.mark.parametrize("force_greedy_fallback", [False, True], ids=["solver", "fallback"])
-def test_phased_work_is_always_scheduled_in_blueprint_order(
-    monkeypatch: pytest.MonkeyPatch,
-    titles: tuple[str, str, str],
-    phases: tuple[str, str, str],
-    force_greedy_fallback: bool,
-) -> None:
-    if force_greedy_fallback:
-        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
-
-    result = solve_schedule(
-        [_ordered_phased_item(titles, phases)],
-        _ordered_work_windows(),
-        minimum_break_minutes=0,
-    )
-
-    assert [placement.title for placement in result.placements] == list(titles)
-    assert [placement.reason_details["academic_phase"] for placement in result.placements] == list(
-        phases
-    )
-
-
-def _ordered_phased_item(
-    titles: tuple[str, str, str], phases: tuple[str, str, str]
-) -> SchedulingItem:
-    return SchedulingItem(
-        id="phased-work",
-        title="Phased work",
-        target_minutes=150,
-        minimum_session_minutes=50,
-        preferred_session_minutes=50,
-        maximum_session_minutes=50,
-        priority_rank=2,
-        intensity="moderate",
-        session_blueprints=(
-            SessionBlueprint(
-                title=titles[0],
-                duration_minutes=50,
-                preferred_dates=frozenset({date(2026, 9, 9)}),
-                phase=phases[0],
-            ),
-            SessionBlueprint(
-                title=titles[1],
-                duration_minutes=50,
-                preferred_dates=frozenset({date(2026, 9, 12)}),
-                phase=phases[1],
-            ),
-            SessionBlueprint(
-                title=titles[2],
-                duration_minutes=50,
-                preferred_dates=frozenset({date(2026, 9, 10)}),
-                phase=phases[2],
-            ),
-        ),
-    )
-
-
-def _ordered_work_windows() -> list[SchedulingWindow]:
-    return [
-        SchedulingWindow(
-            datetime(2026, 9, day, 16, 0, tzinfo=UTC),
-            datetime(2026, 9, day, 17, 0, tzinfo=UTC),
-        )
-        for day in (9, 10, 12, 13)
-    ]
-
-
 def test_daily_capacity_is_a_budget_instead_of_an_early_day_cutoff() -> None:
     current = date(2026, 9, 9)
     windows = [
@@ -333,14 +205,7 @@ def test_daily_capacity_is_a_budget_instead_of_an_early_day_cutoff() -> None:
     assert result.eligible_capacity_minutes == 60
 
 
-def test_flexible_commitments_cannot_pull_study_sessions_off_their_planned_days() -> None:
-    """Packing more commitment minutes is never worth moving an assessment's phases.
-
-    Every planned study day here holds exactly one session, so clearing those days lets
-    three more commitments fit. Buying them would drag the whole assignment onto the one
-    open day, ahead of the classes and the phases it is meant to follow.
-    """
-    planned = (date(2026, 9, 10), date(2026, 9, 12), date(2026, 9, 13))
+def test_flexible_commitments_cannot_displace_required_academic_work() -> None:
     assignment = SchedulingItem(
         id="task:assignment",
         title="Assignment 1",
@@ -350,20 +215,7 @@ def test_flexible_commitments_cannot_pull_study_sessions_off_their_planned_days(
         maximum_session_minutes=50,
         priority_rank=3,
         intensity="moderate",
-        session_blueprints=tuple(
-            SessionBlueprint(
-                title=f"SENG 310 · {label} Assignment 1",
-                duration_minutes=50,
-                preferred_dates=frozenset({day}),
-                phase=phase,
-            )
-            for label, phase, day in zip(
-                ("Plan", "Work on", "Review and revise"),
-                ("draft", "develop", "revise"),
-                planned,
-                strict=True,
-            )
-        ),
+        required=True,
     )
     commitments = [
         SchedulingItem(
@@ -380,7 +232,6 @@ def test_flexible_commitments_cannot_pull_study_sessions_off_their_planned_days(
         )
         for day in (date(2026, 9, 10), date(2026, 9, 11), date(2026, 9, 12), date(2026, 9, 13))
     ]
-    # The first day is wide open; every later day holds exactly one 50 minute session.
     windows = [
         SchedulingWindow(
             datetime(2026, 9, 9, 9, 0, tzinfo=UTC),
@@ -399,12 +250,14 @@ def test_flexible_commitments_cannot_pull_study_sessions_off_their_planned_days(
     )
 
     study = [placement for placement in result.placements if placement.item_id == "task:assignment"]
-    assert [placement.start_at.date() for placement in study] == list(planned)
-    assert [placement.reason_details["academic_phase"] for placement in study] == [
-        "draft",
-        "develop",
-        "revise",
-    ]
+    assert (
+        sum(
+            round((placement.end_at - placement.start_at).total_seconds() / 60)
+            for placement in study
+        )
+        == 150
+    )
+    assert all(placement.title == "Assignment 1" for placement in study)
 
 
 def test_optimizer_failure_returns_the_valid_baseline(

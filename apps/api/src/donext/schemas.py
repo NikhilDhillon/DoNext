@@ -9,10 +9,13 @@ from donext.models import (
     AcademicItemType,
     AllocationMethod,
     AvailabilityType,
+    CourseDeliveryMode,
     EnergyLevel,
+    EstimateOrigin,
     Flexibility,
     GoalStatus,
     Intensity,
+    MeetingKind,
     Priority,
     ScheduleStatus,
     SchemeSelectionMode,
@@ -59,34 +62,29 @@ class UserRead(ApiModel):
 
 class UserPreferenceBase(ApiModel):
     minimum_sleep_minutes: int = Field(default=420, ge=240, le=720)
-    preferred_sleep_minutes: int = Field(default=480, ge=240, le=720)
     default_wake_time: time = time(7, 0)
     default_sleep_time: time = time(23, 0)
     maximum_daily_focus_minutes: int = Field(default=480, ge=30, le=960)
     preferred_session_minutes: int = Field(default=50, ge=10, le=240)
     minimum_break_minutes: int = Field(default=10, ge=5, le=120)
     freeze_window_minutes: int = Field(default=240, ge=0, le=1440)
-    preserve_free_time_percent: int = Field(default=15, ge=0, le=100)
-    auto_apply_low_impact_changes: bool = False
 
     @model_validator(mode="after")
     def validate_sleep(self) -> "UserPreferenceBase":
-        if self.preferred_sleep_minutes < self.minimum_sleep_minutes:
-            raise ValueError("preferred sleep must be at least the minimum sleep")
+        normal_sleep = sleep_window_minutes(self.default_sleep_time, self.default_wake_time)
+        if normal_sleep < self.minimum_sleep_minutes:
+            raise ValueError("the normal bedtime-to-wake window must meet minimum sleep")
         return self
 
 
 class UserPreferenceUpdate(ApiModel):
     minimum_sleep_minutes: int | None = Field(default=None, ge=240, le=720)
-    preferred_sleep_minutes: int | None = Field(default=None, ge=240, le=720)
     default_wake_time: time | None = None
     default_sleep_time: time | None = None
     maximum_daily_focus_minutes: int | None = Field(default=None, ge=30, le=960)
     preferred_session_minutes: int | None = Field(default=None, ge=10, le=240)
     minimum_break_minutes: int | None = Field(default=None, ge=5, le=120)
     freeze_window_minutes: int | None = Field(default=None, ge=0, le=1440)
-    preserve_free_time_percent: int | None = Field(default=None, ge=0, le=100)
-    auto_apply_low_impact_changes: bool | None = None
 
 
 class UserPreferenceRead(UserPreferenceBase):
@@ -134,6 +132,17 @@ class CourseBase(ApiModel):
     target_grade: float | None = Field(default=None, ge=0, le=100)
     difficulty: int = Field(default=3, ge=1, le=5)
     weekly_study_target_minutes: int = Field(default=180, ge=0, le=10080)
+    delivery_mode: CourseDeliveryMode = CourseDeliveryMode.scheduled
+    first_content_available_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_delivery(self) -> "CourseBase":
+        if (
+            self.delivery_mode == CourseDeliveryMode.asynchronous
+            and self.first_content_available_at is None
+        ):
+            raise ValueError("asynchronous courses require first_content_available_at")
+        return self
 
 
 class CourseCreate(CourseBase):
@@ -149,6 +158,8 @@ class CourseUpdate(ApiModel):
     target_grade: float | None = Field(default=None, ge=0, le=100)
     difficulty: int | None = Field(default=None, ge=1, le=5)
     weekly_study_target_minutes: int | None = Field(default=None, ge=0, le=10080)
+    delivery_mode: CourseDeliveryMode | None = None
+    first_content_available_at: datetime | None = None
 
 
 class CourseRead(CourseBase):
@@ -171,6 +182,7 @@ class TaskBase(ApiModel):
     intensity: Intensity = Intensity.moderate
     estimated_minutes: int = Field(ge=1, le=100000)
     remaining_minutes: int | None = Field(default=None, ge=0, le=100000)
+    estimate_origin: EstimateOrigin = EstimateOrigin.manual
     minimum_session_minutes: int = Field(default=25, ge=5, le=480)
     preferred_session_minutes: int = Field(default=50, ge=5, le=480)
     maximum_session_minutes: int = Field(default=120, ge=5, le=720)
@@ -212,6 +224,7 @@ class TaskUpdate(ApiModel):
     intensity: Intensity | None = None
     estimated_minutes: int | None = Field(default=None, ge=1, le=100000)
     remaining_minutes: int | None = Field(default=None, ge=0, le=100000)
+    estimate_origin: EstimateOrigin | None = None
     minimum_session_minutes: int | None = Field(default=None, ge=5, le=480)
     preferred_session_minutes: int | None = Field(default=None, ge=5, le=480)
     maximum_session_minutes: int | None = Field(default=None, ge=5, le=720)
@@ -406,6 +419,28 @@ class AcademicItemUpdate(ApiModel):
     extra_credit: bool | None = None
 
 
+class AcademicItemCreate(ApiModel):
+    item_type: AcademicItemType
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    due_at: datetime
+    direct_weight_percent: float | None = Field(default=None, ge=0, le=100)
+    required: bool = True
+
+
+class AcademicEffortEstimateUpdate(ApiModel):
+    decision: Literal["student", "use_default"]
+    minutes: int | None = Field(default=None, ge=15, le=10080, multiple_of=5)
+
+    @model_validator(mode="after")
+    def validate_decision(self) -> "AcademicEffortEstimateUpdate":
+        if self.decision == "student" and self.minutes is None:
+            raise ValueError("minutes are required for a student estimate")
+        if self.decision == "use_default" and self.minutes is not None:
+            raise ValueError("minutes must be omitted when using the default")
+        return self
+
+
 AcademicImpactTier = Literal["critical", "high", "normal", "low"]
 
 
@@ -429,6 +464,8 @@ class AcademicImpactRead(ApiModel):
 class FixedEventBase(ApiModel):
     title: str = Field(min_length=1, max_length=200)
     semester_id: uuid.UUID | None = None
+    course_id: uuid.UUID | None = None
+    meeting_kind: MeetingKind | None = None
     category: str = Field(default="personal", min_length=1, max_length=64)
     priority: Priority = Priority.medium
     start_at: datetime
@@ -447,7 +484,11 @@ class FixedEventBase(ApiModel):
 
 
 class FixedEventCreate(FixedEventBase):
-    pass
+    @model_validator(mode="after")
+    def validate_class_association(self) -> "FixedEventCreate":
+        if self.category == "class" and (self.course_id is None or self.meeting_kind is None):
+            raise ValueError("class events require course_id and meeting_kind")
+        return self
 
 
 class CourseMeetingImport(ApiModel):
@@ -456,6 +497,7 @@ class CourseMeetingImport(ApiModel):
     start_time: time
     end_time: time
     location: str | None = Field(default=None, max_length=200)
+    meeting_kind: MeetingKind = MeetingKind.lecture
     confidence: float = Field(ge=0, le=1)
     source_text: str
 
@@ -469,7 +511,7 @@ class CourseMeetingImport(ApiModel):
 class CourseOutlineImport(ApiModel):
     course: CourseCreate
     grading: CourseGradingReplace
-    meetings: list[FixedEventCreate] = Field(default_factory=list, max_length=30)
+    meetings: list[FixedEventBase] = Field(default_factory=list, max_length=30)
     meeting_proposals: list[CourseMeetingImport] = Field(default_factory=list, max_length=30)
     replace_existing: bool = False
 
@@ -483,6 +525,8 @@ class CourseOutlineImportRead(ApiModel):
 class FixedEventUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     semester_id: uuid.UUID | None = None
+    course_id: uuid.UUID | None = None
+    meeting_kind: MeetingKind | None = None
     category: str | None = Field(default=None, min_length=1, max_length=64)
     priority: Priority | None = None
     start_at: datetime | None = None
@@ -498,6 +542,14 @@ class FixedEventRead(FixedEventBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+
+
+def sleep_window_minutes(sleep_time: time, wake_time: time) -> int:
+    sleep_minutes = sleep_time.hour * 60 + sleep_time.minute
+    wake_minutes = wake_time.hour * 60 + wake_time.minute
+    if wake_minutes <= sleep_minutes:
+        wake_minutes += 24 * 60
+    return wake_minutes - sleep_minutes
 
 
 class WeeklyScheduleRule(ApiModel):
@@ -711,7 +763,14 @@ class ProposalSummaryRead(ApiModel):
     eligible_capacity_minutes: int = 0
     protected_free_minutes: int = 0
     solver_runtime_ms: int = 0
-    academic_planning_source: Literal["openai", "fallback", "mixed", "none"] = "none"
+    academic_requested_minutes: int = 0
+    academic_scheduled_minutes: int = 0
+    opportunistic_scheduled_minutes: int = 0
+    exam_preparation: list[dict[str, object]] = Field(default_factory=list)
+    flexible_adjustments: list[dict[str, object]] = Field(default_factory=list)
+    rollover_by_day: list[dict[str, object]] = Field(default_factory=list)
+    extra_focus_by_day: list[dict[str, object]] = Field(default_factory=list)
+    sleep_by_day: list[dict[str, object]] = Field(default_factory=list)
     preserved_blocks: int
     generated_blocks: int
     moved_blocks: int = 0
@@ -727,6 +786,37 @@ class ScheduleProposalRead(ScheduleRead):
     stale: bool
     generation_summary: ProposalSummaryRead
     revision_feedback: dict[str, object] | None = None
+
+
+class ExtraFocusDecision(ApiModel):
+    approved: bool
+    request_fingerprint: str = Field(min_length=64, max_length=64)
+
+
+class ScheduleProposalGenerate(ApiModel):
+    extra_focus_decision: ExtraFocusDecision | None = None
+
+
+class GenerationExamRequirement(ApiModel):
+    academic_item_id: uuid.UUID
+    task_id: uuid.UUID
+    course_code: str
+    name: str
+    due_at: datetime
+    default_minutes: int = 480
+
+
+class GenerationBlockingInput(ApiModel):
+    code: str
+    message: str
+    course_id: uuid.UUID | None = None
+
+
+class ScheduleGenerationRequirementsRead(ApiModel):
+    horizon_start: date
+    horizon_end: date
+    exams: list[GenerationExamRequirement] = Field(default_factory=list)
+    blocking_inputs: list[GenerationBlockingInput] = Field(default_factory=list)
 
 
 RevisionReason = Literal[
@@ -791,7 +881,7 @@ class PlanningCapacityRead(ApiModel):
     planned_focus_minutes: int
     protected_free_minutes: int
     remaining_focus_minutes: int
-    preferred_sleep_minutes: int
+    derived_preferred_sleep_minutes: int
 
 
 class PlanningDayRead(ApiModel):

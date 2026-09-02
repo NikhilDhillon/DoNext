@@ -5,7 +5,7 @@ from sqlalchemy import select
 
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
-from donext.models import Course, Semester
+from donext.models import Course, CourseDeliveryMode, Semester
 from donext.routers.semesters import owned_semester
 from donext.schemas import CourseCreate, CourseRead, CourseUpdate
 
@@ -66,6 +66,14 @@ def update_course(
     values = payload.model_dump(exclude_unset=True)
     if "code" in values and values["code"] is not None:
         values["code"] = str(values["code"]).strip().upper()
+    delivery_mode = values.get("delivery_mode", course.delivery_mode)
+    content_at = values.get("first_content_available_at", course.first_content_available_at)
+    if delivery_mode == CourseDeliveryMode.asynchronous and content_at is None:
+        raise ApiError(
+            "VALIDATION_ERROR",
+            "Asynchronous courses require a first content-available time.",
+            422,
+        )
     for field, value in values.items():
         setattr(course, field, value)
     db.commit()

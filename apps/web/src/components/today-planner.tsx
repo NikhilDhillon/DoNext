@@ -110,7 +110,7 @@ export function TodayPlanner() {
           <div className="capacity-copy">
             <div><strong>{formatMinutes(capacity?.planned_focus_minutes ?? 0)}</strong><span>planned focus</span></div>
             <div><strong>{formatMinutes(capacity?.remaining_focus_minutes ?? 0)}</strong><span>open focus capacity</span></div>
-            <div><strong>{formatMinutes(capacity?.preferred_sleep_minutes ?? 0)}</strong><span>preferred sleep</span></div>
+            <div><strong>{formatMinutes(capacity?.derived_preferred_sleep_minutes ?? 0)}</strong><span>derived sleep</span></div>
           </div>
           <CapacityTrack capacity={capacity} />
           <div className="capacity-legend">

@@ -71,6 +71,11 @@ def test_day_plan_combines_real_blocks_events_capacity_and_unscheduled_work(
         json={
             "title": "Research methods",
             "semester_id": semester["id"],
+            "course_id": client.post(
+                f"/api/v1/semesters/{semester['id']}/courses",
+                json={"name": "Research Methods", "code": "RSCH 100"},
+            ).json()["id"],
+            "meeting_kind": "lecture",
             "category": "class",
             "start_at": "2026-09-08T16:00:00Z",
             "end_at": "2026-09-08T17:00:00Z",
@@ -109,11 +114,11 @@ def test_day_plan_combines_real_blocks_events_capacity_and_unscheduled_work(
     assert plan["days"][0]["capacity"] == {
         "available_minutes": 600,
         "commitment_minutes": 90,
-        "usable_focus_minutes": 434,
+        "usable_focus_minutes": 450,
         "planned_focus_minutes": 60,
-        "protected_free_minutes": 76,
-        "remaining_focus_minutes": 374,
-        "preferred_sleep_minutes": 480,
+        "protected_free_minutes": 60,
+        "remaining_focus_minutes": 390,
+        "derived_preferred_sleep_minutes": 480,
     }
 
 

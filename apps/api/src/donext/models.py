@@ -105,6 +105,27 @@ class AcademicItemType(StrEnum):
     other = "other"
 
 
+class CourseDeliveryMode(StrEnum):
+    scheduled = "scheduled"
+    asynchronous = "asynchronous"
+
+
+class MeetingKind(StrEnum):
+    lecture = "lecture"
+    lab = "lab"
+    tutorial = "tutorial"
+    seminar = "seminar"
+    studio = "studio"
+    other = "other"
+
+
+class EstimateOrigin(StrEnum):
+    pending_exam = "pending_exam"
+    system_default = "system_default"
+    student_provided = "student_provided"
+    manual = "manual"
+
+
 class WeightOrigin(StrEnum):
     explicit = "explicit"
     inferred_equal = "inferred_equal"
@@ -184,29 +205,18 @@ class UserPreference(UuidTimestampMixin, Base):
     __tablename__ = "user_preferences"
     __table_args__ = (
         CheckConstraint("minimum_sleep_minutes > 0", name="ck_preferences_minimum_sleep"),
-        CheckConstraint(
-            "preferred_sleep_minutes >= minimum_sleep_minutes",
-            name="ck_preferences_preferred_sleep",
-        ),
-        CheckConstraint(
-            "preserve_free_time_percent BETWEEN 0 AND 100",
-            name="ck_preferences_buffer",
-        ),
     )
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), unique=True
     )
     minimum_sleep_minutes: Mapped[int] = mapped_column(Integer, default=420)
-    preferred_sleep_minutes: Mapped[int] = mapped_column(Integer, default=480)
     default_wake_time: Mapped[time] = mapped_column(Time, default=time(7, 0))
     default_sleep_time: Mapped[time] = mapped_column(Time, default=time(23, 0))
     maximum_daily_focus_minutes: Mapped[int] = mapped_column(Integer, default=480)
     preferred_session_minutes: Mapped[int] = mapped_column(Integer, default=50)
     minimum_break_minutes: Mapped[int] = mapped_column(Integer, default=10)
     freeze_window_minutes: Mapped[int] = mapped_column(Integer, default=240)
-    preserve_free_time_percent: Mapped[int] = mapped_column(Integer, default=15)
-    auto_apply_low_impact_changes: Mapped[bool] = mapped_column(Boolean, default=False)
     schedule_revision_policy: Mapped[dict[str, object] | None] = mapped_column(JSON)
 
     user: Mapped[User] = relationship(back_populates="preferences")
@@ -237,6 +247,10 @@ class Course(UuidTimestampMixin, Base):
     __table_args__ = (
         CheckConstraint("difficulty BETWEEN 1 AND 5", name="ck_course_difficulty"),
         CheckConstraint("weekly_study_target_minutes >= 0", name="ck_course_study_target"),
+        CheckConstraint(
+            "delivery_mode <> 'asynchronous' OR first_content_available_at IS NOT NULL",
+            name="ck_course_async_content_time",
+        ),
         UniqueConstraint("semester_id", "code", name="uq_course_semester_code"),
     )
 
@@ -251,6 +265,10 @@ class Course(UuidTimestampMixin, Base):
     target_grade: Mapped[float | None] = mapped_column(Float)
     difficulty: Mapped[int] = mapped_column(Integer, default=3)
     weekly_study_target_minutes: Mapped[int] = mapped_column(Integer, default=180)
+    delivery_mode: Mapped[CourseDeliveryMode] = mapped_column(
+        Enum(CourseDeliveryMode, native_enum=False), default=CourseDeliveryMode.scheduled
+    )
+    first_content_available_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     assessment_groups: Mapped[list["AssessmentGroup"]] = relationship(cascade="all, delete-orphan")
     academic_items: Mapped[list["AcademicItem"]] = relationship(cascade="all, delete-orphan")
@@ -515,6 +533,9 @@ class Task(UuidTimestampMixin, Base):
     )
     estimated_minutes: Mapped[int] = mapped_column(Integer)
     remaining_minutes: Mapped[int] = mapped_column(Integer)
+    estimate_origin: Mapped[EstimateOrigin] = mapped_column(
+        Enum(EstimateOrigin, native_enum=False), default=EstimateOrigin.manual
+    )
     minimum_session_minutes: Mapped[int] = mapped_column(Integer, default=25)
     preferred_session_minutes: Mapped[int] = mapped_column(Integer, default=50)
     maximum_session_minutes: Mapped[int] = mapped_column(Integer, default=120)
@@ -531,6 +552,10 @@ class FixedEvent(UuidTimestampMixin, Base):
             "commute_before_minutes >= 0 AND commute_after_minutes >= 0",
             name="ck_event_commute",
         ),
+        CheckConstraint(
+            "category <> 'class' OR (course_id IS NOT NULL AND meeting_kind IS NOT NULL)",
+            name="ck_event_class_association",
+        ),
         Index("ix_events_user_start", "user_id", "start_at"),
     )
 
@@ -540,6 +565,10 @@ class FixedEvent(UuidTimestampMixin, Base):
     semester_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("semesters.id", ondelete="SET NULL"), index=True
     )
+    course_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="CASCADE"), index=True
+    )
+    meeting_kind: Mapped[MeetingKind | None] = mapped_column(Enum(MeetingKind, native_enum=False))
     title: Mapped[str] = mapped_column(String(200))
     category: Mapped[str] = mapped_column(String(64), default="personal")
     priority: Mapped[Priority] = mapped_column(

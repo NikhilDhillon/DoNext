@@ -6,7 +6,7 @@ from sqlalchemy import select
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import UserPreference
-from donext.schemas import UserPreferenceRead, UserPreferenceUpdate
+from donext.schemas import UserPreferenceRead, UserPreferenceUpdate, sleep_window_minutes
 
 router = APIRouter(prefix="/preferences", tags=["preferences"])
 
@@ -30,11 +30,12 @@ def update_preferences(
     preferences = current_preferences(db, current_user.id)
     values = payload.model_dump(exclude_unset=True)
     minimum_sleep = values.get("minimum_sleep_minutes", preferences.minimum_sleep_minutes)
-    preferred_sleep = values.get("preferred_sleep_minutes", preferences.preferred_sleep_minutes)
-    if preferred_sleep < minimum_sleep:
+    sleep_time = values.get("default_sleep_time", preferences.default_sleep_time)
+    wake_time = values.get("default_wake_time", preferences.default_wake_time)
+    if sleep_window_minutes(sleep_time, wake_time) < minimum_sleep:
         raise ApiError(
             "VALIDATION_ERROR",
-            "Preferred sleep must be at least the minimum sleep.",
+            "The normal bedtime-to-wake window must meet minimum sleep.",
             422,
         )
     for field, value in values.items():

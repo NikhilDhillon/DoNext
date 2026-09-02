@@ -1,4 +1,4 @@
-# DoNext Phase 3 scheduling implementation
+# DoNext student-aware scheduling implementation
 
 Author: Nikhil Dhillon
 
@@ -6,166 +6,107 @@ Status: Current implementation snapshot
 
 ## Document boundary
 
-This document describes the scheduling system currently present in the repository. It is not the
-source of truth for product policy.
+This document describes the scheduling implementation in the repository. The canonical product
+policy remains [`../scheduling.md`](../scheduling.md).
 
-The canonical scheduling behavior is specified in [`../scheduling.md`](../scheduling.md). When this
-implementation differs from that specification, the difference is an implementation gap—not an
-alternative product rule.
+## Architecture
 
-## Implemented architecture
+DoNext builds an editable proposal for exactly 14 local calendar days while using the complete
+semester as strategic context. Proposal construction is deterministic:
 
-Phase 3 provides an explainable, editable 14-day schedule-proposal lifecycle:
+1. `proposals.py` builds course readiness, effective weights, remaining work, deadlines, exam
+   relationships, slack, availability, commitments, sleep boundaries, and capacity passes.
+2. `scheduler.py` creates normal-sized sessions and runs the same hard constraints through a greedy
+   baseline and a deterministic single-worker OR-Tools CP-SAT optimization.
+3. Generated placements and typed trade-off summaries are saved on a separate proposed schedule.
+4. The student may edit or reject the proposal. Explicit acceptance atomically supersedes the prior
+   accepted schedule after its expanded input fingerprint is revalidated.
 
-1. `POST /api/v1/semesters/{semester_id}/schedule/proposals` creates a separate proposed schedule.
-2. Confirmed tasks, academic items, flexible goals, availability, fixed commitments, commute buffers,
-   preferences, and preserved blocks are converted into scheduling inputs.
-3. A valid greedy baseline is constructed.
-4. A deterministic OR-Tools CP-SAT pass attempts to improve the baseline.
-5. Generated placements, placement reasons, warnings, capacity totals, and unresolved work are stored
-   on the proposal.
-6. The student can add, move, edit, duplicate, lock, or delete draft blocks.
-7. Acceptance explicitly supersedes the previous accepted version; rejection leaves it untouched.
+No OpenAI call participates in academic selection, effort allocation, exact placement, capacity
+escalation, or acceptance. Schedules are identical whether an OpenAI key exists or not.
 
-The horizon starts on the authenticated student's current local date and ends thirteen days later,
-bounded by the semester.
+## Academic inputs
 
-## Current constraint construction
+Class events carry a `course_id` and `meeting_kind`. Scheduled-course assignments become actionable
+at the end of the first linked lecture. Asynchronous courses use `first_content_available_at`.
+Missing readiness and deadlines that predate readiness are reported for correction.
 
-`apps/api/src/donext/routers/proposals.py` currently constructs local scheduling windows by:
+Academic items are created atomically with their tasks. Assignment, quiz, midterm, and final defaults
+are 150, 120, 480, and 480 minutes respectively. Exam defaults begin with `pending_exam`; proposal
+generation pauses until the student enters an estimate or explicitly chooses the eight-hour default.
+`remaining_minutes` remains the scheduling source of truth.
 
-- expanding availability for each day;
-- removing elapsed and freeze-window time;
-- subtracting fixed commitments and their commute buffers;
-- subtracting preserved schedule blocks;
-- excluding the configured wake-to-sleep boundary;
-- limiting capacity to `maximum_daily_focus_minutes`; and
-- reserving `preserve_free_time_percent` from the focus-limited minutes.
+Assignments remain eligible after readiness even when their deadlines are beyond the current
+horizon. Those distant assignments are classified as opportunistic and compete only after current
+academic work and flexible goals. Exams activate only when their deadline is inside the 14-day
+horizon. Exam blocks use generic labels such as `CSC 370 · Midterm prep`.
 
-The current implementation treats the preferred sleep window and configured daily focus limit as
-generation boundaries. The permission-based extra-focus and preferred-to-minimum sleep escalation in
-the canonical specification are not implemented yet.
+## Risk and allocation
 
-## Current task construction
+Every academic scheduling item carries explicit metadata for required status, readiness, deadline,
+24-hour assignment completion target, remaining effort, slack, exam relationship, and effective or
+unknown weight. Allocation prioritizes required work, overdue work, 48-hour urgency, pre-exam
+same-course assignments, lower slack, earlier deadlines, remaining effort, and known effective
+weight. Unknown weight is never converted into an invented value.
 
-Tasks without confirmed deadlines are not scheduled and produce a warning. Course deadlines outside
-the semester are quarantined from proposals. Overdue tasks remain eligible and produce an overdue
-warning.
+The scheduler preserves configured minimum, preferred, and maximum session sizes. It may place
+multiple sessions on one day but always reserves the configured break and never lengthens a session
+to make overload disappear. Required academic coverage is optimized before optional academics,
+flexible work, and distant opportunistic assignments. Greedy fallback follows the same priority
+bands and constraints.
 
-The current code uses type-based lead windows:
+## Capacity passes
 
-- 28 days for midterms and finals;
-- 21 days for projects and presentations;
-- 14 days for assignments and labs; and
-- 7 days for quizzes and readings.
+Proposal construction uses explicit escalation passes:
 
-Task effort comes from the stored task estimate. Work due beyond the horizon receives a proportional
-14-day target rather than the canonical spare-capacity-only rule.
+1. normal waking availability, preferred daily focus, fixed commitments, breaks, and a 60-minute
+   daily rollover buffer;
+2. buffer release when overdue or 48-hour work remains;
+3. flexible-goal reduction through academic-first allocation;
+4. a comparison solve using waking capacity above the preferred focus cap;
+5. an exact-draft permission response before that extra focus may be used; and
+6. incremental preferred-sleep reduction toward the hard minimum, followed by honest unresolved
+   work if required academics still cannot fit.
 
-Course meetings are matched from fixed class events. Academic preparation candidate dates are clamped
-to the first class meeting when possible. A legacy fallback currently restores pre-lecture dates if
-the clamp would leave no candidate date.
+The extra-focus response includes a fingerprint, total and per-day extra minutes, resulting daily
+focus, and protected work. Stale fingerprints are rejected by issuing a newly calculated request.
+Generation rolls back before returning either an exam-estimate or extra-focus requirement, so the
+current proposal is not superseded while input is pending.
 
-## Current optional AI planning
+Proposal summaries report academic coverage, exam estimates and sources, opportunistic work,
+flexible reductions, rollover use, extra focus, sleep changes, and unresolved work. Fixed events and
+the student's minimum sleep never move.
 
-When an OpenAI key is configured, confirmed academic metadata can be sent to a constrained structured
-output call. The current model chooses a validated phase and preferred eligible date for each
-pre-sized session. It cannot change session minutes, invent a date, create an activity, or choose an
-exact calendar time. Invalid or unavailable output falls back per assessment to deterministic local
-planning.
+## Optional revision interpretation
 
-The current phases include orient, review, practice, final review, draft, develop, and revise. Titles
-are rendered locally from those phases. This is current implementation behavior only; the canonical
-specification requires generic exam-prep labels and no AI-authored academic phase experience.
+OpenAI is optional and limited to translating free-text revision feedback into a validated soft
+policy: preferred or avoided time ranges, block density, session-length direction within the saved
+bounds, and flexible-goal balancing. The developer instruction treats feedback and names as
+untrusted text and forbids changes to deadlines, work remaining, readiness, weights, availability,
+capacity, consent, sleep, fixed events, exact blocks, IDs, or acceptance.
 
-Revision feedback uses a separate constrained AI call only when free text or timing-oriented feedback
-needs interpretation. The result is validated into a limited scheduling policy before the
-deterministic scheduler sees it. Responses use `store=False`, short timeouts, and deterministic
-fallback behavior.
+The call uses structured Responses output, `store=False`, no retries, a short timeout, and a local
+fallback. Pydantic rejects unknown fields before the deterministic scheduler sees the policy.
 
-## Exact placement
+## Product flow
 
-`apps/api/src/donext/scheduler.py` owns exact placement. It uses:
+Onboarding and regeneration both fetch generation requirements before creating a proposal. Exams in
+range prompt for preparation hours, with an explicit eight-hour default. Extra-focus permission is
+valid for one draft only. Sleep reduction is reported in review rather than prompting a second time.
+The previous draft remains visible until replacement generation succeeds.
 
-- five-minute duration units;
-- 15-minute candidate start times;
-- the student's configured session bounds;
-- required break time inside every occupied interval;
-- a greedy feasible baseline;
-- one CP-SAT worker;
-- a fixed random seed; and
-- a bounded synchronous solve.
+The review experience preserves editable blocks, warnings, placement reasons, unresolved work,
+stale-input protection, rejection/revision, and explicit acceptance. Accepted Today and Week views
+remain isolated from unaccepted proposals.
 
-The solver first maximizes academic minutes and recorded academic importance. It then minimizes drift
-from preferred academic dates and uses remaining capacity for flexible work, fairness, earlier starts,
-and energy matching. If optimization fails or returns a worse academic result, the valid baseline is
-used.
+## Out of scope
 
-Generated blocks store reason details including energy level, priority, importance, session duration,
-deadline, and—when applicable—the current academic-planning source and phase.
+Daily completion check-ins, partial block completion, and learned course-specific effort estimates
+remain future work. The calendar's visual redesign is also separate from this scheduling cutover.
 
-## Proposal lifecycle
+## Verification
 
-Generation never changes the accepted schedule. A proposal records:
-
-- its base accepted version;
-- the 14-day horizon;
-- a fingerprint of relevant planning inputs;
-- generated and preserved blocks;
-- requested, scheduled, eligible-capacity, and protected-free minutes;
-- warnings and unresolved work;
-- academic-planning source; and
-- revision feedback and change counts when applicable.
-
-Acceptance recomputes the input fingerprint and returns `PROPOSAL_STALE` when tasks, goals, events,
-availability, preferences, semester dates, timezone, or accepted schedule state changed after
-generation. Automatic acceptance is disabled.
-
-## Review experience
-
-The draft-review screen keeps the proposal separate from accepted Today and Week data. It provides:
-
-- generation and regeneration states;
-- scheduled-versus-requested totals;
-- warnings and stale-proposal errors;
-- a seven-day desktop calendar and mobile day agenda;
-- fixed classes and commitments alongside editable generated blocks;
-- drag, edit, duplicate, delete, add, and undo interactions;
-- outside-focus warnings;
-- unresolved work; and
-- explicit reject/revise and accept actions.
-
-## Canonical-policy gaps
-
-The following work is required before the current implementation satisfies
-[`../scheduling.md`](../scheduling.md):
-
-| Area | Current implementation | Canonical requirement |
-| --- | --- | --- |
-| Assignment readiness | Preparation dates are clamped to the first lecture when possible; a fallback can bypass the clamp. | Every assignment is blocked until at least one lecture has ended; invalid pre-lecture deadlines are flagged. |
-| Assignment effort | Stored task estimates drive scheduling. | Initial assignment effort defaults to 2.5 hours without prompting, then may learn per-course patterns. |
-| Long-range assignments | Type-based lead windows and proportional horizon targets. | After the first lecture, distant assignments use only otherwise-unused capacity and normally preserve personal goals. |
-| Exam activation | Midterms and finals can enter planning 28 days ahead. | Midterms and finals activate only inside the rolling 14-day window. |
-| Exam effort | Derived from task estimates and session rules. | Ask for preparation hours on horizon entry; use an explicit eight-hour fallback. |
-| Quizzes | Seven-day lead window using stored effort. | Use a two-hour preparation default. |
-| Academic labels | AI or fallback phases produce phase-specific titles. | Use generic exam-prep labels and confirmed assignment identities. |
-| Exam cadence | Preferred dates are spread and phase-ordered. | Prepare continuously on reasonable-capacity days; keep a soft 30-to-45-minute review approximately every three days when assignments dominate. |
-| Exam relationships | No explicit same-course pre-exam assignment boost or post-exam assignment gate. | Boost same-course assignments due before the exam and hold post-exam assignments until required prep is actually complete. |
-| Simultaneous exams | No explicit cross-exam fairness rule. | Prepare for overlapping exams simultaneously using date, remaining hours, weight, and feasibility. |
-| Deadline risk | Required status, deadline proximity, stated priority, and weight contribute to importance. | Add explicit overdue ordering, 48-hour urgency, remaining-slack feasibility, 24-hour completion targets, and agreed tie-breakers. |
-| Session construction | Sessions respect stored min/preferred/max sizes and breaks. | Preserve this behavior, allow multiple same-day blocks, and never lengthen sessions to resolve risk. |
-| Rollover capacity | A configurable percentage is protected. | Prefer one intentionally unallocated hour per day and consume it automatically for overdue or 48-hour work. |
-| Personal goals | Flexible work competes after academic coverage. | Explicitly reduce flexible goals before current-horizon academics, but preserve them from distant spare-capacity work. |
-| Extra focus | Daily focus limit is a hard generation cap. | Ask permission before using additional waking focus capacity. |
-| Sleep | Preferred wake-to-sleep window is excluded. | After the extra-focus decision, reduce preferred sleep toward the configured minimum if pressure remains and inform the student. |
-| Infeasibility | Partial proposals show unresolved minutes and capacity reasons. | Retain honesty while dropping academic work by optionality, weight, deadline, and exam relationship. |
-| Adaptive estimates | Not implemented. | Future daily completion data may learn course-specific effort and feed a new reviewable proposal. |
-
-## Validation boundary
-
-Current Phase 3 tests cover deterministic placement, feasible fallback, hard conflicts, pacing,
-overload reporting, session splitting, energy preferences, timezones, proposal editing, rejection,
-stale detection, atomic acceptance, rollback, and user isolation.
-
-The canonical acceptance scenarios in [`../scheduling.md`](../scheduling.md) must be added alongside
-implementation changes. Documentation alone does not satisfy those scenarios.
+The repository test suite covers the API contracts, defaults and provenance, linked class readiness,
+proposal lifecycle, hard scheduling constraints, fallback behavior, revision-AI boundary, and stale
+input protection. Delivery validation includes an isolated Alembic upgrade-downgrade-upgrade cycle,
+API lint/type/tests, frontend lint/type/build, and the repository-wide `pnpm check`.

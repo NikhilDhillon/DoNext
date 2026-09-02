@@ -37,6 +37,7 @@ import type {
   OutlineExtraction,
   PlanningTask,
   Preferences,
+  ScheduleGenerationRequirements,
   ScheduleProposal,
   Semester,
   User,
@@ -137,7 +138,7 @@ export function OnboardingWizard() {
       await action();
       return true;
     } catch (error) {
-      setActionError(error instanceof ApiRequestError ? error.message : "DoNext could not save that yet. Please try again.");
+      setActionError(error instanceof Error ? error.message : "DoNext could not save that yet. Please try again.");
       return false;
     } finally {
       setBusy(false);
@@ -173,6 +174,10 @@ export function OnboardingWizard() {
           instructor: form.get("instructor") || null,
           difficulty: Number(form.get("difficulty")),
           weekly_study_target_minutes: Number(form.get("weekly_hours")) * 60,
+          delivery_mode: form.get("delivery_mode"),
+          first_content_available_at: form.get("first_content_available_at")
+            ? new Date(String(form.get("first_content_available_at"))).toISOString()
+            : null,
         }),
       });
       formElement.reset();
@@ -186,16 +191,16 @@ export function OnboardingWizard() {
     const form = new FormData(formElement);
     const deadline = String(form.get("deadline"));
     await perform(async () => {
-      await apiRequest<PlanningTask>("/tasks", {
+      await apiRequest(`/courses/${String(form.get("course_id"))}/academic-items`, {
         method: "POST",
         body: JSON.stringify({
           name: form.get("name"),
-          course_id: form.get("course_id"),
-          estimated_minutes: Number(form.get("estimated_hours")) * 60,
-          deadline_at: new Date(`${deadline}T23:59:00`).toISOString(),
-          priority: form.get("priority"),
-          flexibility: "low",
-          intensity: form.get("intensity"),
+          item_type: form.get("item_type"),
+          due_at: new Date(`${deadline}T23:59:00`).toISOString(),
+          direct_weight_percent: form.get("weight_percent")
+            ? Number(form.get("weight_percent"))
+            : null,
+          required: form.get("required") === "on",
         }),
       });
       formElement.reset();
@@ -279,6 +284,8 @@ export function OnboardingWizard() {
           body: JSON.stringify({
             title: `${course.code} ${String(form.get("meeting_type"))}`,
             semester_id: currentSemester.id,
+            course_id: course.id,
+            meeting_kind: form.get("meeting_type"),
             category: "class",
             start_at: zonedDateTimeToIso(firstDate, `${startTime}:00`, timezone),
             end_at: zonedDateTimeToIso(firstDate, `${endTime}:00`, timezone),
@@ -390,11 +397,9 @@ export function OnboardingWizard() {
           method: "PATCH",
           body: JSON.stringify({
             minimum_sleep_minutes: Number(form.get("minimum_sleep")) * 60,
-            preferred_sleep_minutes: Number(form.get("preferred_sleep")) * 60,
             default_sleep_time: form.get("sleep_time"),
             default_wake_time: form.get("wake_time"),
             preferred_session_minutes: Number(form.get("session_minutes")),
-            preserve_free_time_percent: Number(form.get("free_time_percent")),
           }),
         }),
         apiRequest<AvailabilityWindow[]>("/availability", {
@@ -421,9 +426,66 @@ export function OnboardingWizard() {
       return;
     }
     await perform(async () => {
-      await apiRequest<ScheduleProposal>(`/semesters/${currentSemester.id}/schedule/proposals`, {
-        method: "POST",
-      });
+      const requirements = await apiRequest<ScheduleGenerationRequirements>(
+        `/semesters/${currentSemester.id}/schedule/generation-requirements`,
+      );
+      if (requirements.blocking_inputs.length) {
+        throw new Error(requirements.blocking_inputs.map((item) => item.message).join(" "));
+      }
+      for (const exam of requirements.exams) {
+        const useDefault = window.confirm(
+          `${exam.course_code} · ${exam.name} is now inside the 14-day plan. Use the 8-hour preparation default? Choose Cancel to enter your own estimate.`,
+        );
+        if (useDefault) {
+          await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
+            method: "PUT",
+            body: JSON.stringify({ decision: "use_default" }),
+          });
+          continue;
+        }
+        const hours = window.prompt(
+          `How many hours of preparation will you need for ${exam.course_code} · ${exam.name}?`,
+          "",
+        );
+        if (hours === null) throw new Error("First-plan generation was cancelled.");
+        const minutes = Math.round(Number(hours) * 12) * 5;
+        if (!Number.isFinite(minutes) || minutes < 15) {
+          throw new Error("Enter a valid exam preparation estimate.");
+        }
+        await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
+          method: "PUT",
+          body: JSON.stringify({ decision: "student", minutes }),
+        });
+      }
+      try {
+        await apiRequest<ScheduleProposal>(
+          `/semesters/${currentSemester.id}/schedule/proposals`,
+          { method: "POST", body: JSON.stringify({}) },
+        );
+      } catch (error) {
+        if (
+          error instanceof ApiRequestError
+          && error.code === "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED"
+        ) {
+          const allowed = window.confirm(
+            `This draft needs ${formatMinutes(Number(error.details?.total_extra_minutes ?? 0))} above your preferred focus limit. Allow it for this draft?`,
+          );
+          await apiRequest<ScheduleProposal>(
+            `/semesters/${currentSemester.id}/schedule/proposals`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                extra_focus_decision: {
+                  approved: allowed,
+                  request_fingerprint: error.details?.request_fingerprint,
+                },
+              }),
+            },
+          );
+        } else {
+          throw error;
+        }
+      }
       await apiRequest<User>("/auth/onboarding/complete", { method: "POST" });
       router.replace("/week");
       router.refresh();
@@ -576,7 +638,7 @@ function CommitmentsAndGoalsStep({ events, goals, busy, onSubmit, onRemoveEvent,
 function BoundariesStep({ preferences, availability, busy, onSubmit }: { preferences: Preferences; availability: AvailabilityWindow[]; busy: boolean; onSubmit: (event: FormEvent<HTMLFormElement>) => void }) {
   const selectedDays = new Set(availability.map((window) => window.day_of_week));
   const firstWindow = availability[0];
-  return <><StepHeading eyebrow="Protect the person doing the work" title="Set the boundaries the plan cannot borrow from." copy="Sleep, realistic focus windows, and free time become planning constraints—not suggestions." /><form className="onboarding-form boundaries-form" onSubmit={onSubmit}><div className="boundary-group"><div><MoonStar size={18} /><span><strong>Sleep</strong><small>Your minimum is a hard floor.</small></span></div><div className="form-row"><label><span>Minimum</span><select name="minimum_sleep" defaultValue={preferences.minimum_sleep_minutes / 60}><option value="6">6 hours</option><option value="6.5">6.5 hours</option><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option></select></label><label><span>Preferred</span><select name="preferred_sleep" defaultValue={preferences.preferred_sleep_minutes / 60}><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option><option value="9">9 hours</option><option value="9.5">9.5 hours</option></select></label></div><div className="form-row"><label><span>Typical bedtime</span><input name="sleep_time" type="time" defaultValue={preferences.default_sleep_time.slice(0, 5)} required /></label><label><span>Typical wake time</span><input name="wake_time" type="time" defaultValue={preferences.default_wake_time.slice(0, 5)} required /></label></div></div><div className="boundary-group"><div><Clock3 size={18} /><span><strong>Focus availability</strong><small>Choose when flexible work may be placed.</small></span></div><fieldset className="day-picker"><legend>Available days</legend>{days.map((day, index) => <label key={day}><input name={`day_${index}`} type="checkbox" defaultChecked={availability.length ? selectedDays.has(index) : index < 5} /><span>{day.slice(0, 3)}</span></label>)}</fieldset><div className="form-row"><label><span>Available from</span><input name="available_from" type="time" defaultValue={firstWindow?.start_time.slice(0, 5) ?? "08:00"} required /></label><label><span>Available until</span><input name="available_until" type="time" defaultValue={firstWindow?.end_time.slice(0, 5) ?? "20:00"} required /></label></div><div className="form-row"><label><span>Preferred focus session</span><select name="session_minutes" defaultValue={preferences.preferred_session_minutes}><option value="25">25 minutes</option><option value="40">40 minutes</option><option value="45">45 minutes</option><option value="50">50 minutes</option><option value="60">60 minutes</option><option value="75">75 minutes</option><option value="90">90 minutes</option></select></label><label><span>Keep free each week</span><select name="free_time_percent" defaultValue={preferences.preserve_free_time_percent}><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option></select></label></div></div><button className="primary-button form-submit" disabled={busy} type="submit">{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save boundaries and continue</button></form></>;
+  return <><StepHeading eyebrow="Protect the person doing the work" title="Set the boundaries the plan cannot borrow from." copy="Sleep and realistic focus windows become planning constraints—not suggestions." /><form className="onboarding-form boundaries-form" onSubmit={onSubmit}><div className="boundary-group"><div><MoonStar size={18} /><span><strong>Sleep</strong><small>Your bedtime and wake time define preferred sleep; your minimum is a hard floor.</small></span></div><label><span>Minimum</span><select name="minimum_sleep" defaultValue={preferences.minimum_sleep_minutes / 60}><option value="6">6 hours</option><option value="6.5">6.5 hours</option><option value="7">7 hours</option><option value="7.5">7.5 hours</option><option value="8">8 hours</option><option value="8.5">8.5 hours</option></select></label><div className="form-row"><label><span>Typical bedtime</span><input name="sleep_time" type="time" defaultValue={preferences.default_sleep_time.slice(0, 5)} required /></label><label><span>Typical wake time</span><input name="wake_time" type="time" defaultValue={preferences.default_wake_time.slice(0, 5)} required /></label></div></div><div className="boundary-group"><div><Clock3 size={18} /><span><strong>Focus availability</strong><small>Choose when flexible work may be placed. DoNext automatically retains a one-hour daily rollover buffer.</small></span></div><fieldset className="day-picker"><legend>Available days</legend>{days.map((day, index) => <label key={day}><input name={`day_${index}`} type="checkbox" defaultChecked={availability.length ? selectedDays.has(index) : index < 5} /><span>{day.slice(0, 3)}</span></label>)}</fieldset><div className="form-row"><label><span>Available from</span><input name="available_from" type="time" defaultValue={firstWindow?.start_time.slice(0, 5) ?? "08:00"} required /></label><label><span>Available until</span><input name="available_until" type="time" defaultValue={firstWindow?.end_time.slice(0, 5) ?? "20:00"} required /></label></div><label><span>Preferred focus session</span><select name="session_minutes" defaultValue={preferences.preferred_session_minutes}><option value="25">25 minutes</option><option value="40">40 minutes</option><option value="45">45 minutes</option><option value="50">50 minutes</option><option value="60">60 minutes</option><option value="75">75 minutes</option><option value="90">90 minutes</option></select></label></div><button className="primary-button form-submit" disabled={busy} type="submit">{busy ? <LoaderCircle className="spin" size={17} /> : <Check size={17} />} Save boundaries and continue</button></form></>;
 }
 
 function ReviewStep({ semester, courses, tasks, events, goals, preferences, busy, onFinish }: { semester: Semester | null; courses: Course[]; tasks: PlanningTask[]; events: FixedEvent[]; goals: Goal[]; preferences: Preferences | null; busy: boolean; onFinish: () => void }) {
@@ -587,7 +649,7 @@ function ReviewStep({ semester, courses, tasks, events, goals, preferences, busy
   const classMeetings = events.filter((event) => event.category === "class").length;
   const lifeItems = events.length - classMeetings + flexibleCommitments.length + personalGoals.length;
   const flexibleLifeMinutes = flexibleMinutes + goalMinutes;
-  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="When you finish, DoNext will create a 14-day draft using these details and take you straight to review it." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outlines" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Class schedule" value={`${classMeetings} meetings`} detail="Locked weekly class time" /><ReviewCard icon={<Flag size={20} />} label="Commitments & goals" value={`${lifeItems} added`} detail={flexibleLifeMinutes ? `${formatMinutes(flexibleLifeMinutes)} for DoNext to place each week` : "Work, workouts, projects, and life"} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? `${preferences.preserve_free_time_percent}% free-time buffer` : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>You stay in control of the final schedule.</strong><p>DoNext will prepare a draft, not change your calendar. Nothing becomes active until you review and accept it.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} {busy ? "Creating your first draft…" : "Finish setup and create my draft"}</button></>;
+  return <><StepHeading eyebrow="Ready to plan honestly" title="Here’s the life DoNext will plan around." copy="When you finish, DoNext will create a 14-day draft using these details and take you straight to review it." /><section className="review-grid"><ReviewCard icon={<GraduationCap size={20} />} label="Semester" value={semester?.name ?? "Not added"} detail={`${courses.length} ${courses.length === 1 ? "course" : "courses"}`} /><ReviewCard icon={<FileText size={20} />} label="Course outlines" value={`${tasks.length} key ${tasks.length === 1 ? "item" : "items"}`} detail="Deadlines ready for planning" /><ReviewCard icon={<CalendarCheck size={20} />} label="Class schedule" value={`${classMeetings} meetings`} detail="Locked weekly class time" /><ReviewCard icon={<Flag size={20} />} label="Commitments & goals" value={`${lifeItems} added`} detail={flexibleLifeMinutes ? `${formatMinutes(flexibleLifeMinutes)} for DoNext to place each week` : "Work, workouts, projects, and life"} /><ReviewCard icon={<MoonStar size={20} />} label="Sleep floor" value={preferences ? formatMinutes(preferences.minimum_sleep_minutes) : "Not set"} detail={preferences ? "1-hour daily rollover buffer" : "Use default boundaries"} /></section><div className="review-note"><Sparkles size={20} /><div><strong>You stay in control of the final schedule.</strong><p>DoNext will prepare a draft, not change your calendar. Nothing becomes active until you review and accept it.</p></div></div><button className="primary-button finish-button" disabled={busy} type="button" onClick={onFinish}>{busy ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />} {busy ? "Creating your first draft…" : "Finish setup and create my draft"}</button></>;
 }
 
 function ItemList({ children }: { children: ReactNode }) {

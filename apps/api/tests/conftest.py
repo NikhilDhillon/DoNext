@@ -45,7 +45,6 @@ def disable_live_openai_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     def no_openai() -> SimpleNamespace:
         return SimpleNamespace(openai_api_key=None)
 
-    monkeypatch.setattr("donext.academic_planning.get_settings", no_openai)
     monkeypatch.setattr("donext.schedule_revision.get_settings", no_openai)
 
 

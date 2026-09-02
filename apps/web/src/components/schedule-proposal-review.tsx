@@ -23,6 +23,7 @@ import type {
   PlanningEntry,
   ScheduleBlock,
   ScheduleProposal,
+  ScheduleGenerationRequirements,
   ScheduleRevisionReason,
   Semester,
 } from "@/lib/types";
@@ -81,12 +82,69 @@ export function ScheduleProposalReview({
     setGenerationState("running");
     setError(null);
     try {
-      proposal.setData(
-        await apiRequest<ScheduleProposal>(
-          `/semesters/${semester.id}/schedule/proposals`,
-          { method: "POST" },
-        ),
+      const requirements = await apiRequest<ScheduleGenerationRequirements>(
+        `/semesters/${semester.id}/schedule/generation-requirements`,
       );
+      if (requirements.blocking_inputs.length) {
+        throw new Error(requirements.blocking_inputs.map((item) => item.message).join(" "));
+      }
+      for (const exam of requirements.exams) {
+        const useDefault = window.confirm(
+          `${exam.course_code} · ${exam.name} is now inside the 14-day plan. Use the 8-hour preparation default? Choose Cancel to enter your own estimate.`,
+        );
+        if (useDefault) {
+          await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
+            method: "PUT",
+            body: JSON.stringify({ decision: "use_default" }),
+          });
+          continue;
+        }
+        const hours = window.prompt(
+          `How many hours of preparation will you need for ${exam.course_code} · ${exam.name}?`,
+          "",
+        );
+        if (hours === null) throw new Error("Schedule generation was cancelled.");
+        const minutes = Math.round(Number(hours) * 12) * 5;
+        if (!Number.isFinite(minutes) || minutes < 15) {
+          throw new Error("Enter a valid exam preparation estimate.");
+        }
+        await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
+          method: "PUT",
+          body: JSON.stringify({ decision: "student", minutes }),
+        });
+      }
+      let generated: ScheduleProposal;
+      try {
+        generated = await apiRequest<ScheduleProposal>(
+          `/semesters/${semester.id}/schedule/proposals`,
+          { method: "POST", body: JSON.stringify({}) },
+        );
+      } catch (requestError) {
+        if (
+          requestError instanceof ApiRequestError
+          && requestError.code === "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED"
+        ) {
+          const total = Number(requestError.details?.total_extra_minutes ?? 0);
+          const allowed = window.confirm(
+            `This draft needs ${formatMinutes(total)} above your preferred focus limit to protect required deadlines. Allow it for this draft?`,
+          );
+          generated = await apiRequest<ScheduleProposal>(
+            `/semesters/${semester.id}/schedule/proposals`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                extra_focus_decision: {
+                  approved: allowed,
+                  request_fingerprint: requestError.details?.request_fingerprint,
+                },
+              }),
+            },
+          );
+        } else {
+          throw requestError;
+        }
+      }
+      proposal.setData(generated);
       setGenerationState("success");
       generationSuccessTimer.current = setTimeout(() => {
         setGenerationState("idle");
@@ -181,25 +239,14 @@ export function ScheduleProposalReview({
     return <section className="proposal-review loading"><LoaderCircle className="spin" size={20} /> Checking for a draft</section>;
   }
 
-  // A rebuild replaces every placement, so the outgoing draft is cleared away rather than
-  // left on screen to be read while it is already being replaced.
-  if (generationState === "running") {
-    return (
-      <section aria-busy="true" className="proposal-review generating" role="status">
-        <LoaderCircle className="spin" size={34} />
-        <p>Building your draft</p>
-      </section>
-    );
-  }
-
   if (!proposal.data) {
     return (
       <section className="proposal-launch">
         <span><Sparkles size={22} /></span>
         <div>
-          <p className="eyebrow">AI-assisted, constraint-safe planning</p>
+          <p className="eyebrow">Student-aware deterministic planning</p>
           <h2>Build a reviewable 14-day draft.</h2>
-          <p>When available, AI shapes assessment preparation; deadlines and availability stay enforced. Your accepted plan remains untouched until you approve the draft.</p>
+          <p>DoNext starts ready assignments early, protects urgent deadlines, and activates exam preparation inside the next 14 days. Your accepted plan remains untouched until you approve the draft.</p>
         </div>
         <button className="primary-button" disabled={busy} type="button" onClick={() => void generate()}>
           <CalendarClock size={17} /> Generate 14-day plan
@@ -255,16 +302,6 @@ export function ScheduleProposalReview({
         </div>
       ) : null}
 
-      {aiHelped(draft.generation_summary.academic_planning_source) ? (
-        <div className="revision-applied" role="status">
-          <Sparkles size={17} />
-          <span>
-            <strong>{academicPlanningTitle(draft.generation_summary.academic_planning_source)}</strong>
-            <small>{academicPlanningDescription(draft.generation_summary.academic_planning_source)}</small>
-          </span>
-        </div>
-      ) : null}
-
       {draft.stale ? (
         <p className="planner-alert error"><AlertTriangle size={15} /> Inputs changed. Regenerate before accepting.</p>
       ) : null}
@@ -302,6 +339,8 @@ export function ScheduleProposalReview({
           ))}
         </div>
       ) : null}
+
+      <ProposalTradeoffs summary={draft.generation_summary} />
 
       {error ? <p className="planner-alert error" role="alert">{error}</p> : null}
       <footer>
@@ -387,7 +426,7 @@ function firstFocusDate(
 }
 
 function errorMessage(error: unknown, fallback: string) {
-  return error instanceof ApiRequestError ? error.message : fallback;
+  return error instanceof Error ? error.message : fallback;
 }
 
 function proposalWarningDisplay(
@@ -404,26 +443,16 @@ function proposalWarningDisplay(
   };
 }
 
-// The built-in planner is the baseline, so only AI involvement is worth announcing.
-function aiHelped(
-  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
-) {
-  return source === "openai" || source === "mixed";
-}
-
-function academicPlanningDescription(
-  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
-) {
-  if (source === "openai") {
-    return "AI selected assessment preparation phases and preferred study days. DoNext then enforced deadlines, availability, and every hard constraint.";
-  }
-  return "AI planned some assessment sessions, and the built-in planner safely completed the rest.";
-}
-
-function academicPlanningTitle(
-  source: ScheduleProposal["generation_summary"]["academic_planning_source"],
-) {
-  return source === "openai" ? "AI helped build this plan" : "AI helped build part of this plan";
+function ProposalTradeoffs({ summary }: { summary: ScheduleProposal["generation_summary"] }) {
+  const details = [
+    ...summary.exam_preparation.map((item) => `${String(item.name)} · ${formatMinutes(Number(item.scheduled_prep_minutes ?? 0))} of ${formatMinutes(Number(item.total_estimate_minutes ?? 0))} scheduled · ${String(item.estimate_source).replaceAll("_", " ")}`),
+    ...summary.flexible_adjustments.map((item) => `${String(item.name)} · reduced by ${formatMinutes(Number(item.reduced_minutes ?? 0))}`),
+    ...summary.rollover_by_day.filter((item) => Number(item.consumed_minutes ?? 0) > 0).map((item) => `${String(item.date)} · used ${formatMinutes(Number(item.consumed_minutes))} of rollover buffer`),
+    ...summary.extra_focus_by_day.map((item) => `${String(item.date)} · ${formatMinutes(Number(item.used_minutes ?? 0))} extra focus`),
+    ...summary.sleep_by_day.filter((item) => Number(item.reduction_minutes ?? 0) > 0).map((item) => `${String(item.date)} · sleep reduced by ${formatMinutes(Number(item.reduction_minutes))}, staying at or above the minimum`),
+  ];
+  if (!details.length) return null;
+  return <div className="proposal-unresolved"><strong>How this draft made room</strong>{details.map((detail) => <p key={detail}>{detail}</p>)}</div>;
 }
 
 function formatMinutes(minutes: number) {

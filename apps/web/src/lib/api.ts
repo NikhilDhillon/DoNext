@@ -2,7 +2,9 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api/v1
 
 type ApiErrorPayload = {
   error?: {
+    code?: string;
     message?: string;
+    details?: Record<string, unknown>;
   };
 };
 
@@ -10,6 +12,8 @@ export class ApiRequestError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly code?: string,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -30,6 +34,8 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
     throw new ApiRequestError(
       payload.error?.message ?? "Something went wrong. Please try again.",
       response.status,
+      payload.error?.code,
+      payload.error?.details,
     );
   }
 

@@ -16,9 +16,8 @@ class Settings(BaseSettings):
     session_secret: str = Field(default="local-development-secret-change-me", min_length=24)
     web_origin: str = "http://localhost:3000"
     openai_api_key: str | None = None
-    openai_scheduling_model: str = "gpt-5.6-luna"
-    openai_scheduling_timeout_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
-    openai_academic_planning_timeout_seconds: float = Field(default=5.0, ge=1.0, le=15.0)
+    openai_revision_model: str = "gpt-5.6-luna"
+    openai_revision_timeout_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
 
 
 @lru_cache

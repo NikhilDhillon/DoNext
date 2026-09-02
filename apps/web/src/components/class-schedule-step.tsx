@@ -38,7 +38,7 @@ export function ClassScheduleStep({ semester, courses, events, timezone, busy, o
       <form className="onboarding-form class-schedule-form" onSubmit={onSubmit}>
         <div className="form-row">
           <label><span>Course</span><select name="course_id" required>{courses.map((course) => <option key={course.id} value={course.id}>{course.code} · {course.name}</option>)}</select></label>
-          <label><span>Meeting type</span><select name="meeting_type" defaultValue="Lecture"><option>Lecture</option><option>Lab</option><option>Tutorial</option><option>Seminar</option><option>Studio</option></select></label>
+          <label><span>Meeting type</span><select name="meeting_type" defaultValue="lecture"><option value="lecture">Lecture</option><option value="lab">Lab</option><option value="tutorial">Tutorial</option><option value="seminar">Seminar</option><option value="studio">Studio</option><option value="other">Other</option></select></label>
         </div>
 
         <fieldset className="class-day-picker">

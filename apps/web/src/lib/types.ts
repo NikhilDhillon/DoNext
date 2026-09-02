@@ -28,6 +28,8 @@ export type Course = {
   target_grade: number | null;
   difficulty: number;
   weekly_study_target_minutes: number;
+  delivery_mode: "scheduled" | "asynchronous";
+  first_content_available_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -67,15 +69,12 @@ export type Goal = {
 export type Preferences = {
   id: string;
   minimum_sleep_minutes: number;
-  preferred_sleep_minutes: number;
   default_wake_time: string;
   default_sleep_time: string;
   maximum_daily_focus_minutes: number;
   preferred_session_minutes: number;
   minimum_break_minutes: number;
   freeze_window_minutes: number;
-  preserve_free_time_percent: number;
-  auto_apply_low_impact_changes: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -94,6 +93,7 @@ export type PlanningTask = {
   intensity: "deep" | "moderate" | "light" | "administrative" | "passive";
   estimated_minutes: number;
   remaining_minutes: number;
+  estimate_origin: "pending_exam" | "system_default" | "student_provided" | "manual";
   minimum_session_minutes: number;
   preferred_session_minutes: number;
   maximum_session_minutes: number;
@@ -108,6 +108,8 @@ export type FixedEvent = {
   id: string;
   title: string;
   semester_id: string | null;
+  course_id: string | null;
+  meeting_kind: "lecture" | "lab" | "tutorial" | "seminar" | "studio" | "other" | null;
   category: string;
   priority: "critical" | "high" | "medium" | "low" | "optional";
   start_at: string;
@@ -179,7 +181,14 @@ export type ScheduleProposal = Schedule & {
     eligible_capacity_minutes: number;
     protected_free_minutes: number;
     solver_runtime_ms: number;
-    academic_planning_source: "openai" | "fallback" | "mixed" | "none";
+    academic_requested_minutes: number;
+    academic_scheduled_minutes: number;
+    opportunistic_scheduled_minutes: number;
+    exam_preparation: Record<string, unknown>[];
+    flexible_adjustments: Record<string, unknown>[];
+    rollover_by_day: Record<string, unknown>[];
+    extra_focus_by_day: Record<string, unknown>[];
+    sleep_by_day: Record<string, unknown>[];
     preserved_blocks: number;
     generated_blocks: number;
     moved_blocks: number;
@@ -203,6 +212,20 @@ export type ScheduleProposal = Schedule & {
       scheduled_minutes_delta: number;
     };
   } | null;
+};
+
+export type ScheduleGenerationRequirements = {
+  horizon_start: string;
+  horizon_end: string;
+  exams: {
+    academic_item_id: string;
+    task_id: string;
+    course_code: string;
+    name: string;
+    due_at: string;
+    default_minutes: number;
+  }[];
+  blocking_inputs: { code: string; message: string; course_id: string | null }[];
 };
 
 export type ScheduleRevisionReason =
@@ -250,7 +273,7 @@ export type PlanningCapacity = {
   planned_focus_minutes: number;
   protected_free_minutes: number;
   remaining_focus_minutes: number;
-  preferred_sleep_minutes: number;
+  derived_preferred_sleep_minutes: number;
 };
 
 export type PlanningView = {

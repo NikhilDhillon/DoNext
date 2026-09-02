@@ -14,17 +14,22 @@ from donext.models import (
     AcademicItemType,
     AssessmentGroup,
     Course,
+    EstimateOrigin,
     FixedEvent,
     GradingScheme,
     GradingSchemeComponent,
+    MeetingKind,
     Priority,
     Task,
+    WeightOrigin,
 )
 from donext.planning import aware, resolve_timezone
 from donext.routers.courses import owned_course
 from donext.routers.semesters import owned_semester
 from donext.schemas import (
+    AcademicEffortEstimateUpdate,
     AcademicImpactRead,
+    AcademicItemCreate,
     AcademicItemRead,
     AcademicItemUpdate,
     AssessmentGroupRead,
@@ -34,12 +39,24 @@ from donext.schemas import (
     CourseOutlineImport,
     CourseOutlineImportRead,
     CourseRead,
+    FixedEventBase,
     FixedEventCreate,
     GradingSchemeComponentRead,
     GradingSchemeRead,
+    TaskRead,
 )
 
 router = APIRouter(tags=["grading"])
+
+
+def academic_effort_default(item_type: AcademicItemType) -> tuple[int | None, EstimateOrigin]:
+    if item_type == AcademicItemType.assignment:
+        return 150, EstimateOrigin.system_default
+    if item_type == AcademicItemType.quiz:
+        return 120, EstimateOrigin.system_default
+    if item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}:
+        return 480, EstimateOrigin.pending_exam
+    return None, EstimateOrigin.system_default
 
 
 def owned_academic_item(db: DbSession, user_id: uuid.UUID, item_id: uuid.UUID) -> AcademicItem:
@@ -285,6 +302,8 @@ def _replace_course_grading_data(
             (candidate for candidate in candidates if candidate.academic_item_id is None), None
         )
         if matching_task is None:
+            default_minutes, estimate_origin = academic_effort_default(item.item_type)
+            estimated_minutes = default_minutes or item_input.estimated_minutes
             matching_task = Task(
                 user_id=current_user.id,
                 course_id=course_id,
@@ -296,8 +315,9 @@ def _replace_course_grading_data(
                     if item.item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}
                     else Priority.medium
                 ),
-                estimated_minutes=item_input.estimated_minutes,
-                remaining_minutes=item_input.estimated_minutes,
+                estimated_minutes=estimated_minutes,
+                remaining_minutes=estimated_minutes,
+                estimate_origin=estimate_origin,
                 deadline_at=item.due_at,
                 required=not item.extra_credit,
             )
@@ -305,6 +325,11 @@ def _replace_course_grading_data(
         else:
             matching_task.academic_item_id = item.id
             matching_task.deadline_at = item.due_at
+            default_minutes, estimate_origin = academic_effort_default(item.item_type)
+            if default_minutes is not None:
+                matching_task.estimated_minutes = default_minutes
+                matching_task.remaining_minutes = default_minutes
+                matching_task.estimate_origin = estimate_origin
 
     for scheme_input in payload.schemes:
         grading_scheme = GradingScheme(
@@ -363,7 +388,7 @@ def replace_course_grading(
 
 
 def _event_key(
-    event: FixedEvent | FixedEventCreate, timezone: ZoneInfo
+    event: FixedEvent | FixedEventBase, timezone: ZoneInfo
 ) -> tuple[str, int, int, int, int, int]:
     title = event.title.strip().casefold()
     start_at = aware(event.start_at).astimezone(timezone)
@@ -380,6 +405,7 @@ def _event_key(
 
 def _meeting_event(
     meeting: CourseMeetingImport,
+    course_id: uuid.UUID,
     semester_id: uuid.UUID,
     semester_start: date,
     semester_end: date,
@@ -394,6 +420,8 @@ def _meeting_event(
     return FixedEventCreate(
         title=meeting.title,
         semester_id=semester_id,
+        course_id=course_id,
+        meeting_kind=meeting.meeting_kind,
         category="class",
         start_at=start_at,
         end_at=end_at,
@@ -502,6 +530,7 @@ def import_course_outline(
         *(
             _meeting_event(
                 meeting,
+                course.id,
                 semester_id,
                 semester.start_date,
                 semester.end_date,
@@ -519,7 +548,10 @@ def import_course_outline(
             )
         if _event_key(meeting, timezone) in existing_keys:
             continue
-        db.add(FixedEvent(user_id=current_user.id, **meeting.model_dump()))
+        meeting_values = meeting.model_dump()
+        meeting_values["course_id"] = course.id
+        meeting_values["meeting_kind"] = meeting.meeting_kind or MeetingKind.lecture
+        db.add(FixedEvent(user_id=current_user.id, **meeting_values))
         existing_keys.add(_event_key(meeting, timezone))
         meetings_created += 1
 
@@ -577,6 +609,118 @@ def update_academic_item(
         source_text=item.source_text,
         source_references=_source_references(item.source_references),
     )
+
+
+@router.post(
+    "/courses/{course_id}/academic-items", response_model=AcademicItemRead, status_code=201
+)
+def create_academic_item(
+    course_id: uuid.UUID,
+    payload: AcademicItemCreate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> AcademicItemRead:
+    course = owned_course(db, current_user.id, course_id)
+    semester = owned_semester(db, current_user.id, course.semester_id)
+    timezone = resolve_timezone(current_user.timezone)
+    due_date = aware(payload.due_at).astimezone(timezone).date()
+    if not semester.start_date <= due_date <= semester.end_date:
+        raise ApiError(
+            "VALIDATION_ERROR",
+            f"The deadline {due_date.isoformat()} is outside {semester.name}.",
+            422,
+        )
+    item = AcademicItem(
+        user_id=current_user.id,
+        course_id=course.id,
+        item_type=payload.item_type,
+        name=payload.name.strip(),
+        description=payload.description,
+        due_at=payload.due_at,
+        direct_weight_percent=payload.direct_weight_percent,
+        weight_origin=(
+            WeightOrigin.manual
+            if payload.direct_weight_percent is not None
+            else WeightOrigin.unknown
+        ),
+    )
+    db.add(item)
+    db.flush()
+    default_minutes, estimate_origin = academic_effort_default(item.item_type)
+    estimated_minutes = default_minutes or 180
+    task = Task(
+        user_id=current_user.id,
+        course_id=course.id,
+        academic_item_id=item.id,
+        name=item.name,
+        description=item.description,
+        priority=(
+            Priority.high
+            if item.item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}
+            else Priority.medium
+        ),
+        estimated_minutes=estimated_minutes,
+        remaining_minutes=estimated_minutes,
+        estimate_origin=estimate_origin,
+        deadline_at=item.due_at,
+        required=payload.required,
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(item)
+    return AcademicItemRead(
+        id=item.id,
+        course_id=item.course_id,
+        assessment_group_id=item.assessment_group_id,
+        task_id=task.id,
+        item_type=item.item_type,
+        name=item.name,
+        description=item.description,
+        due_at=item.due_at,
+        direct_weight_percent=item.direct_weight_percent,
+        relative_weight_percent=item.relative_weight_percent,
+        points_possible=item.points_possible,
+        points_earned=item.points_earned,
+        grade_status=item.grade_status,
+        weight_origin=item.weight_origin,
+        extraction_confidence=item.extraction_confidence,
+        minimum_required_percent=item.minimum_required_percent,
+        extra_credit=item.extra_credit,
+        source_text=item.source_text,
+        source_references=_source_references(item.source_references),
+    )
+
+
+@router.put("/academic-items/{item_id}/effort-estimate", response_model=TaskRead)
+def set_academic_effort_estimate(
+    item_id: uuid.UUID,
+    payload: AcademicEffortEstimateUpdate,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Task:
+    item = owned_academic_item(db, current_user.id, item_id)
+    if item.item_type not in {AcademicItemType.midterm, AcademicItemType.final_exam}:
+        raise ApiError(
+            "VALIDATION_ERROR", "Preparation estimates are only requested for exams.", 422
+        )
+    task = db.scalar(
+        select(Task).where(Task.user_id == current_user.id, Task.academic_item_id == item.id)
+    )
+    if task is None:
+        raise ApiError("NOT_FOUND", "The exam has no planning task.", 404)
+    minutes = payload.minutes if payload.decision == "student" else 480
+    assert minutes is not None
+    completed_minutes = max(task.estimated_minutes - task.remaining_minutes, 0)
+    task.estimated_minutes = minutes
+    task.remaining_minutes = max(minutes - completed_minutes, 0)
+    task.estimate_origin = (
+        EstimateOrigin.student_provided
+        if payload.decision == "student"
+        else EstimateOrigin.system_default
+    )
+    db.commit()
+    db.refresh(task)
+    return task
 
 
 @router.get("/courses/{course_id}/academic-impact", response_model=list[AcademicImpactRead])

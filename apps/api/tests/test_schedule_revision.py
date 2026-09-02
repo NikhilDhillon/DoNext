@@ -62,16 +62,12 @@ def test_uninterpretable_timing_note_keeps_the_current_draft(client: TestClient)
     assert current["id"] == original["id"]
 
 
-def test_openai_policy_filters_unknown_activity_ids(
+def test_openai_policy_cannot_return_activity_priority_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parsed = ScheduleRevisionPolicy.model_validate(
         {
             "preferred_time_ranges": [{"weekday": 0, "start": "18:00", "end": "21:00"}],
-            "item_adjustments": [
-                {"source_id": "goal:allowed", "direction": "more", "weight": 2},
-                {"source_id": "goal:invented", "direction": "less", "weight": 3},
-            ],
             "summary": "Move flexible work later.",
         }
     )
@@ -90,8 +86,8 @@ def test_openai_policy_filters_unknown_activity_ids(
         "get_settings",
         lambda: SimpleNamespace(
             openai_api_key="test-key",
-            openai_scheduling_timeout_seconds=2.0,
-            openai_scheduling_model="gpt-5.6-luna",
+            openai_revision_timeout_seconds=2.0,
+            openai_revision_model="gpt-5.6-luna",
         ),
     )
     payload = ScheduleRevisionRequest(
@@ -107,8 +103,8 @@ def test_openai_policy_filters_unknown_activity_ids(
 
     assert result.source == "openai"
     assert result.note_applied is True
-    assert [item.source_id for item in result.policy.item_adjustments] == ["goal:allowed"]
     assert result.policy.preferred_time_ranges[0].start.hour == 18
+    assert "item_adjustments" not in result.policy.model_dump()
 
 
 def test_openai_timeout_uses_reason_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -122,8 +118,8 @@ def test_openai_timeout_uses_reason_fallback(monkeypatch: pytest.MonkeyPatch) ->
         "get_settings",
         lambda: SimpleNamespace(
             openai_api_key="test-key",
-            openai_scheduling_timeout_seconds=2.0,
-            openai_scheduling_model="gpt-5.6-luna",
+            openai_revision_timeout_seconds=2.0,
+            openai_revision_model="gpt-5.6-luna",
         ),
     )
 

@@ -15,15 +15,6 @@ MINUTE_UNIT = 5
 
 
 @dataclass(frozen=True)
-class SessionBlueprint:
-    title: str
-    duration_minutes: int
-    preferred_dates: frozenset[date] = frozenset()
-    planning_source: Literal["openai", "fallback"] = "fallback"
-    phase: str = "work"
-
-
-@dataclass(frozen=True)
 class SchedulingItem:
     id: str
     title: str
@@ -39,7 +30,13 @@ class SchedulingItem:
     due_at: datetime | None = None
     earliest_start_at: datetime | None = None
     latest_end_at: datetime | None = None
-    session_blueprints: tuple[SessionBlueprint, ...] = ()
+    required: bool = True
+    risk_tier: int = 0
+    slack_minutes: int | None = None
+    weight_percent: float | None = None
+    exam_relationship: str | None = None
+    readiness_at: datetime | None = None
+    preferred_completion_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -86,9 +83,6 @@ class _Session:
     index: int
     duration_minutes: int
     title: str
-    preferred_dates: frozenset[date] = frozenset()
-    planning_source: Literal["openai", "fallback"] | None = None
-    phase: str | None = None
 
 
 @dataclass
@@ -119,20 +113,13 @@ def solve_schedule(
     sessions: list[_Session] = []
     for item in items:
         durations = session_durations(item)
-        blueprints = item.session_blueprints
-        if blueprints and [value.duration_minutes for value in blueprints] != durations:
-            blueprints = ()
         for index, duration in enumerate(durations):
-            blueprint = blueprints[index] if blueprints else None
             sessions.append(
                 _Session(
                     item=item,
                     index=index,
                     duration_minutes=duration,
-                    title=blueprint.title if blueprint else item.title,
-                    preferred_dates=blueprint.preferred_dates if blueprint else frozenset(),
-                    planning_source=blueprint.planning_source if blueprint else None,
-                    phase=blueprint.phase if blueprint else None,
+                    title=item.title,
                 )
             )
     capacity_by_day = _capacity_by_day(windows)
@@ -183,7 +170,6 @@ def _greedy_baseline(
     blocks_by_day: dict[date, int] = defaultdict(int)
     item_dates: dict[tuple[str, date], int] = defaultdict(int)
     item_ready_at: dict[str, datetime] = {}
-    blocked_blueprint_items: set[str] = set()
     scheduled = {item.id: 0 for item in items}
     placements: list[Placement] = []
     sessions_by_item: dict[str, list[_Session]] = defaultdict(list)
@@ -191,18 +177,26 @@ def _greedy_baseline(
         sessions_by_item[session.item.id].append(session)
 
     tasks = sorted(
-        (item for item in items if item.kind == "task"),
-        key=lambda item: (
-            item.due_at or datetime.max.replace(tzinfo=UTC),
-            -item.importance_rank,
-            -item.priority_rank,
-            item.id,
-        ),
+        (item for item in items if item.kind in {"task", "exam_prep"}),
+        key=_academic_sort_key,
     )
     ordered: list[_Session] = []
+    exams_added = False
     for item in tasks:
-        ordered.extend(sessions_by_item[item.id])
-    flexible = [item for item in items if item.kind != "task"]
+        if item.kind != "exam_prep":
+            ordered.extend(sessions_by_item[item.id])
+            continue
+        if exams_added:
+            continue
+        exams_added = True
+        exam_items = [candidate for candidate in tasks if candidate.kind == "exam_prep"]
+        cursor = 0
+        while any(cursor < len(sessions_by_item[candidate.id]) for candidate in exam_items):
+            for candidate in exam_items:
+                if cursor < len(sessions_by_item[candidate.id]):
+                    ordered.append(sessions_by_item[candidate.id][cursor])
+            cursor += 1
+    flexible = [item for item in items if item.kind in {"goal", "flexible_commitment"}]
     for priority in sorted({item.priority_rank for item in flexible}, reverse=True):
         band = sorted(
             (item for item in flexible if item.priority_rank == priority),
@@ -214,10 +208,19 @@ def _greedy_baseline(
                 if cursor < len(sessions_by_item[item.id]):
                     ordered.append(sessions_by_item[item.id][cursor])
             cursor += 1
+    distant = sorted(
+        (item for item in items if item.kind == "distant_task"),
+        key=lambda item: (
+            item.due_at or datetime.max.replace(tzinfo=UTC),
+            item.weight_percent is None,
+            -(item.weight_percent or 0),
+            item.id,
+        ),
+    )
+    for item in distant:
+        ordered.extend(sessions_by_item[item.id])
 
     for session in ordered:
-        if session.item.id in blocked_blueprint_items:
-            continue
         choice = _best_greedy_slot(
             session,
             free,
@@ -230,8 +233,6 @@ def _greedy_baseline(
             item_ready_at.get(session.item.id),
         )
         if choice is None:
-            if session.item.session_blueprints:
-                blocked_blueprint_items.add(session.item.id)
             continue
         segment_index, start_at = choice
         occupied_end = start_at + timedelta(
@@ -298,9 +299,16 @@ def _best_greedy_slot(
         )
         if start_at + timedelta(minutes=occupied) > latest_end:
             continue
-        if session.item.kind == "task":
-            score: tuple[object, ...] = (
-                _preferred_date_penalty(day, session.preferred_dates),
+        score: tuple[object, ...]
+        if session.item.kind == "exam_prep":
+            score = (
+                item_dates[(session.item.id, day)],
+                _preferred_time_penalty(start_at, policy),
+                start_at,
+                0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
+            )
+        elif session.item.kind in {"task", "distant_task"}:
+            score = (
                 _preferred_time_penalty(start_at, policy),
                 start_at,
                 0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
@@ -318,6 +326,32 @@ def _best_greedy_slot(
         return None
     _, index, start_at = min(choices, key=lambda value: value[0])
     return index, start_at
+
+
+def _academic_sort_key(item: SchedulingItem) -> tuple[object, ...]:
+    due_at = item.due_at or datetime.max.replace(tzinfo=UTC)
+    if item.risk_tier == 5:
+        return (
+            not item.required,
+            -item.risk_tier,
+            item.weight_percent is None,
+            -(item.weight_percent or 0),
+            due_at,
+            -item.target_minutes,
+            item.id,
+        )
+    return (
+        not item.required,
+        -item.risk_tier,
+        item.slack_minutes if item.slack_minutes is not None else 10**9,
+        due_at,
+        -item.target_minutes,
+        item.weight_percent is None,
+        -(item.weight_percent or 0),
+        -item.importance_rank,
+        -item.priority_rank,
+        item.id,
+    )
 
 
 def _optimize_sessions(
@@ -390,38 +424,47 @@ def _optimize_sessions(
                 presence_by_session[(previous.item.id, previous.index)]
                 >= presence_by_session[(current.item.id, current.index)]
             )
-            if item.session_blueprints:
-                for previous_alternative in alternatives_by_session[
-                    (previous.item.id, previous.index)
+            for previous_alternative in alternatives_by_session[(previous.item.id, previous.index)]:
+                for current_alternative in alternatives_by_session[
+                    (current.item.id, current.index)
                 ]:
-                    for current_alternative in alternatives_by_session[
-                        (current.item.id, current.index)
-                    ]:
-                        model.add(
-                            previous_alternative.start < current_alternative.start
-                        ).only_enforce_if(
-                            [previous_alternative.selected, current_alternative.selected]
-                        )
+                    model.add(
+                        previous_alternative.start < current_alternative.start
+                    ).only_enforce_if([previous_alternative.selected, current_alternative.selected])
 
     _add_baseline_hints(model, baseline, alternatives, presence_by_session, epoch)
+    required_academic_minutes = sum(
+        presence_by_session[(session.item.id, session.index)] * session.duration_minutes
+        for session in sessions
+        if session.item.required and session.item.kind in {"task", "exam_prep"}
+    )
     academic_minutes = sum(
         presence_by_session[(session.item.id, session.index)] * session.duration_minutes
         for session in sessions
-        if session.item.kind == "task"
+        if session.item.kind in {"task", "exam_prep"}
     )
     academic_importance = sum(
         presence_by_session[(session.item.id, session.index)]
         * session.duration_minutes
         * max(session.item.importance_rank, 0)
         for session in sessions
-        if session.item.kind == "task"
+        if session.item.kind in {"task", "exam_prep"}
     )
     maximum_importance = sum(
-        item.target_minutes * max(item.importance_rank, 0) for item in items if item.kind == "task"
+        item.target_minutes * max(item.importance_rank, 0)
+        for item in items
+        if item.kind in {"task", "exam_prep"}
     )
     coverage_base = maximum_importance + 1
+    model.maximize(required_academic_minutes)
+    required_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
+    required_status = required_solver.solve(model)
+    if required_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+    model.add(required_academic_minutes == required_solver.value(required_academic_minutes))
+
     model.maximize(academic_minutes * coverage_base + academic_importance)
-    first_solver = _solver(max(time_limit_seconds * 0.45, 0.05))
+    first_solver = _solver(max(time_limit_seconds * 0.25, 0.05))
     first_status = first_solver.solve(model)
     if first_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
@@ -430,37 +473,68 @@ def _optimize_sessions(
     model.add(academic_minutes == best_academic)
     model.add(academic_importance == best_importance)
 
-    # Study days are settled before flexible work is packed in. Coverage fixes how many
-    # academic minutes get scheduled but not when, so without this pass the flexible
-    # objective below can buy a few more commitment minutes by dragging a whole
-    # assessment's phases onto whatever day has room - landing "Plan" days before the
-    # lecture it depends on, and ahead of the sessions that should follow it.
-    drift_terms = [
-        alternative.selected
-        * _preferred_date_penalty(alternative.day, alternative.session.preferred_dates)
-        for alternative in alternatives
-        if alternative.session.preferred_dates
-    ]
-    if drift_terms:
-        study_drift = sum(drift_terms)
-        model.minimize(study_drift)
-        drift_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
-        drift_status = drift_solver.solve(model)
-        if drift_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    exam_day_terms: list[cp_model.IntVar] = []
+    for item in items:
+        if item.kind != "exam_prep":
+            continue
+        for day in sorted(windows_by_day):
+            selections = [
+                alternative.selected
+                for alternative in alternatives
+                if alternative.session.item.id == item.id and alternative.day == day
+            ]
+            if not selections:
+                continue
+            active = model.new_bool_var(f"exam_day_{item.id}_{day.isoformat()}")
+            model.add_max_equality(active, selections)
+            exam_day_terms.append(active)
+    if exam_day_terms:
+        exam_momentum = sum(exam_day_terms)
+        model.maximize(exam_momentum)
+        momentum_solver = _solver(max(time_limit_seconds * 0.15, 0.05))
+        momentum_status = momentum_solver.solve(model)
+        if momentum_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             return None
-        model.add(study_drift <= drift_solver.value(study_drift))
+        model.add(exam_momentum == momentum_solver.value(exam_momentum))
+
+    latest_tick = max(_ticks_from(epoch, window.end_at) for window in windows)
+    academic_start_terms: list[cp_model.IntVar] = []
+    for index, alternative in enumerate(alternatives):
+        if alternative.session.item.kind not in {"task", "exam_prep"}:
+            continue
+        effective_start = model.new_int_var(0, latest_tick, f"academic_start_{index}")
+        model.add_multiplication_equality(
+            effective_start, [alternative.start, alternative.selected]
+        )
+        academic_start_terms.append(effective_start)
+    if academic_start_terms:
+        academic_start_total = sum(academic_start_terms)
+        model.minimize(academic_start_total)
+        timing_solver = _solver(max(time_limit_seconds * 0.15, 0.05))
+        timing_status = timing_solver.solve(model)
+        if timing_status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None
+        model.add(academic_start_total == timing_solver.value(academic_start_total))
 
     flexible_minutes = sum(
         presence_by_session[(session.item.id, session.index)] * session.duration_minutes
         for session in sessions
-        if session.item.kind != "task"
+        if session.item.kind in {"goal", "flexible_commitment"}
+    )
+    distant_minutes = sum(
+        presence_by_session[(session.item.id, session.index)] * session.duration_minutes
+        for session in sessions
+        if session.item.kind == "distant_task"
     )
     fairness_terms: list[cp_model.LinearExpr] = []
     for priority in sorted(
-        {item.priority_rank for item in items if item.kind != "task"}, reverse=True
+        {item.priority_rank for item in items if item.kind in {"goal", "flexible_commitment"}},
+        reverse=True,
     ):
         band_items = [
-            item for item in items if item.kind != "task" and item.priority_rank == priority
+            item
+            for item in items
+            if item.kind in {"goal", "flexible_commitment"} and item.priority_rank == priority
         ]
         minimum_satisfaction = model.new_int_var(0, 1000, f"fairness_{priority}")
         for item in band_items:
@@ -473,7 +547,6 @@ def _optimize_sessions(
         fairness_terms.append(minimum_satisfaction * (priority + 1))
 
     timing_terms: list[cp_model.LinearExpr] = []
-    latest_tick = max(_ticks_from(epoch, window.end_at) for window in windows)
     for index, alternative in enumerate(alternatives):
         effective_start = model.new_int_var(0, latest_tick, f"effective_{index}")
         model.add_multiplication_equality(
@@ -484,16 +557,14 @@ def _optimize_sessions(
             if _energy_matches(alternative.session.item.intensity, alternative.energy_level)
             else 0
         )
-        # A day of drift outweighs any start-time gain, so the earliness term below can
-        # only order sessions within the days the drift bound already allows.
-        date_penalty = _preferred_date_penalty(
-            alternative.day, alternative.session.preferred_dates
-        ) * (latest_tick + 60)
-        timing_terms.append(
-            alternative.selected * (latest_tick + energy_bonus - date_penalty) - effective_start
-        )
-    model.maximize(flexible_minutes * 100_000 + sum(fairness_terms) * 10_000 + sum(timing_terms))
-    second_solver = _solver(max(time_limit_seconds * 0.35, 0.05))
+        timing_terms.append(alternative.selected * (latest_tick + energy_bonus) - effective_start)
+    model.maximize(
+        flexible_minutes * 100_000_000
+        + sum(fairness_terms) * 10_000_000
+        + distant_minutes * 100_000
+        + sum(timing_terms)
+    )
+    second_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
     second_status = second_solver.solve(model)
     if second_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         active_solver = second_solver
@@ -503,28 +574,20 @@ def _optimize_sessions(
         active_status = first_status
     placements: list[Placement] = []
     scheduled = {item.id: 0 for item in items}
-    optimized_drift = 0
     for alternative in alternatives:
         if not active_solver.boolean_value(alternative.selected):
             continue
         start_at = epoch + timedelta(minutes=active_solver.value(alternative.start) * MINUTE_UNIT)
         scheduled[alternative.session.item.id] += alternative.session.duration_minutes
-        optimized_drift += _preferred_date_penalty(
-            alternative.day, alternative.session.preferred_dates
-        )
         placements.append(_placement(alternative.session, start_at, alternative.energy_level))
     placements.sort(key=lambda placement: (placement.start_at, placement.item_id))
     baseline_academic = sum(
-        baseline.scheduled_minutes[item.id] for item in items if item.kind == "task"
+        baseline.scheduled_minutes[item.id] for item in items if item.kind in {"task", "exam_prep"}
     )
-    optimized_academic = sum(scheduled[item.id] for item in items if item.kind == "task")
+    optimized_academic = sum(
+        scheduled[item.id] for item in items if item.kind in {"task", "exam_prep"}
+    )
     if optimized_academic < baseline_academic:
-        return None
-    # A solve that runs out of time can still return a valid but badly dated arrangement.
-    # The greedy baseline already follows the planned study days, so it wins any tie.
-    if optimized_academic == baseline_academic and optimized_drift > _study_drift(
-        baseline.placements, sessions
-    ):
         return None
     complete = all(scheduled[item.id] == item.target_minutes for item in items)
     timed_out = active_status != cp_model.OPTIMAL or second_status not in (
@@ -564,27 +627,6 @@ def _allowed_starts(
         if starts and _energy_matches(session.item.intensity, window.energy_level):
             energy = window.energy_level
     return sorted(set(starts)), energy
-
-
-def _study_drift(placements: list[Placement], sessions: list[_Session]) -> int:
-    """Total days between the study blocks in a solution and their planned study days.
-
-    Placements are paired with sessions in start order, the same way the baseline hints
-    are, and read in their own local day rather than UTC.
-    """
-    placements_by_item: dict[str, list[Placement]] = defaultdict(list)
-    for placement in placements:
-        placements_by_item[placement.item_id].append(placement)
-    for item_placements in placements_by_item.values():
-        item_placements.sort(key=lambda value: value.start_at)
-    drift = 0
-    for session in sessions:
-        item_placements = placements_by_item[session.item.id]
-        if session.index < len(item_placements):
-            drift += _preferred_date_penalty(
-                item_placements[session.index].start_at.date(), session.preferred_dates
-            )
-    return drift
 
 
 def _add_baseline_hints(
@@ -677,18 +719,15 @@ def _placement(session: _Session, start_at: datetime, energy_level: str) -> Plac
             "energy_level": energy_level,
             "priority_rank": item.priority_rank,
             "importance_rank": item.importance_rank,
-            "session_minutes": session.duration_minutes,
-            **(
-                {
-                    "academic_planning_source": session.planning_source,
-                    "academic_phase": session.phase,
-                    "preferred_study_dates": sorted(
-                        value.isoformat() for value in session.preferred_dates
-                    ),
-                }
-                if session.planning_source is not None
-                else {}
+            "risk_tier": item.risk_tier,
+            "slack_minutes": item.slack_minutes,
+            "weight_percent": item.weight_percent,
+            "exam_relationship": item.exam_relationship,
+            "readiness_at": item.readiness_at.isoformat() if item.readiness_at else None,
+            "preferred_completion_at": (
+                item.preferred_completion_at.isoformat() if item.preferred_completion_at else None
             ),
+            "session_minutes": session.duration_minutes,
             **({"due_at": item.due_at.isoformat()} if item.due_at else {}),
             **({"eligible_date": start_at.date().isoformat()} if item.eligible_dates else {}),
         },
@@ -721,12 +760,6 @@ def _preferred_time_penalty(start_at: datetime, policy: SchedulingPolicy | None)
         if start <= local_time < end:
             return 0
     return 1
-
-
-def _preferred_date_penalty(day: date, preferred_dates: frozenset[date]) -> int:
-    if not preferred_dates:
-        return 0
-    return min(abs((day - preferred).days) for preferred in preferred_dates)
 
 
 def _ticks_from(epoch: datetime, value: datetime) -> int:
