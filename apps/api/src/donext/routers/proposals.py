@@ -2198,6 +2198,10 @@ def _scheduling_items(
                 (academic_item, exam_task)
             )
     capacity_by_day = _daily_capacity(windows)
+    # Slack must stay semester-aware. Capacity drawn only from the rolling horizon is identical
+    # for every assignment due past `horizon_end`, which collapses their slack - and therefore
+    # their relative ordering - onto a single value.
+    beyond_horizon_capacity_by_day = _daily_capacity(semester_windows)
     lead_by_task, semester_pressure = _semester_pressure_forecast(
         tasks,
         academic_items_by_id,
@@ -2318,6 +2322,10 @@ def _scheduling_items(
             minutes
             for day, minutes in capacity_by_day.items()
             if earliest_start_at.date() <= day <= min(capacity_deadline.date(), horizon_end)
+        ) + sum(
+            minutes
+            for day, minutes in beyond_horizon_capacity_by_day.items()
+            if earliest_start_at.date() <= day <= capacity_deadline.date()
         )
         slack_minutes = capacity_before_due - remaining
         urgent_48h = planning_now < due_at <= planning_now + timedelta(hours=48)
