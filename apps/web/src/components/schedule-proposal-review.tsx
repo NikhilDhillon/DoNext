@@ -317,21 +317,15 @@ export function ScheduleProposalReview({
         horizonEnd={draft.horizon_end}
         horizonStart={draft.horizon_start}
         proposalId={draft.id}
+        requestedMinutes={draft.generation_summary.requested_minutes}
+        scheduledMinutes={draft.generation_summary.scheduled_minutes}
         timezone={timezone}
+        unscheduled={draft.generation_summary.unscheduled}
         onAdd={addBlock}
         onDuplicate={duplicateBlock}
         onEdit={edit}
         onMoved={proposal.reload}
       />
-
-      {draft.generation_summary.unscheduled.length ? (
-        <div className="proposal-unresolved">
-          <strong>Still unresolved</strong>
-          {draft.generation_summary.unscheduled.map((item) => (
-            <p key={item.id}>{item.name} · {formatMinutes(item.remaining_minutes)} — {item.reason}</p>
-          ))}
-        </div>
-      ) : null}
 
       <ProposalTradeoffs summary={draft.generation_summary} />
 

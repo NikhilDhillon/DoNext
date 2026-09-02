@@ -749,3 +749,37 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-inspector-actions button.icon { flex: 0 0 34px; }
 .console-inspector-hint { margin: 11px 0 0; border-top: 1px solid var(--con-hair-2); padding-top: 10px; color: var(--con-t3); font-size: 11px; line-height: 1.5; }
 .console-inspector-hint kbd { border: 1px solid var(--con-hair); border-radius: 3px; padding: 0 4px; font: inherit; font-size: 10px; }
+
+/* Draft calendar — unplaced work rail */
+.console-body.with-rail { grid-template-columns: 216px minmax(0, 1fr); }
+.console-rail { display: flex; min-width: 0; flex-direction: column; gap: 10px; border-right: 1px solid var(--con-hair); background: var(--con-surface); padding: 14px 12px; }
+.console-meter { border: 1px solid var(--con-hair); border-radius: 11px; background: var(--con-raise); padding: 12px; }
+.console-meter p { margin: 0; color: var(--con-t3); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.console-meter strong { display: block; margin-top: 5px; font-size: 21px; font-weight: 700; letter-spacing: -.03em; }
+.console-meter-bar { display: block; height: 4px; margin-top: 8px; overflow: hidden; border-radius: 4px; background: rgba(255,255,255,.08); }
+.console-meter-bar i { display: block; height: 100%; border-radius: 4px; background: var(--con-acc); }
+.console-meter small { display: block; margin-top: 7px; color: var(--con-t3); font-size: 11px; line-height: 1.45; }
+.console-rail-heading { display: flex; align-items: center; gap: 7px; margin: 6px 4px 0; color: var(--con-t3); font-size: 10px; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
+.console-rail-heading span { border-radius: 20px; background: var(--con-raise-2); padding: 1px 7px; letter-spacing: 0; font-size: 10.5px; }
+.console-rail-list { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 6px; overflow: auto; scrollbar-width: thin; }
+.console-rail-item { position: relative; overflow: hidden; border: 1px dashed rgba(62,217,156,.32); border-radius: 9px; background: rgba(62,217,156,.055); padding: 9px 10px 9px 13px; color: var(--con-study); cursor: grab; touch-action: none; user-select: none; }
+.console-rail-item::before { position: absolute; top: 0; bottom: 0; left: 0; width: 2.5px; background: currentColor; content: ""; }
+.console-rail-item:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.1); }
+.console-rail-item:active { cursor: grabbing; }
+.console-rail-item p { display: flex; margin: 0; font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.console-rail-item strong { display: block; margin: 3px 0 0; color: var(--con-t1); font-size: 12.5px; font-weight: 680; line-height: 1.25; }
+.console-rail-item small { display: block; margin: 4px 0 0; color: var(--con-t3); font-size: 11px; line-height: 1.4; }
+.console-rail-empty { margin: 0; border: 1px dashed var(--con-hair); border-radius: 10px; padding: 16px 12px; color: var(--con-t3); font-size: 11.5px; line-height: 1.5; text-align: center; }
+.console-ghost { position: fixed; z-index: 60; width: 190px; border: 1px dashed var(--con-acc-edge); border-radius: 9px; background: rgba(22,30,27,.97); padding: 8px 10px; color: var(--con-study); box-shadow: 0 16px 40px rgba(0,0,0,.6); pointer-events: none; }
+.console-ghost span { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.console-ghost strong { display: block; margin-top: 2px; color: var(--con-t1); font-size: 12.5px; font-weight: 680; }
+
+@media (max-width: 1180px) {
+  .console-body.with-rail { grid-template-columns: minmax(0, 1fr); }
+  .console-rail { flex-direction: row; align-items: stretch; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--con-hair); }
+  .console-meter { flex: 0 0 210px; }
+  .console-rail-heading { display: none; }
+  .console-rail-list { flex-direction: row; overflow: visible; }
+  .console-rail-item { flex: 0 0 220px; }
+  .console-rail-empty { flex: 1; display: grid; place-content: center; }
+}

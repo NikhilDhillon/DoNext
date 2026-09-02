@@ -4,6 +4,24 @@ import type { AvailabilityWindow, PlanningEntry, ScheduleBlock } from "@/lib/typ
 // verbatim from the calendar component so the scheduling rules stay in one place while the
 // presentation is rebuilt around them.
 
+export type UnscheduledItem = {
+  id: string;
+  name: string;
+  remaining_minutes: number;
+  reason_code?: string;
+  reason: string;
+};
+
+// Unscheduled identifiers arrive as "task:<id>", "goal:<id>:<date>" or "flex:<id>…".
+// Only the leading kind and id are meaningful when linking a newly placed block.
+export function unscheduledLink(identifier: string) {
+  const [kind, id] = identifier.split(":");
+  if (!id) return null;
+  if (kind === "task") return { taskId: id, goalId: null, blockType: "focus" as const };
+  if (kind === "goal" || kind === "flex") return { taskId: null, goalId: id, blockType: "goal" as const };
+  return null;
+}
+
 export type DragPreview = {
   blockId: string;
   startAt: string;

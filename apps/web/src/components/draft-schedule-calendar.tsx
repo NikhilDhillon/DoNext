@@ -53,7 +53,11 @@ import {
   weekday,
   zonedDateTimeToIso,
 } from "@/components/draft-calendar/lib";
-import type { DragPreview, EventLane } from "@/components/draft-calendar/lib";
+import {
+  unscheduledLink,
+} from "@/components/draft-calendar/lib";
+import type { DragPreview, EventLane, UnscheduledItem } from "@/components/draft-calendar/lib";
+import { UnplacedRail, formatMinutes } from "@/components/draft-calendar/unplaced-rail";
 import { BlockInspector } from "@/components/draft-calendar/block-inspector";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
@@ -70,10 +74,21 @@ type DraftScheduleCalendarProps = {
   horizonEnd: string;
   timezone: string;
   proposalId: string;
+  unscheduled: UnscheduledItem[];
+  scheduledMinutes: number;
+  requestedMinutes: number;
   onEdit: (block: ScheduleBlock) => void;
   onDuplicate: (block: ScheduleBlock) => void;
   onAdd: (date?: string) => void;
   onMoved: () => Promise<void> | void;
+};
+
+type PlacementSession = {
+  item: UnscheduledItem;
+  pointerId: number;
+  x: number;
+  y: number;
+  target: { date: string; startMinute: number } | null;
 };
 
 type DragSession = {
@@ -98,6 +113,9 @@ export function DraftScheduleCalendar({
   horizonEnd,
   timezone,
   proposalId,
+  unscheduled,
+  scheduledMinutes,
+  requestedMinutes,
   onEdit,
   onDuplicate,
   onAdd,
@@ -120,6 +138,8 @@ export function DraftScheduleCalendar({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
+  const [placement, setPlacement] = useState<PlacementSession | null>(null);
+  const placementRef = useRef<PlacementSession | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const dragPreviewRef = useRef<DragPreview | null>(null);
@@ -454,6 +474,133 @@ export function DraftScheduleCalendar({
     setDayOffset(Math.min(next === 7 ? Math.floor(anchor / 7) * 7 : anchor, Math.max(totalDays - next, 0)));
   }
 
+  // Dropping an unplaced item creates a real block through the same endpoint the undo path
+  // uses. Its length is trimmed to the free run at the drop point so the placement is one the
+  // API will accept rather than an immediate validation failure.
+  function availableMinutesAt(date: string, startMinute: number) {
+    const interval = focusIntervalsForDate(date, availability.data ?? [])
+      .find(([from, to]) => from <= startMinute && startMinute < to);
+    if (!interval) return 0;
+    const sameDay = [
+      ...displayedBlocks.filter((block) => dateInTimezone(block.start_at, timezone) === date)
+        .map((block) => ({ start: block.start_at, end: block.end_at })),
+      ...displayedFixedEvents.filter((entry) => dateInTimezone(entry.start_at, timezone) === date)
+        .map((entry) => ({ start: entry.start_at, end: entry.end_at })),
+    ];
+    const nextStart = sameDay
+      .map(({ start }) => {
+        const parts = timeParts(start, timezone);
+        return parts.hour * 60 + parts.minute;
+      })
+      .filter((minute) => minute > startMinute)
+      .sort((first, second) => first - second)[0];
+    return Math.max(Math.min(interval[1], nextStart ?? interval[1]) - startMinute, 0);
+  }
+
+  function beginPlacement(item: UnscheduledItem, event: ReactPointerEvent<HTMLElement>) {
+    event.preventDefault();
+    setMoveError(null);
+    setMoveStatus(null);
+    const session: PlacementSession = {
+      item,
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      target: null,
+    };
+    placementRef.current = session;
+    setPlacement(session);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function movePlacement(event: ReactPointerEvent<HTMLElement>) {
+    const session = placementRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    const grid = gridRef.current;
+    let target: PlacementSession["target"] = null;
+    if (grid) {
+      const bounds = grid.getBoundingClientRect();
+      const insideX = event.clientX > bounds.left + GUTTER_WIDTH && event.clientX < bounds.right;
+      const insideY = event.clientY > bounds.top && event.clientY < bounds.bottom;
+      if (insideX && insideY && bounds.height) {
+        const columnWidth = (bounds.width - GUTTER_WIDTH) / columns;
+        const index = Math.min(
+          Math.floor((event.clientX - bounds.left - GUTTER_WIDTH) / columnWidth),
+          columns - 1,
+        );
+        const minute = startHour * 60
+          + Math.round((((event.clientY - bounds.top) / bounds.height) * dayMinutes) / 15) * 15;
+        target = { date: days[index], startMinute: minute };
+      }
+    }
+    const next = { ...session, x: event.clientX, y: event.clientY, target };
+    placementRef.current = next;
+    setPlacement(next);
+  }
+
+  async function finishPlacement(pointerId?: number) {
+    const session = placementRef.current;
+    if (!session || (pointerId !== undefined && session.pointerId !== pointerId)) return;
+    placementRef.current = null;
+    setPlacement(null);
+    const target = session.target;
+    if (!target) return;
+    if (!isDraftDay(target.date, horizonStart, horizonEnd)) {
+      setMoveError(`${formatCalendarDate(target.date)} is outside this 14-day draft.`);
+      return;
+    }
+    const available = availableMinutesAt(target.date, target.startMinute);
+    const minutes = Math.min(session.item.remaining_minutes, available);
+    if (minutes < 15) {
+      setMoveError(`There is no free focus time at that point on ${formatCalendarDate(target.date)}.`);
+      return;
+    }
+    const link = unscheduledLink(session.item.id);
+    if (!link) {
+      setMoveError(`${session.item.name} cannot be placed by hand. Open it from the block editor instead.`);
+      return;
+    }
+    const startAt = zonedDateTimeToIso(
+      target.date,
+      Math.floor(target.startMinute / 60),
+      target.startMinute % 60,
+      timezone,
+    );
+    setMoveStatus(`Placing ${session.item.name}…`);
+    try {
+      await apiRequest<ScheduleBlock>(
+        `/schedule-proposals/${proposalId}/blocks`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            title: session.item.name,
+            task_id: link.taskId,
+            goal_id: link.goalId,
+            fixed_event_id: null,
+            start_at: startAt,
+            end_at: new Date(new Date(startAt).getTime() + minutes * 60_000).toISOString(),
+            block_type: link.blockType,
+            locked: false,
+          }),
+        },
+      );
+      window.dispatchEvent(new Event("donext:planning-updated"));
+      await onMoved();
+      setMoveStatus(
+        minutes < session.item.remaining_minutes
+          ? `Placed ${formatMinutes(minutes)} of ${session.item.name} at ${formatMoveTime(startAt, timezone)}. ${formatMinutes(session.item.remaining_minutes - minutes)} still unplaced.`
+          : `${session.item.name} placed at ${formatMoveTime(startAt, timezone)}`,
+      );
+    } catch (requestError) {
+      setMoveStatus(null);
+      setMoveError(
+        requestError instanceof ApiRequestError
+          ? requestError.message
+          : `DoNext could not place ${session.item.name}.`,
+      );
+    }
+  }
+
   async function undoDelete() {
     if (!deletedBlock) return;
     const block = deletedBlock;
@@ -482,8 +629,9 @@ export function DraftScheduleCalendar({
     <section
       aria-label={`Draft calendar for ${formatRange(rangeStart, rangeEnd)}`}
       className="draft-console"
-      onMouseUp={() => void finishDrag()}
-      onPointerUpCapture={(event) => void finishDrag(event.pointerId)}
+      onMouseUp={() => { void finishDrag(); void finishPlacement(); }}
+      onPointerMove={movePlacement}
+      onPointerUpCapture={(event) => { void finishDrag(event.pointerId); void finishPlacement(event.pointerId); }}
     >
       <header className="console-bar">
         <h3>Draft calendar</h3>
@@ -534,7 +682,13 @@ export function DraftScheduleCalendar({
         </button>
       </header>
 
-      <div className="console-body">
+      <div className="console-body with-rail">
+        <UnplacedRail
+          items={unscheduled}
+          requestedMinutes={requestedMinutes}
+          scheduledMinutes={scheduledMinutes}
+          onGrab={beginPlacement}
+        />
         <div className="console-cal">
           <div className="console-head" style={{ gridTemplateColumns: columnTemplate }}>
             <div className="console-head-gutter">{timezoneName(timezone, rangeStart)}</div>
@@ -717,6 +871,13 @@ export function DraftScheduleCalendar({
           </footer>
         </div>
       </div>
+
+      {placement ? (
+        <div className="console-ghost" style={{ top: placement.y - 20, left: placement.x - 95 }}>
+          <span>{formatMinutes(placement.item.remaining_minutes)}</span>
+          <strong>{placement.item.name}</strong>
+        </div>
+      ) : null}
 
       {moveError ? (
         <p className="console-status error" role="alert"><span>{moveError}</span></p>
