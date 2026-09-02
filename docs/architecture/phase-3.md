@@ -99,6 +99,43 @@ The review experience preserves editable blocks, warnings, placement reasons, un
 stale-input protection, rejection/revision, and explicit acceptance. Accepted Today and Week views
 remain isolated from unaccepted proposals.
 
+## Known gaps against the scheduling specification
+
+The student-aware cutover establishes the intended architecture, but the following behavior is not
+fully implemented yet:
+
+- **Early exam-review cadence:** the optimizer rewards using more exam-preparation days after
+  academic coverage is fixed, but it does not explicitly target one 30-to-45-minute review block
+  approximately every three days while urgent pre-exam assignments are still underway, nor does it
+  minimize excessive gaps as preparation intensifies.
+- **Fair sharing across simultaneous exams:** the greedy fallback interleaves exam sessions, but the
+  CP-SAT path does not yet maximize a fair minimum completion ratio across active exams before
+  allocating the remaining capacity by exam date, slack, remaining preparation, and effective
+  weight. Under severe partial capacity, one exam can therefore receive less preparation than the
+  intended fairness rule permits.
+- **Exam-material readiness:** exam preparation is generic and does not invent topics, but it is not
+  currently gated against the course's first lecture or asynchronous content-available timestamp.
+  A proposal can therefore place generic preparation before any course material is available.
+- **Least-disruptive sleep edges:** sleep reduction respects the configured minimum and is reported
+  in the proposal, but the current window builder splits each allowed reduction between a later
+  bedtime and earlier wake time. It does not compare saved availability and energy suitability to
+  choose the least disruptive edge or combination.
+- **Complete extra-focus explanation before consent:** the API returns the extra minutes by date,
+  resulting focus totals, and protected work, but the onboarding and regeneration confirmations
+  currently show only the aggregate extra time. The student does not yet see every affected date
+  and protected deadline before deciding.
+- **Per-block displacement explanations:** block reasons contain readiness, deadline, slack, exam
+  relationship, weight, energy, and capacity-source details. They do not yet identify the specific
+  flexible or academic alternative that lost capacity because that block was selected.
+- **Canonical acceptance coverage:** the suite covers many of the required behaviors, but it does
+  not yet encode all 17 scenarios in `docs/scheduling.md` as explicit automated acceptance tests.
+  Missing explicit coverage includes the pre-exam versus 48-hour priority interaction, slack-driven
+  early starts, effective-weight and unknown-weight ties, sleep fallback reporting, least-important
+  academic sacrifice, and equivalent hard-constraint checks for both greedy and CP-SAT paths.
+
+Until these gaps are implemented and tested, this snapshot should not be treated as complete
+conformance with `docs/scheduling.md`.
+
 ## Out of scope
 
 Daily completion check-ins, partial block completion, and learned course-specific effort estimates
@@ -106,7 +143,9 @@ remain future work. The calendar's visual redesign is also separate from this sc
 
 ## Verification
 
-The repository test suite covers the API contracts, defaults and provenance, linked class readiness,
-proposal lifecycle, hard scheduling constraints, fallback behavior, revision-AI boundary, and stale
-input protection. Delivery validation includes an isolated Alembic upgrade-downgrade-upgrade cycle,
-API lint/type/tests, frontend lint/type/build, and the repository-wide `pnpm check`.
+The repository test suite currently covers the API contracts, defaults and provenance, linked class
+readiness, proposal lifecycle, core hard scheduling constraints, fallback behavior, revision-AI
+boundary, and stale input protection. Delivery validation includes an isolated Alembic
+upgrade-downgrade-upgrade cycle, API lint/type/tests, frontend lint/type/build, and the
+repository-wide `pnpm check`. The missing acceptance coverage listed above remains required before
+the scheduling specification can be considered fully implemented.
