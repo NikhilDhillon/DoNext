@@ -804,3 +804,59 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-palette li button svg { flex: 0 0 auto; color: var(--con-t3); }
 .console-palette li button em { margin-left: auto; color: var(--con-t3); font-size: 11.5px; font-style: normal; }
 .console-palette-empty { margin: 0; padding: 26px 16px; color: var(--con-t3); font-size: 13px; text-align: center; }
+
+/* Draft calendar — day timeline for narrow screens */
+@media (max-width: 760px) {
+  .console-cal > .console-head, .console-cal > .console-scroll, .console-foot { display: none; }
+  .console-agenda { display: block; padding: 12px; }
+  .console-bar { flex-wrap: wrap; gap: 7px; }
+  .console-bar h3 { flex: 1 1 auto; font-size: 15px; }
+  .console-seg { order: 5; width: 100%; }
+  .console-seg button { flex: 1; min-height: 40px; }
+  .console-btn, .console-kbd-button { min-height: 44px; }
+  .console-btn.icon { width: 44px; }
+  .console-cta { order: 6; width: 100%; justify-content: center; min-height: 46px; }
+  .console-agenda-days { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; scrollbar-width: none; }
+  .console-agenda-days::-webkit-scrollbar { display: none; }
+  .console-agenda-days button { display: flex; min-width: 50px; min-height: 62px; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--con-hair); border-radius: 12px; background: var(--con-surface); }
+  .console-agenda-days button > span { color: var(--con-t3); font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+  .console-agenda-days button > strong { font-size: 16px; font-weight: 700; letter-spacing: -.025em; }
+  .console-agenda-days button > i { display: flex; width: 26px; gap: 2px; }
+  .console-agenda-days button > i em { flex: 1; height: 3px; border-radius: 2px; background: rgba(255,255,255,.1); }
+  .console-agenda-days button > i em.on { background: var(--con-study); }
+  .console-agenda-days button.today > strong { color: var(--con-now); }
+  .console-agenda-days button.on { border-color: var(--con-acc); background: var(--con-acc-dim); }
+  .console-agenda-days button.on > span, .console-agenda-days button.on > strong { color: var(--con-acc); }
+  .console-agenda-days button.outside { border-style: dashed; background: transparent; }
+  .console-agenda-days button.outside > span, .console-agenda-days button.outside > strong { color: var(--con-t4); }
+  .console-agenda-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 6px 2px 10px; }
+  .console-agenda-head h4 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.015em; }
+  .console-agenda-head span { color: var(--con-t3); font-size: 12px; }
+  .console-agenda-rows { display: flex; flex-direction: column; gap: 8px; }
+  .console-agenda-row { display: grid; grid-template-columns: 50px minmax(0, 1fr); align-items: start; gap: 11px; }
+  .console-agenda-time { padding-top: 12px; color: var(--con-t3); font-size: 12px; font-weight: 680; text-align: right; }
+  .console-agenda-time em { display: block; margin-top: 1px; color: var(--con-t4); font-size: 10px; font-style: normal; }
+  .console-agenda-open { display: flex; width: 100%; min-height: 48px; align-items: center; gap: 8px; border: 1px dashed var(--con-hair); border-radius: 11px; padding: 0 13px; color: var(--con-t3); font-size: 12.5px; font-weight: 620; text-align: left; }
+  .console-agenda-open:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.06); color: var(--con-acc); }
+  .console-agenda-event { position: relative; display: flex; width: 100%; min-height: 56px; align-items: center; gap: 10px; overflow: hidden; border-radius: 11px; padding: 11px 12px 11px 16px; text-align: left; }
+  .console-agenda-event::before { position: absolute; top: 0; bottom: 0; left: 0; width: 3px; background: currentColor; content: ""; }
+  .console-agenda-event.editable { border: 1px dashed currentColor; }
+  .console-agenda-event.violet { background: rgba(156,140,255,.14); color: var(--con-klass); }
+  .console-agenda-event.mint { background: rgba(62,217,156,.12); color: var(--con-study); }
+  .console-agenda-event.slate { background: rgba(147,169,162,.13); color: var(--con-work); }
+  .console-agenda-event.coral { background: rgba(232,153,107,.13); color: var(--con-goal); }
+  .console-agenda-event.blue { background: rgba(111,182,222,.13); color: var(--con-appt); }
+  .console-agenda-event.amber { background: rgba(217,184,99,.13); color: var(--con-amber); }
+  .console-agenda-body { display: block; min-width: 0; flex: 1; }
+  .console-agenda-kind { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  .console-agenda-body strong { display: block; margin-top: 2px; overflow: hidden; color: var(--con-t1); font-size: 14.5px; font-weight: 680; line-height: 1.3; text-overflow: ellipsis; }
+  .console-agenda-body small { display: block; margin-top: 2px; color: var(--con-t3); font-size: 11.5px; }
+  .console-agenda-note { display: flex; align-items: center; justify-content: center; gap: 9px; margin: 0; border: 1px dashed var(--con-hair); border-radius: 12px; padding: 26px 16px; color: var(--con-t3); font-size: 12.5px; line-height: 1.5; text-align: center; }
+  .console-agenda-add { display: flex; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; border-radius: 13px; background: var(--con-acc); color: #05120d; font-size: 15px; font-weight: 700; }
+  .console-agenda-add:disabled { background: #2b3835; color: #6c7b76; cursor: not-allowed; }
+  .console-inspector { position: fixed; top: auto; right: 0; bottom: 0; left: 0; width: auto; border-width: 1px 0 0; border-radius: 18px 18px 0 0; padding: 16px; }
+  .console-inspector-actions button { min-height: 46px; font-size: 13px; }
+  .console-steps button { width: 34px; height: 34px; }
+  .console-status { bottom: 14px; }
+  .console-palette { top: 60px; }
+}

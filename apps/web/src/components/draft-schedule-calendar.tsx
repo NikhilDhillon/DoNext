@@ -66,6 +66,8 @@ import type { DragPreview, EventLane, UnscheduledItem } from "@/components/draft
 import { UnplacedRail, formatMinutes } from "@/components/draft-calendar/unplaced-rail";
 import { BlockInspector } from "@/components/draft-calendar/block-inspector";
 import { CommandPalette } from "@/components/draft-calendar/command-palette";
+import { DayAgenda } from "@/components/draft-calendar/day-agenda";
+import type { AgendaRow } from "@/components/draft-calendar/day-agenda";
 import type { Command } from "@/components/draft-calendar/command-palette";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
@@ -146,6 +148,7 @@ export function DraftScheduleCalendar({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
+  const [agendaIndex, setAgendaIndex] = useState(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [placement, setPlacement] = useState<PlacementSession | null>(null);
   const placementRef = useRef<PlacementSession | null>(null);
@@ -480,12 +483,14 @@ export function DraftScheduleCalendar({
 
   function goToToday() {
     closeInspector();
+    setAgendaIndex(Math.max(todayOffset - (columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset)), 0));
     if (todayOffset < 0 || todayOffset >= totalDays) return;
     setDayOffset(columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset));
   }
 
   function changeColumns(next: number) {
     closeInspector();
+    setAgendaIndex(0);
     const anchor = columns === 7 && next !== 7 && todayOffset >= offset && todayOffset < offset + 7
       ? todayOffset
       : offset;
@@ -643,6 +648,32 @@ export function DraftScheduleCalendar({
       );
     }
   }
+
+  const agendaDate = days[Math.min(agendaIndex, days.length - 1)] ?? rangeStart;
+  const agendaOutside = !isDraftDay(agendaDate, horizonStart, horizonEnd);
+  const agendaBlocks = displayedBlocks.filter(
+    (block) => dateInTimezone(block.start_at, timezone) === agendaDate,
+  );
+  const agendaFixed = displayedFixedEvents.filter(
+    (entry) => dateInTimezone(entry.start_at, timezone) === agendaDate,
+  );
+  const agendaRows = buildAgendaRows({
+    date: agendaDate,
+    blocks: agendaBlocks,
+    fixedEvents: agendaFixed,
+    windows: availability.data ?? [],
+    timezone,
+    onAdd: () => onAdd(agendaDate),
+  });
+  const agendaDays = days.map((day) => ({
+    date: day,
+    weekday: weekday(day),
+    dayNumber: dayNumber(day),
+    today: day === today,
+    outside: !isDraftDay(day, horizonStart, horizonEnd),
+    load: displayedBlocks.filter((block) => dateInTimezone(block.start_at, timezone) === day).length
+      + displayedFixedEvents.filter((entry) => dateInTimezone(entry.start_at, timezone) === day).length,
+  }));
 
   const commands: Command[] = [
     ...(selectedBlock ? [
@@ -943,6 +974,22 @@ export function DraftScheduleCalendar({
             <p className="console-notice">Loading classes, commitments, and focus hours…</p>
           ) : null}
 
+          <DayAgenda
+            activeDate={agendaDate}
+            days={agendaDays}
+            heading={agendaDate === today ? "Today" : formatCalendarDate(agendaDate)}
+            outside={agendaOutside}
+            rows={agendaRows}
+            summary={agendaOutside
+              ? "Outside draft"
+              : agendaBlocks.length || agendaFixed.length
+              ? `${agendaBlocks.length} draft · ${agendaFixed.length} fixed`
+              : "Open all day"}
+            onAdd={() => onAdd(agendaDate)}
+            onSelectBlock={openBlock}
+            onSelectDay={setAgendaIndex}
+          />
+
           {selectedBlock ? (
             <BlockInspector
               block={selectedBlock}
@@ -1113,6 +1160,95 @@ function fixedEventIcon(entry: PlanningEntry) {
   if (entry.category === "class") return <GraduationCap size={11} />;
   if (entry.category === "work") return <BriefcaseBusiness size={11} />;
   return <Pin size={11} />;
+}
+
+// The mobile timeline reads the same displayed events as the grid, with the untouched runs
+// of focus time between them turned into their own rows.
+function buildAgendaRows({
+  date,
+  blocks,
+  fixedEvents,
+  windows,
+  timezone,
+  onAdd,
+}: {
+  date: string;
+  blocks: ScheduleBlock[];
+  fixedEvents: PlanningEntry[];
+  windows: AvailabilityWindow[];
+  timezone: string;
+  onAdd: () => void;
+}): AgendaRow[] {
+  const events = [
+    ...fixedEvents.map((entry) => ({
+      key: `fixed:${entry.id}`,
+      range: minuteRange(entry, timezone),
+      tone: fixedEventColor(entry),
+      icon: fixedEventIcon(entry),
+      eyebrow: entry.course_code ?? fixedEventLabel(entry),
+      title: entry.title,
+      detail: `${formatEntryTime(entry, timezone)}${entry.location ? ` · ${entry.location}` : ""}`,
+      locked: true,
+      block: null as ScheduleBlock | null,
+    })),
+    ...blocks.map((block) => {
+      const title = splitEventTitle(block.title);
+      return {
+        key: `draft:${block.id}`,
+        range: minuteRange(block, timezone),
+        tone: blockColor(block),
+        icon: <GripVertical size={11} />,
+        eyebrow: title.eyebrow ? `${title.eyebrow} · draft` : "Draft",
+        title: title.label,
+        detail: formatBlockTime(block, timezone),
+        locked: block.locked,
+        block,
+      };
+    }),
+  ].sort((first, second) => first.range[0] - second.range[0] || first.range[1] - second.range[1]);
+
+  const gaps = openFocusRuns(date, windows, events.map((event) => event.range), 45);
+  const ordered: { at: number; row: AgendaRow }[] = [
+    ...gaps.map(([from, to]) => ({
+      at: from,
+      row: {
+        kind: "gap" as const,
+        key: `gap:${from}`,
+        clock: clockLabel(from),
+        meridiem: meridiemLabel(from),
+        label: `${formatOpenRun(to - from)} open — add a block`,
+        onAdd,
+      },
+    })),
+    ...events.map((event) => ({
+      at: event.range[0],
+      row: {
+        kind: "event" as const,
+        key: event.key,
+        clock: clockLabel(event.range[0]),
+        meridiem: meridiemLabel(event.range[0]),
+        tone: event.tone,
+        icon: event.icon,
+        eyebrow: event.eyebrow,
+        title: event.title,
+        detail: event.detail,
+        locked: event.locked,
+        block: event.block,
+      },
+    })),
+  ];
+  return ordered
+    .sort((first, second) => first.at - second.at)
+    .map((entry) => entry.row);
+}
+
+function clockLabel(minuteOfDay: number) {
+  const hour = Math.floor(minuteOfDay / 60) % 24;
+  return `${hour % 12 || 12}:${String(minuteOfDay % 60).padStart(2, "0")}`;
+}
+
+function meridiemLabel(minuteOfDay: number) {
+  return Math.floor(minuteOfDay / 60) % 24 >= 12 ? "PM" : "AM";
 }
 
 function spanNoun(columns: number) {
