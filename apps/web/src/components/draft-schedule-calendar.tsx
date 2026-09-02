@@ -46,6 +46,7 @@ import {
   hasFocusTime,
   isDraftDay,
   mondayOnOrBefore,
+  openFocusRuns,
   placementFromPointer,
   splitEventTitle,
   timeParts,
@@ -726,6 +727,23 @@ export function DraftScheduleCalendar({
               {days.map((day) => {
                 const draftDay = isDraftDay(day, horizonStart, horizonEnd);
                 const openForBlocks = draftDay && hasFocusTime(day, availability.data ?? []);
+                const dayBlocks = displayedBlocks.filter((block) => {
+                  const preview = dragPreview?.blockId === block.id ? dragPreview : null;
+                  return dateInTimezone(preview ? preview.startAt : block.start_at, timezone) === day;
+                });
+                const dayFixed = displayedFixedEvents.filter(
+                  (entry) => dateInTimezone(entry.start_at, timezone) === day,
+                );
+                // Columns narrower than a third of the calendar cannot carry a readable label,
+                // so the open-time targets only appear in the 3-day and Day spans.
+                const openRuns = openForBlocks && columns <= 3
+                  ? openFocusRuns(
+                    day,
+                    availability.data ?? [],
+                    [...dayBlocks, ...dayFixed].map((item) => minuteRange(item, timezone)),
+                    90,
+                  )
+                  : [];
                 return (
                   <div
                     className={`console-col${day === today ? " today" : ""}${draftDay ? "" : " outside"}`}
@@ -749,8 +767,22 @@ export function DraftScheduleCalendar({
                     />
                     {draftDay ? null : <span className="console-outside-label">Outside the draft</span>}
 
-                    {displayedFixedEvents
-                      .filter((entry) => dateInTimezone(entry.start_at, timezone) === day)
+                    {openRuns.map(([from, to]) => (
+                      <button
+                        className="console-open"
+                        key={`${day}:${from}`}
+                        style={{
+                          top: `calc(${percentOf(from, startHour, dayMinutes)}% + 4px)`,
+                          height: `calc(${((to - from) / dayMinutes) * 100}% - 8px)`,
+                        }}
+                        type="button"
+                        onClick={() => onAdd(day)}
+                      >
+                        <Plus size={13} /> {formatOpenRun(to - from)} open
+                      </button>
+                    ))}
+
+                    {dayFixed
                       .map((entry) => (
                         <ConsoleFixedEvent
                           entry={entry}
@@ -762,12 +794,7 @@ export function DraftScheduleCalendar({
                         />
                       ))}
 
-                    {displayedBlocks
-                      .filter((block) => {
-                        const preview = dragPreview?.blockId === block.id ? dragPreview : null;
-                        const start = preview ? preview.startAt : block.start_at;
-                        return dateInTimezone(start, timezone) === day;
-                      })
+                    {dayBlocks
                       .map((block) => (
                         <ConsoleDraftBlock
                           block={block}
@@ -1007,6 +1034,22 @@ function fixedEventIcon(entry: PlanningEntry) {
   if (entry.category === "class") return <GraduationCap size={11} />;
   if (entry.category === "work") return <BriefcaseBusiness size={11} />;
   return <Pin size={11} />;
+}
+
+function minuteRange(item: { start_at: string; end_at: string }, timezone: string) {
+  const start = timeParts(item.start_at, timezone);
+  const end = timeParts(item.end_at, timezone);
+  const endMinute = end.hour * 60 + end.minute;
+  const startMinute = start.hour * 60 + start.minute;
+  return [startMinute, endMinute <= startMinute ? 24 * 60 : endMinute];
+}
+
+function formatOpenRun(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest} minutes`;
+  if (!rest) return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+  return `${hours}h ${rest}m`;
 }
 
 function percentOf(minuteOfDay: number, startHour: number, dayMinutes: number) {

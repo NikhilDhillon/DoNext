@@ -328,6 +328,23 @@ export function subtractMinuteInterval(interval: number[], exclusion: number[]) 
   return remaining;
 }
 
+// Runs of focus time on a date with nothing scheduled in them. Used to turn empty space into
+// explicit "N open" targets when a column is wide enough to label them.
+export function openFocusRuns(
+  date: string,
+  windows: AvailabilityWindow[],
+  busy: number[][],
+  minimumMinutes: number,
+) {
+  const merged = mergeMinuteIntervals(busy.map((interval) => [...interval]));
+  return merged
+    .reduce(
+      (remaining, taken) => remaining.flatMap((interval) => subtractMinuteInterval(interval, taken)),
+      focusIntervalsForDate(date, windows),
+    )
+    .filter(([from, to]) => to - from >= minimumMinutes);
+}
+
 export function hasFocusTime(date: string, windows: AvailabilityWindow[]) {
   return focusIntervalsForDate(date, windows).length > 0;
 }
