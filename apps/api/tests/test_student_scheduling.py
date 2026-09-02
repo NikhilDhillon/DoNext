@@ -461,7 +461,11 @@ def test_extra_focus_requires_exact_one_draft_decision(client: TestClient) -> No
 
 def test_urgent_buffer_is_used_for_required_work_before_optional_work(
     client: TestClient,
+    monkeypatch,
 ) -> None:
+    # The single saved opening is an hour wide, so the generation instant has to be pinned or
+    # the wall clock walks past it and the plan has nowhere left to put the work.
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 2, 8, tzinfo=UTC))
     register(client)
     semester = create_semester(client)
     client.patch(
@@ -534,9 +538,10 @@ def _flexible_goal(client: TestClient, semester: dict[str, object]) -> None:
     assert response.status_code == 201
 
 
-def _pressured_plan(client: TestClient) -> dict[str, object]:
+def _pressured_plan(client: TestClient, monkeypatch) -> dict[str, object]:
     """A 48-hour deadline that only fits once the rollover buffer is released."""
 
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 2, 8, tzinfo=UTC))
     semester = create_semester(client)
     client.patch(
         "/api/v1/preferences",
@@ -573,7 +578,10 @@ def _pressured_plan(client: TestClient) -> dict[str, object]:
     )
 
 
-def test_contiguous_availability_keeps_each_saved_energy_level(client: TestClient) -> None:
+def test_contiguous_availability_keeps_each_saved_energy_level(
+    client: TestClient, monkeypatch
+) -> None:
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 2, 8, tzinfo=UTC))
     register(client)
     semester = create_semester(client)
     client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
@@ -611,9 +619,9 @@ def test_contiguous_availability_keeps_each_saved_energy_level(client: TestClien
     assert "medium" not in levels
 
 
-def test_released_rollover_only_funds_the_urgent_day(client: TestClient) -> None:
+def test_released_rollover_only_funds_the_urgent_day(client: TestClient, monkeypatch) -> None:
     register(client)
-    proposal = _pressured_plan(client)
+    proposal = _pressured_plan(client, monkeypatch)
     summary = cast(dict[str, list[dict[str, object]]], proposal["generation_summary"])
 
     # Releasing the buffer opens it for the 48-hour deadline; it must not become ordinary
@@ -623,9 +631,11 @@ def test_released_rollover_only_funds_the_urgent_day(client: TestClient) -> None
     assert summary["flexible_adjustments"], "the goal should still have been reduced"
 
 
-def test_capacity_passes_still_name_the_work_a_block_displaced(client: TestClient) -> None:
+def test_capacity_passes_still_name_the_work_a_block_displaced(
+    client: TestClient, monkeypatch
+) -> None:
     register(client)
-    proposal = _pressured_plan(client)
+    proposal = _pressured_plan(client, monkeypatch)
     blocks = cast(list[dict[str, object]], proposal["blocks"])
 
     # The buffer pass solves with untouched work pinned to what it already had, which hides
