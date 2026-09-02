@@ -248,16 +248,10 @@ def _greedy_baseline(
                 if cursor < len(sessions_by_item[item.id]):
                     ordered.append(sessions_by_item[item.id][cursor])
             cursor += 1
-    distant = sorted(
+    for item in sorted(
         (item for item in items if item.kind == "distant_task"),
-        key=lambda item: (
-            item.due_at or datetime.max.replace(tzinfo=UTC),
-            item.weight_percent is None,
-            -(item.weight_percent or 0),
-            item.id,
-        ),
-    )
-    for item in distant:
+        key=cmp_to_key(_compare_academic),
+    ):
         ordered.extend(sessions_by_item[item.id])
 
     for session in ordered:
@@ -841,6 +835,23 @@ def _optimize_sessions(
         for session in sessions
         if session.item.kind == "distant_task"
     )
+    # Distant assignments compete only with each other, so total distant minutes alone leaves
+    # the choice between them unranked and the solver free to spend the earliest opening on the
+    # last-due assignment. Rank them with the same comparator the in-horizon academics use.
+    ordered_distant = sorted(
+        (item for item in items if item.kind == "distant_task"),
+        key=cmp_to_key(_compare_academic),
+    )
+    distant_rank = {
+        item.id: len(ordered_distant) - index for index, item in enumerate(ordered_distant)
+    }
+    distant_importance = sum(
+        presence_by_session[(session.item.id, session.index)]
+        * session.duration_minutes
+        * distant_rank[session.item.id]
+        for session in sessions
+        if session.item.kind == "distant_task"
+    )
     fairness_terms: list[cp_model.LinearExpr] = []
     for priority in sorted(
         {item.priority_rank for item in items if item.kind in {"goal", "flexible_commitment"}},
@@ -879,7 +890,7 @@ def _optimize_sessions(
         + distant_minutes * 100_000
         + sum(timing_terms)
     )
-    second_solver = _solver(max(time_limit_seconds * 0.2, 0.05))
+    second_solver = _solver(max(time_limit_seconds * 0.12, 0.05))
     second_status = second_solver.solve(model)
     if second_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         active_solver = second_solver
@@ -887,6 +898,23 @@ def _optimize_sessions(
     else:
         active_solver = first_solver
         active_status = first_status
+    # Goal coverage, goal fairness and total distant coverage are settled above and stay fixed,
+    # so ranking the distant work cannot take capacity from a flexible goal. Only the choice of
+    # which distant assignment fills the already-granted minutes is still open, and it outranks
+    # the timing bonus: starting the nearer deadline matters more than starting a tick earlier.
+    if len(ordered_distant) > 1 and second_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        model.add(flexible_minutes == second_solver.value(flexible_minutes))
+        if fairness_terms:
+            fairness_total = sum(fairness_terms)
+            model.add(fairness_total == second_solver.value(fairness_total))
+        model.add(distant_minutes == second_solver.value(distant_minutes))
+        timing_ceiling = len(sessions) * (latest_tick + 30) + 1
+        model.maximize(distant_importance * timing_ceiling + sum(timing_terms))
+        distant_solver = _solver(max(time_limit_seconds * 0.08, 0.05))
+        distant_status = distant_solver.solve(model)
+        if distant_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            active_solver = distant_solver
+            active_status = distant_status
     placements: list[Placement] = []
     scheduled = {item.id: 0 for item in items}
     for alternative in alternatives:
