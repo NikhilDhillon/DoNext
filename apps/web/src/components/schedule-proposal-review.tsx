@@ -432,14 +432,33 @@ function proposalWarningDisplay(
 
 function ProposalTradeoffs({ summary }: { summary: ScheduleProposal["generation_summary"] }) {
   const details = [
-    ...summary.exam_preparation.map((item) => `${String(item.name)} · ${formatMinutes(Number(item.scheduled_prep_minutes ?? 0))} of ${formatMinutes(Number(item.total_estimate_minutes ?? 0))} scheduled · ${String(item.estimate_source).replaceAll("_", " ")}`),
+    ...summary.exam_preparation.map(examPreparationTradeoff),
     ...summary.flexible_adjustments.map((item) => `${String(item.name)} · reduced by ${formatMinutes(Number(item.reduced_minutes ?? 0))}`),
     ...summary.rollover_by_day.filter((item) => Number(item.consumed_minutes ?? 0) > 0).map((item) => `${String(item.date)} · used ${formatMinutes(Number(item.consumed_minutes))} of rollover buffer`),
     ...summary.extra_focus_by_day.map((item) => `${String(item.date)} · ${formatMinutes(Number(item.used_minutes ?? 0))} extra focus`),
     ...summary.sleep_by_day.filter((item) => Number(item.reduction_minutes ?? 0) > 0).map((item) => `${String(item.date)} · sleep reduced by ${formatMinutes(Number(item.reduction_minutes))}, staying at or above the minimum`),
+    ...summary.semester_pressure.filter((item) => Number(item.required_lead_minutes ?? 0) > 0).map((item) => `${String(item.checkpoint)} · ${formatMinutes(Number(item.required_lead_minutes))} must start in this horizon to avoid a future capacity shortfall`),
+    ...summary.semester_pressure.flatMap((item) => Array.isArray(item.unknown_exam_estimates) && item.unknown_exam_estimates.length ? [`${item.unknown_exam_estimates.length} future exam ${item.unknown_exam_estimates.length === 1 ? "estimate is" : "estimates are"} still unknown and were not assigned invented preparation time`] : []),
   ];
   if (!details.length) return null;
   return <div className="proposal-unresolved"><strong>How this draft made room</strong>{details.map((detail) => <p key={detail}>{detail}</p>)}</div>;
+}
+
+function examPreparationTradeoff(item: Record<string, unknown>) {
+  const base = `${String(item.name)} · ${formatMinutes(Number(item.scheduled_prep_minutes ?? 0))} of ${formatMinutes(Number(item.total_estimate_minutes ?? 0))} scheduled · ${String(item.estimate_source).replaceAll("_", " ")}`;
+  const release = item.material_release;
+  if (!release || typeof release !== "object") return base;
+  const details = release as Record<string, unknown>;
+  const unlocked = formatMinutes(Number(details.currently_unlocked_minutes ?? 0));
+  if (details.method === "content_available") {
+    return `${base} · ${unlocked} unlocked from the confirmed content-available time`;
+  }
+  const completed = Number(details.completed_checkpoints ?? 0);
+  const total = Number(details.total_checkpoints ?? 0);
+  const next = typeof details.next_release_at === "string"
+    ? ` · next release ${new Intl.DateTimeFormat("en-CA", { dateStyle: "medium", timeStyle: "short" }).format(new Date(details.next_release_at))}`
+    : "";
+  return `${base} · ${unlocked} unlocked after ${completed} of ${total} confirmed lectures${next}`;
 }
 
 function formatMinutes(minutes: number) {

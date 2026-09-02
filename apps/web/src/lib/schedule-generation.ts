@@ -2,14 +2,22 @@ type UnknownRecord = Record<string, unknown>;
 
 export function extraFocusDecisionMessage(details?: UnknownRecord) {
   const total = numberValue(details?.total_extra_minutes);
+  const requiredGain = numberValue(details?.required_minutes_gained);
+  const residualShortfall = numberValue(details?.residual_shortfall_minutes);
   const extraByDay = recordArray(details?.extra_minutes_by_day);
+  const approvedCapacityByDay = new Map(
+    recordArray(details?.approved_capacity_by_day).map((entry) => [
+      stringValue(entry.date),
+      numberValue(entry.minutes),
+    ]),
+  );
   const resultingByDay = new Map(
     recordArray(details?.resulting_focus_by_day).map((entry) => [
       stringValue(entry.date),
       numberValue(entry.minutes),
     ]),
   );
-  const protectedWork = recordArray(details?.protected_work);
+  const protectedWork = recordArray(details?.protected_items ?? details?.protected_work);
   const lines = [
     `This draft needs ${formatMinutes(total)} above your preferred focus limit to protect required academic work.`,
   ];
@@ -21,10 +29,15 @@ export function extraFocusDecisionMessage(details?: UnknownRecord) {
           const date = stringValue(entry.date);
           const extra = numberValue(entry.minutes);
           const resulting = resultingByDay.get(date);
-          return `• ${formatDate(date)}: +${formatMinutes(extra)}${resulting ? ` (${formatMinutes(resulting)} total focus)` : ""}`;
+          const approvedCapacity = approvedCapacityByDay.get(date);
+          return `• ${formatDate(date)}: +${formatMinutes(extra)}${approvedCapacity ? ` (${formatMinutes(approvedCapacity)} approved capacity)` : resulting ? ` (${formatMinutes(resulting)} total focus)` : ""}`;
         })
         .join("\n")}`,
     );
+  }
+
+  if (requiredGain) {
+    lines.push(`This protects ${formatMinutes(requiredGain)} of required work.${residualShortfall ? ` ${formatMinutes(residualShortfall)} would still remain unresolved.` : ""}`);
   }
 
   if (protectedWork.length) {

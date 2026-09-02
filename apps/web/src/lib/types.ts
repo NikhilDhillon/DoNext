@@ -184,6 +184,7 @@ export type ScheduleProposal = Schedule & {
     academic_requested_minutes: number;
     academic_scheduled_minutes: number;
     opportunistic_scheduled_minutes: number;
+    semester_pressure: Record<string, unknown>[];
     exam_preparation: Record<string, unknown>[];
     flexible_adjustments: Record<string, unknown>[];
     rollover_by_day: Record<string, unknown>[];
