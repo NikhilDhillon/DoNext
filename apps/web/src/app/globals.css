@@ -156,6 +156,9 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   --con-bg: #0a0f0e; --con-surface: #101614; --con-raise: #161e1b; --con-raise-2: #1c2523;
   --con-hair: rgba(255,255,255,.075); --con-hair-2: rgba(255,255,255,.038);
   --con-t1: #f0f4f2; --con-t2: #a9b6b1; --con-t3: #7e8d87; --con-t4: #4e5c57;
+  /* Real content that should read as recessed still has to clear AA. --con-t4 stays for
+     disabled controls, which WCAG 1.4.3 exempts. */
+  --con-quiet: #74827d;
   --con-acc: #3ed99c; --con-acc-dim: rgba(62,217,156,.13); --con-acc-edge: rgba(62,217,156,.45);
   --con-now: #ff6b4a;
   --con-klass: #9c8cff; --con-study: #3ed99c; --con-work: #93a9a2; --con-goal: #e8996b; --con-appt: #6fb6de; --con-amber: #d9b863;
@@ -196,7 +199,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-dayhead > small { margin-left: auto; color: var(--con-t3); font-size: 10.5px; }
 .console-dayhead.today > span, .console-dayhead.today > strong { color: var(--con-acc); }
 .console-dayhead.outside { background: rgba(255,255,255,.014); }
-.console-dayhead.outside > span, .console-dayhead.outside > strong { color: var(--con-t4); font-weight: 600; }
+.console-dayhead.outside > span, .console-dayhead.outside > strong { color: var(--con-quiet); font-weight: 600; }
 
 .console-scroll { overflow: auto; max-height: min(806px, 74vh); scrollbar-width: thin; }
 .console-scroll::-webkit-scrollbar { width: 9px; height: 9px; }
@@ -212,7 +215,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-hit { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; }
 .console-hit:hover:not(:disabled) { background: rgba(62,217,156,.045); }
 .console-hit:disabled { cursor: default; }
-.console-outside-label { position: absolute; top: 50%; right: 4px; left: 4px; color: var(--con-t4); font-size: 10.5px; text-align: center; transform: translateY(-50%); pointer-events: none; }
+.console-outside-label { position: absolute; top: 50%; right: 4px; left: 4px; color: var(--con-quiet); font-size: 11px; text-align: center; transform: translateY(-50%); pointer-events: none; }
 
 .console-event { position: absolute; z-index: 4; overflow: hidden; border-radius: 8px; padding: 6px 8px 6px 12px; text-align: left; }
 .console-event::before { position: absolute; top: 0; bottom: 0; left: 0; width: 2.5px; background: currentColor; content: ""; }
@@ -829,14 +832,14 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-agenda-days button.on { border-color: var(--con-acc); background: var(--con-acc-dim); }
   .console-agenda-days button.on > span, .console-agenda-days button.on > strong { color: var(--con-acc); }
   .console-agenda-days button.outside { border-style: dashed; background: transparent; }
-  .console-agenda-days button.outside > span, .console-agenda-days button.outside > strong { color: var(--con-t4); }
+  .console-agenda-days button.outside > span, .console-agenda-days button.outside > strong { color: var(--con-quiet); }
   .console-agenda-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin: 6px 2px 10px; }
   .console-agenda-head h4 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.015em; }
   .console-agenda-head span { color: var(--con-t3); font-size: 12px; }
   .console-agenda-rows { display: flex; flex-direction: column; gap: 8px; }
   .console-agenda-row { display: grid; grid-template-columns: 50px minmax(0, 1fr); align-items: start; gap: 11px; }
   .console-agenda-time { padding-top: 12px; color: var(--con-t3); font-size: 12px; font-weight: 680; text-align: right; }
-  .console-agenda-time em { display: block; margin-top: 1px; color: var(--con-t4); font-size: 10px; font-style: normal; }
+  .console-agenda-time em { display: block; margin-top: 1px; color: var(--con-quiet); font-size: 11px; font-style: normal; }
   .console-agenda-open { display: flex; width: 100%; min-height: 48px; align-items: center; gap: 8px; border: 1px dashed rgba(255,255,255,.16); border-radius: 11px; padding: 12px 13px; color: var(--con-t3); font-size: 12.5px; font-weight: 620; line-height: 1.35; text-align: left; }
   .console-agenda-open:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.06); color: var(--con-acc); }
   .console-agenda-event { position: relative; display: flex; width: 100%; min-height: 56px; align-items: center; gap: 10px; overflow: hidden; border-radius: 11px; padding: 11px 12px 11px 16px; text-align: left; }
