@@ -28,6 +28,7 @@ import { CourseOutlineStep } from "@/components/course-outline-step";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import { zonedDateTimeToIso } from "@/lib/date-time";
+import { extraFocusDecisionMessage } from "@/lib/schedule-generation";
 import type {
   AvailabilityWindow,
   Course,
@@ -467,9 +468,7 @@ export function OnboardingWizard() {
           error instanceof ApiRequestError
           && error.code === "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED"
         ) {
-          const allowed = window.confirm(
-            `This draft needs ${formatMinutes(Number(error.details?.total_extra_minutes ?? 0))} above your preferred focus limit. Allow it for this draft?`,
-          );
+          const allowed = window.confirm(extraFocusDecisionMessage(error.details));
           await apiRequest<ScheduleProposal>(
             `/semesters/${currentSemester.id}/schedule/proposals`,
             {

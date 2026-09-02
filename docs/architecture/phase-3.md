@@ -83,6 +83,10 @@ focus, and protected work. Stale fingerprints are rejected by issuing a newly ca
 Generation rolls back before returning either an exam-estimate or extra-focus requirement, so the
 current proposal is not superseded while input is pending.
 
+Both onboarding and regeneration render those response details before the one-draft decision: each
+affected date shows the extra and resulting focus totals, and each protected item shows its deadline
+and remaining work at risk.
+
 Proposal summaries report academic coverage, exam estimates and sources, opportunistic work,
 flexible reductions, rollover use, extra focus, sleep changes, and unresolved work. Fixed events and
 the student's minimum sleep never move.
@@ -118,10 +122,6 @@ fully implemented yet:
   academic coverage is fixed, but it does not explicitly target one 30-to-45-minute review block
   approximately every three days while urgent pre-exam assignments are still underway, nor does it
   minimize excessive gaps as preparation intensifies.
-- **Complete extra-focus explanation before consent:** the API returns the extra minutes by date,
-  resulting focus totals, and protected work, but the onboarding and regeneration confirmations
-  currently show only the aggregate extra time. The student does not yet see every affected date
-  and protected deadline before deciding.
 - **Per-block displacement explanations:** block reasons contain readiness, deadline, slack, exam
   relationship, weight, energy, and capacity-source details. They do not yet identify the specific
   flexible or academic alternative that lost capacity because that block was selected.

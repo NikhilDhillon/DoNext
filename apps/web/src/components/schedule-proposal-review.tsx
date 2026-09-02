@@ -17,6 +17,7 @@ import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { ScheduleRevisionDialog } from "@/components/schedule-revision-dialog";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
+import { extraFocusDecisionMessage } from "@/lib/schedule-generation";
 import type {
   AvailabilityWindow,
   PlannerTask,
@@ -124,10 +125,7 @@ export function ScheduleProposalReview({
           requestError instanceof ApiRequestError
           && requestError.code === "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED"
         ) {
-          const total = Number(requestError.details?.total_extra_minutes ?? 0);
-          const allowed = window.confirm(
-            `This draft needs ${formatMinutes(total)} above your preferred focus limit to protect required deadlines. Allow it for this draft?`,
-          );
+          const allowed = window.confirm(extraFocusDecisionMessage(requestError.details));
           generated = await apiRequest<ScheduleProposal>(
             `/semesters/${semester.id}/schedule/proposals`,
             {
