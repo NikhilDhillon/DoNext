@@ -197,3 +197,76 @@ from the source idle state while preserving its component design language.
 - [x] Desktop browser interaction and console verification
 
 final result: passed
+
+---
+
+# Design QA: draft calendar console
+
+## Evidence
+
+- Source: an approved multi-artboard design canvas — a dark, dense week grid with a
+  category rail per event, a left-hand unplaced-work rail, a docked block inspector, a
+  command palette, and a day timeline for narrow screens.
+- Desktop implementation: 1280 x 720 CSS viewport at device pixel ratio 1, checked in the
+  Week, 3 days and Day spans.
+- Mobile implementation: 375 x 812 CSS viewport at device pixel ratio 1.
+- State: a 14-day draft with seven generated blocks, three unplaced items, recurring
+  classes, a work shift, a gym commitment, and a dentist appointment overlapping a lab.
+
+## Findings
+
+- P0: none.
+- P1: none remaining. Two were found and fixed during the pass: the inspector anchored to
+  the console rather than the calendar body and covered the toolbar, and the mobile agenda
+  opened on the first day of the span instead of today.
+- P2: none remaining. Course codes were clipped by the time range in week columns, cards
+  split by an overlap truncated every line, the first hour label was clipped by the scroll
+  box, the current-time marker collided with the hour label, and open-time targets were
+  nearly invisible against the dark grid.
+- P3: the calendar is a dark surface inside the otherwise light application. This is
+  intentional and scoped to the draft review; the surrounding page is unchanged.
+
+## Required fidelity surfaces
+
+- Fonts and typography: the existing DoNext font stack is kept. The 8-11px mix is replaced
+  by a 10.5/11.5/12.5/16.5px ramp with tabular figures for every time.
+- Spacing and layout rhythm: one solid rule per hour at a 62px default, no half-hour
+  hatching, and no per-column background pattern. Blocks are positioned by minute rather
+  than snapped to 30-minute rows.
+- Colours and visual tokens: category meaning is preserved — violet for classes, green for
+  editable drafts, slate for work and fixed commitments — retuned for a dark surface and
+  scoped to `.draft-console` so no other page is affected.
+- Image and icon quality: no raster assets; the existing Lucide set is reused throughout.
+- Copy and content: nothing is removed. The "Still unresolved" list moved from the review
+  body into the calendar rail with the same name, remaining minutes, and reason.
+
+## Interaction and accessibility checks
+
+- Dragging a block by its handle moves it, snapped to 15 minutes and whole day columns.
+- Clicking open time opens the block editor for that day, as before.
+- Selecting a block opens the inspector; Edit, Duplicate and Delete are reachable at every
+  width, which was not true of the previous implementation at desktop sizes.
+- Start and length steppers, and the arrow-key nudges, all issue the same PATCH the drag
+  does, so the API remains the single validator for focus hours and overlaps.
+- Delete is a two-step confirmation and stays undoable through the status line.
+- Unplaced items drag onto the grid; the placed length is trimmed to the free run inside
+  the focus window and the status line reports what remains unplaced.
+- Cmd/Ctrl+K opens the command palette; only that chord is intercepted globally.
+- Event type is never carried by colour alone: a dashed outline plus a drag handle marks
+  an editable draft, and every card names its category or course code.
+- Day chips, the New block button and every agenda row clear 44px on touch.
+- `prefers-reduced-motion` disables every transition and animation on the surface.
+- Browser console warnings and errors: none.
+
+## Comparison history
+
+1. The first desktop pass showed clipped course codes, a clipped 8 AM label, and a
+   current-time marker colliding with the hour beneath it.
+2. Cards were given a compact time in narrow columns and hour labels were moved under
+   their rule; the marker was given its own background.
+3. The second pass exposed the inspector covering the toolbar and a wrapped start stepper.
+4. The mobile pass exposed the agenda defaulting to the wrong day and overflowing
+   open-time labels.
+5. The final desktop, 3-day, Day and 390px passes showed no remaining P0, P1 or P2 issues.
+
+final result: passed
