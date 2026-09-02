@@ -245,8 +245,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   0% { transform: translateY(-4px); box-shadow: 0 0 0 2px rgba(255,107,74,.55); }
   100% { transform: translateY(0); box-shadow: none; }
 }
-.console-grab { position: absolute; z-index: 3; top: 3px; right: 3px; display: grid; width: 17px; height: 19px; place-items: center; border-radius: 4px; color: currentColor; opacity: 0; }
-.console-event.editable:hover .console-grab, .console-grab:focus-visible { opacity: .9; }
+.console-grab { position: absolute; z-index: 3; top: 3px; right: 3px; display: grid; width: 17px; height: 19px; place-items: center; border-radius: 4px; color: currentColor; opacity: .5; }
+.console-event.editable:hover .console-grab, .console-grab:focus-visible { opacity: 1; }
+/* A 30-minute card puts the time where the grip would sit, so there the dashed border is the
+   only editable signal. */
+.console-event.density-tight .console-grab { opacity: 0; }
+.console-event.density-tight:hover .console-grab { opacity: 1; }
 .console-grab:hover { background: rgba(255,255,255,.1); opacity: 1; }
 .console-grab:active { cursor: grabbing; }
 
@@ -816,9 +820,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-bar h3 { flex: 1 1 auto; font-size: 15px; }
   .console-spacer { display: none; }
   .console-seg, .console-kbd-button { display: none; }
-  .console-btn, .console-kbd-button { min-height: 44px; }
-  .console-btn.icon { width: 44px; }
-  .console-cta { order: 6; width: 100%; justify-content: center; min-height: 46px; }
+  .console-cta { order: 6; width: 100%; justify-content: center; }
   .console-agenda-days { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; scrollbar-width: none; }
   .console-agenda-days::-webkit-scrollbar { display: none; }
   .console-agenda-days button { display: flex; min-width: 50px; min-height: 62px; flex: 0 0 auto; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border: 1px solid var(--con-hair); border-radius: 12px; background: var(--con-surface); }
@@ -859,8 +861,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-agenda-add { display: flex; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; border-radius: 13px; background: var(--con-acc); color: #05120d; font-size: 15px; font-weight: 700; }
   .console-agenda-add:disabled { background: #2b3835; color: #6c7b76; cursor: not-allowed; }
   .console-inspector { position: fixed; top: auto; right: 0; bottom: 0; left: 0; width: auto; max-height: 80vh; border-width: 1px 0 0; border-radius: 18px 18px 0 0; padding: 16px; }
-  .console-inspector-actions button { min-height: 46px; font-size: 13px; }
-  .console-steps button { width: 34px; height: 34px; }
+  .console-inspector-actions button { font-size: 13px; }
   .console-status { bottom: 14px; }
   .console-palette { top: 60px; }
 }
@@ -877,3 +878,16 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .console-inspector-reasons { margin-top: 10px; border-top: 1px solid var(--con-hair-2); padding-top: 9px; }
 .console-inspector-reasons strong { color: var(--con-t2); font-size: 11px; }
 .console-inspector-reasons p { margin: 4px 0 0; color: var(--con-t3); font-size: 11px; line-height: 1.45; }
+
+/* Touch targets follow the pointer, not the viewport: a tablet between 761px and 1180px still
+   drives this surface with a finger and previously kept the 30-34px desktop controls. */
+@media (pointer: coarse) {
+  .console-btn, .console-kbd-button { min-height: 44px; }
+  .console-btn.icon { width: 44px; }
+  .console-cta { min-height: 46px; }
+  .console-seg button { min-height: 40px; padding: 0 14px; }
+  .console-steps button { width: 34px; height: 34px; }
+  .console-inspector-actions button { min-height: 46px; }
+  .console-inspector > header button { width: 40px; height: 40px; }
+  .console-grab { opacity: .85; }
+}
