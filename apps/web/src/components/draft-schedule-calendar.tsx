@@ -14,7 +14,11 @@ import {
   Plus,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 
 import {
   addDays,
@@ -38,6 +42,7 @@ import {
   formatHour,
   formatMoveTime,
   formatRange,
+  focusIntervalsForDate,
   hasFocusTime,
   isDraftDay,
   mondayOnOrBefore,
@@ -46,8 +51,10 @@ import {
   timeParts,
   timezoneName,
   weekday,
+  zonedDateTimeToIso,
 } from "@/components/draft-calendar/lib";
 import type { DragPreview, EventLane } from "@/components/draft-calendar/lib";
+import { BlockInspector } from "@/components/draft-calendar/block-inspector";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
@@ -110,6 +117,9 @@ export function DraftScheduleCalendar({
   const [moveError, setMoveError] = useState<string | null>(null);
   const [moveStatus, setMoveStatus] = useState<string | null>(null);
   const [deletedBlock, setDeletedBlock] = useState<ScheduleBlock | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
   const dragPreviewRef = useRef<DragPreview | null>(null);
@@ -177,6 +187,10 @@ export function DraftScheduleCalendar({
   const focusHours = availability.data?.length ? formatFocusHours(availability.data) : null;
   const currentTimeTop = todayVisible ? currentTimeOffset(startHour, endHour, timezone) : null;
   const columnTemplate = `${GUTTER_WIDTH}px repeat(${columns}, minmax(0, 1fr))`;
+  const selectedBlock = displayedBlocks.find((block) => block.id === selectedBlockId) ?? null;
+  const selectedColumn = selectedBlock
+    ? days.indexOf(dateInTimezone(selectedBlock.start_at, timezone))
+    : -1;
   const loading = primaryPlan.loading || secondaryPlan.loading || availability.loading;
   const feedError = primaryPlan.error || secondaryPlan.error;
 
@@ -308,15 +322,131 @@ export function DraftScheduleCalendar({
       suppressClickRef.current = null;
       return;
     }
-    onEdit(block);
+    setConfirmingDelete(false);
+    setSelectedBlockId((current) => current === block.id ? null : block.id);
+  }
+
+  function closeInspector() {
+    setSelectedBlockId(null);
+    setConfirmingDelete(false);
+  }
+
+  function fitsFocusWindow(date: string, startMinute: number, minutes: number) {
+    const intervals = focusIntervalsForDate(date, availability.data ?? []);
+    if (!intervals.length) return false;
+    return intervals.some(([from, to]) => from <= startMinute && startMinute + minutes <= to);
+  }
+
+  // Every keyboard and stepper adjustment goes through the same PATCH the drag uses, so the
+  // API stays the single validator for focus hours and overlaps.
+  async function moveBlockTo(block: ScheduleBlock, date: string, startMinute: number, minutes: number) {
+    if (!isDraftDay(date, horizonStart, horizonEnd)) {
+      setMoveStatus(null);
+      setMoveError(`${formatCalendarDate(date)} is outside this 14-day draft.`);
+      return;
+    }
+    if (!fitsFocusWindow(date, startMinute, minutes)) {
+      setMoveStatus(null);
+      setMoveError(`${block.title} was left where it was: that time is outside your focus hours.`);
+      return;
+    }
+    const startAt = zonedDateTimeToIso(date, Math.floor(startMinute / 60), startMinute % 60, timezone);
+    const endAt = new Date(new Date(startAt).getTime() + minutes * 60_000).toISOString();
+    setBusyBlockId(block.id);
+    setMoveError(null);
+    setMoveStatus(`Saving ${block.title}…`);
+    try {
+      await apiRequest<ScheduleBlock>(
+        `/schedule-proposals/${proposalId}/blocks/${block.id}`,
+        { method: "PATCH", body: JSON.stringify({ start_at: startAt, end_at: endAt }) },
+      );
+      window.dispatchEvent(new Event("donext:planning-updated"));
+      await onMoved();
+      setMoveStatus(`${block.title} is now ${formatMoveTime(startAt, timezone)}`);
+    } catch (requestError) {
+      setMoveStatus(null);
+      setMoveError(
+        requestError instanceof ApiRequestError
+          ? requestError.message
+          : `DoNext could not update ${block.title}.`,
+      );
+    } finally {
+      setBusyBlockId(null);
+    }
+  }
+
+  function blockMinutes(block: ScheduleBlock) {
+    return Math.round(
+      (new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000,
+    );
+  }
+
+  function shiftStart(block: ScheduleBlock, delta: number) {
+    const date = dateInTimezone(block.start_at, timezone);
+    const start = timeParts(block.start_at, timezone);
+    void moveBlockTo(block, date, start.hour * 60 + start.minute + delta, blockMinutes(block));
+  }
+
+  function shiftLength(block: ScheduleBlock, delta: number) {
+    const date = dateInTimezone(block.start_at, timezone);
+    const start = timeParts(block.start_at, timezone);
+    const minutes = Math.max(blockMinutes(block) + delta, 15);
+    void moveBlockTo(block, date, start.hour * 60 + start.minute, minutes);
+  }
+
+  function shiftDay(block: ScheduleBlock, delta: number) {
+    const date = dateInTimezone(block.start_at, timezone);
+    const start = timeParts(block.start_at, timezone);
+    void moveBlockTo(block, addDays(date, delta), start.hour * 60 + start.minute, blockMinutes(block));
+  }
+
+  async function deleteBlock(block: ScheduleBlock) {
+    setBusyBlockId(block.id);
+    setMoveError(null);
+    setMoveStatus(`Deleting ${block.title}…`);
+    try {
+      await apiRequest<void>(
+        `/schedule-proposals/${proposalId}/blocks/${block.id}`,
+        { method: "DELETE" },
+      );
+      setDeletedBlock(block);
+      closeInspector();
+      window.dispatchEvent(new Event("donext:planning-updated"));
+      await onMoved();
+      setMoveStatus(`${block.title} deleted.`);
+    } catch (requestError) {
+      setMoveStatus(null);
+      setMoveError(
+        requestError instanceof ApiRequestError
+          ? requestError.message
+          : `DoNext could not delete ${block.title}.`,
+      );
+    } finally {
+      setBusyBlockId(null);
+    }
+  }
+
+  function handleBlockKey(block: ScheduleBlock, event: ReactKeyboardEvent<HTMLElement>) {
+    if (event.key === "Escape") { closeInspector(); return; }
+    if (event.key === "ArrowUp") { event.preventDefault(); shiftStart(block, -15); return; }
+    if (event.key === "ArrowDown") { event.preventDefault(); shiftStart(block, 15); return; }
+    if (event.key === "ArrowLeft") { event.preventDefault(); shiftDay(block, -1); return; }
+    if (event.key === "ArrowRight") { event.preventDefault(); shiftDay(block, 1); return; }
+    if (event.key === "Backspace" || event.key === "Delete") {
+      event.preventDefault();
+      setSelectedBlockId(block.id);
+      setConfirmingDelete(true);
+    }
   }
 
   function goToToday() {
+    closeInspector();
     if (todayOffset < 0 || todayOffset >= totalDays) return;
     setDayOffset(columns === 7 ? Math.floor(todayOffset / 7) * 7 : Math.min(todayOffset, maxOffset));
   }
 
   function changeColumns(next: number) {
+    closeInspector();
     const anchor = columns === 7 && next !== 7 && todayOffset >= offset && todayOffset < offset + 7
       ? todayOffset
       : offset;
@@ -492,11 +622,13 @@ export function DraftScheduleCalendar({
                           layout={laneLayout[`draft:${block.id}`]}
                           preview={dragPreview?.blockId === block.id ? dragPreview : null}
                           reverting={revertingBlockId === block.id}
-                          saving={savingBlockId === block.id}
+                          saving={savingBlockId === block.id || busyBlockId === block.id}
+                          selected={selectedBlockId === block.id}
                           startHour={startHour}
                           dayMinutes={dayMinutes}
                           timezone={timezone}
                           onClick={() => openBlock(block)}
+                          onKeyDown={(event) => handleBlockKey(block, event)}
                           onPointerCancel={cancelDrag}
                           onPointerDown={(event) => beginDrag(block, event)}
                           onPointerMove={moveDrag}
@@ -554,6 +686,28 @@ export function DraftScheduleCalendar({
             <p className="console-notice error">Focus hours could not be loaded into this preview.</p>
           ) : loading ? (
             <p className="console-notice">Loading classes, commitments, and focus hours…</p>
+          ) : null}
+
+          {selectedBlock ? (
+            <BlockInspector
+              block={selectedBlock}
+              busy={busyBlockId === selectedBlock.id}
+              columnIndex={Math.max(selectedColumn, 0)}
+              columns={columns}
+              confirmingDelete={confirmingDelete}
+              gutterWidth={GUTTER_WIDTH}
+              timezone={timezone}
+              onCancelDelete={() => setConfirmingDelete(false)}
+              onClose={closeInspector}
+              onDelete={() => {
+                if (!confirmingDelete) { setConfirmingDelete(true); return; }
+                void deleteBlock(selectedBlock);
+              }}
+              onDuplicate={() => { closeInspector(); onDuplicate(selectedBlock); }}
+              onEdit={() => { closeInspector(); onEdit(selectedBlock); }}
+              onShiftLength={(minutes) => shiftLength(selectedBlock, minutes)}
+              onShiftStart={(minutes) => shiftStart(selectedBlock, minutes)}
+            />
           ) : null}
 
           <footer className="console-foot">
@@ -623,10 +777,12 @@ function ConsoleDraftBlock({
   dragging,
   reverting,
   saving,
+  selected,
   startHour,
   dayMinutes,
   timezone,
   onClick,
+  onKeyDown,
   onPointerDown,
   onPointerMove,
   onPointerUp,
@@ -638,10 +794,12 @@ function ConsoleDraftBlock({
   dragging: boolean;
   reverting: boolean;
   saving: boolean;
+  selected: boolean;
   startHour: number;
   dayMinutes: number;
   timezone: string;
   onClick: () => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLElement>) => void;
   onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
   onPointerUp: (event: ReactPointerEvent<HTMLElement>) => void;
@@ -658,12 +816,13 @@ function ConsoleDraftBlock({
   return (
     <button
       aria-label={`Edit ${block.title}, editable draft block, ${formatBlockTime(shown, timezone)}`}
-      className={`console-event editable ${blockColor(block)} density-${cardDensity(Math.ceil(minutes / 30))}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}`}
+      className={`console-event editable ${blockColor(block)} density-${cardDensity(Math.ceil(minutes / 30))}${dragging ? " dragging" : ""}${reverting ? " reverting" : ""}${saving ? " saving" : ""}${selected ? " selected" : ""}`}
       disabled={saving}
       style={eventStyle(start.hour * 60 + start.minute, minutes, startHour, dayMinutes, layout)}
       title={`${block.title} · ${formatBlockTime(shown, timezone)}`}
       type="button"
       onClick={onClick}
+      onKeyDown={onKeyDown}
       onPointerCancel={onPointerCancel}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
