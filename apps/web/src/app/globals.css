@@ -725,7 +725,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 /* Draft calendar — selected block inspector */
 .console-event.selected { z-index: 12; border-style: solid; box-shadow: 0 0 0 1px var(--con-acc), 0 0 0 4px rgba(62,217,156,.16), 0 10px 26px rgba(0,0,0,.5); }
-.console-inspector { position: absolute; z-index: 30; top: 12px; width: 258px; border: 1px solid var(--con-hair); border-radius: 12px; background: var(--con-raise); padding: 13px; box-shadow: 0 22px 54px rgba(0,0,0,.6); }
+.console-inspector { position: absolute; z-index: 30; top: 12px; width: 258px; max-height: calc(100% - 24px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--con-hair); border-radius: 12px; background: var(--con-raise); padding: 13px; box-shadow: 0 22px 54px rgba(0,0,0,.6); scrollbar-width: thin; }
 .console-inspector > header { display: flex; align-items: center; gap: 8px; }
 .console-inspector-tag { border-radius: 6px; background: var(--con-acc-dim); padding: 3px 8px; color: var(--con-acc); font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
 .console-inspector > header button { display: grid; width: 28px; height: 28px; margin-left: auto; place-items: center; border-radius: 7px; color: var(--con-t3); }
@@ -855,7 +855,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .console-agenda-note { display: flex; align-items: center; justify-content: center; gap: 9px; margin: 0; border: 1px dashed var(--con-hair); border-radius: 12px; padding: 26px 16px; color: var(--con-t3); font-size: 12.5px; line-height: 1.5; text-align: center; }
   .console-agenda-add { display: flex; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 8px; margin-top: 14px; border-radius: 13px; background: var(--con-acc); color: #05120d; font-size: 15px; font-weight: 700; }
   .console-agenda-add:disabled { background: #2b3835; color: #6c7b76; cursor: not-allowed; }
-  .console-inspector { position: fixed; top: auto; right: 0; bottom: 0; left: 0; width: auto; border-width: 1px 0 0; border-radius: 18px 18px 0 0; padding: 16px; }
+  .console-inspector { position: fixed; top: auto; right: 0; bottom: 0; left: 0; width: auto; max-height: 80vh; border-width: 1px 0 0; border-radius: 18px 18px 0 0; padding: 16px; }
   .console-inspector-actions button { min-height: 46px; font-size: 13px; }
   .console-steps button { width: 34px; height: 34px; }
   .console-status { bottom: 14px; }
