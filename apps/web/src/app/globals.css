@@ -787,3 +787,20 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 /* Draft calendar — open focus time as explicit targets */
 .console-open { position: absolute; z-index: 2; right: 6px; left: 6px; display: flex; align-items: center; justify-content: center; gap: 7px; border: 1px dashed var(--con-hair); border-radius: 8px; color: var(--con-t3); font-size: 11.5px; font-weight: 620; }
 .console-open:hover { border-color: var(--con-acc-edge); background: rgba(62,217,156,.06); color: var(--con-acc); }
+
+/* Draft calendar — command palette */
+.console-kbd-button { display: inline-flex; min-height: 34px; align-items: center; gap: 7px; border: 1px solid var(--con-hair); border-radius: 8px; background: var(--con-raise); padding: 0 9px; color: var(--con-t3); font-size: 12px; font-weight: 600; }
+.console-kbd-button:hover { border-color: var(--con-acc-edge); color: var(--con-t2); }
+.console-kbd-button kbd { border: 1px solid var(--con-hair); border-radius: 4px; padding: 1px 5px; font: inherit; font-size: 10.5px; }
+.console-scrim { position: absolute; z-index: 50; inset: 0; background: rgba(4,8,7,.62); }
+.console-palette { position: absolute; z-index: 51; top: 84px; left: 50%; width: min(520px, calc(100% - 32px)); overflow: hidden; border: 1px solid var(--con-hair); border-radius: 14px; background: var(--con-raise); box-shadow: 0 30px 80px rgba(0,0,0,.7); transform: translateX(-50%); }
+.console-palette-input { display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--con-hair); padding: 13px 15px; color: var(--con-t3); }
+.console-palette-input input { flex: 1; min-width: 0; border: 0; background: none; color: var(--con-t1); font: inherit; font-size: 14.5px; outline: none; }
+.console-palette-input input::placeholder { color: var(--con-t3); }
+.console-palette-input kbd { border: 1px solid var(--con-hair); border-radius: 4px; padding: 1px 5px; font: inherit; font-size: 10.5px; }
+.console-palette ul { max-height: 288px; overflow: auto; margin: 0; padding: 6px; list-style: none; }
+.console-palette li button { display: flex; width: 100%; align-items: center; gap: 11px; border-radius: 8px; padding: 10px 11px; color: var(--con-t1); font-size: 13.5px; font-weight: 560; text-align: left; }
+.console-palette li button.on { background: var(--con-raise-2); }
+.console-palette li button svg { flex: 0 0 auto; color: var(--con-t3); }
+.console-palette li button em { margin-left: auto; color: var(--con-t3); font-size: 11.5px; font-style: normal; }
+.console-palette-empty { margin: 0; padding: 26px 16px; color: var(--con-t3); font-size: 13px; text-align: center; }

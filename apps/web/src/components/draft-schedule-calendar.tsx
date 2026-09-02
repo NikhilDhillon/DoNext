@@ -9,9 +9,14 @@ import {
   GraduationCap,
   GripVertical,
   LoaderCircle,
+  Copy,
   Lock,
   Pin,
   Plus,
+  Rows3,
+  Search,
+  Square,
+  Trash2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -60,6 +65,8 @@ import {
 import type { DragPreview, EventLane, UnscheduledItem } from "@/components/draft-calendar/lib";
 import { UnplacedRail, formatMinutes } from "@/components/draft-calendar/unplaced-rail";
 import { BlockInspector } from "@/components/draft-calendar/block-inspector";
+import { CommandPalette } from "@/components/draft-calendar/command-palette";
+import type { Command } from "@/components/draft-calendar/command-palette";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type {
@@ -139,6 +146,7 @@ export function DraftScheduleCalendar({
   const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [busyBlockId, setBusyBlockId] = useState<string | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [placement, setPlacement] = useState<PlacementSession | null>(null);
   const placementRef = useRef<PlacementSession | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -149,6 +157,16 @@ export function DraftScheduleCalendar({
 
   useEffect(() => () => {
     if (revertTimerRef.current) window.clearTimeout(revertTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
+      event.preventDefault();
+      setPaletteOpen((current) => !current);
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, []);
 
   const maxOffset = Math.max(totalDays - columns, 0);
@@ -626,6 +644,54 @@ export function DraftScheduleCalendar({
     }
   }
 
+  const commands: Command[] = [
+    ...(selectedBlock ? [
+      {
+        id: "duplicate",
+        label: `Duplicate ${selectedBlock.title}`,
+        icon: <Copy size={16} />,
+        run: () => { setPaletteOpen(false); closeInspector(); onDuplicate(selectedBlock); },
+      },
+      {
+        id: "delete",
+        label: `Delete ${selectedBlock.title}`,
+        hint: "⌫",
+        icon: <Trash2 size={16} />,
+        run: () => { setPaletteOpen(false); setConfirmingDelete(true); },
+      },
+    ] : []),
+    {
+      id: "new",
+      label: "New draft block",
+      icon: <Plus size={16} />,
+      run: () => { setPaletteOpen(false); onAdd(); },
+    },
+    {
+      id: "today",
+      label: "Go to today",
+      icon: <CalendarDays size={16} />,
+      run: () => { setPaletteOpen(false); goToToday(); },
+    },
+    {
+      id: "next",
+      label: `Next ${spanNoun(columns)}`,
+      icon: <ChevronRight size={16} />,
+      run: () => { setPaletteOpen(false); setDayOffset(Math.min(offset + columns, maxOffset)); },
+    },
+    {
+      id: "previous",
+      label: `Previous ${spanNoun(columns)}`,
+      icon: <ChevronLeft size={16} />,
+      run: () => { setPaletteOpen(false); setDayOffset(Math.max(offset - columns, 0)); },
+    },
+    ...COLUMN_CHOICES.filter((choice) => choice.columns !== columns).map((choice) => ({
+      id: `span-${choice.columns}`,
+      label: `Switch to ${choice.label} view`,
+      icon: choice.columns === 1 ? <Square size={16} /> : <Rows3 size={16} />,
+      run: () => { setPaletteOpen(false); changeColumns(choice.columns); },
+    })),
+  ];
+
   return (
     <section
       aria-label={`Draft calendar for ${formatRange(rangeStart, rangeEnd)}`}
@@ -678,6 +744,14 @@ export function DraftScheduleCalendar({
             </button>
           ))}
         </div>
+        <button
+          aria-label="Open draft calendar commands"
+          className="console-kbd-button"
+          type="button"
+          onClick={() => setPaletteOpen(true)}
+        >
+          <Search size={14} /> <kbd>⌘K</kbd>
+        </button>
         <button className="console-cta" type="button" onClick={() => onAdd()}>
           <Plus size={16} /> New block
         </button>
@@ -894,10 +968,15 @@ export function DraftScheduleCalendar({
           <footer className="console-foot">
             <span><GripVertical size={13} /> Drag a block to move it</span>
             {focusHours ? <span><Clock3 size={13} /> Focus hours {focusHours}</span> : null}
+            <span><kbd>⌘K</kbd> commands</span>
             <span className="legend"><i /> dashed = editable draft</span>
           </footer>
         </div>
       </div>
+
+      {paletteOpen ? (
+        <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />
+      ) : null}
 
       {placement ? (
         <div className="console-ghost" style={{ top: placement.y - 20, left: placement.x - 95 }}>
@@ -1034,6 +1113,12 @@ function fixedEventIcon(entry: PlanningEntry) {
   if (entry.category === "class") return <GraduationCap size={11} />;
   if (entry.category === "work") return <BriefcaseBusiness size={11} />;
   return <Pin size={11} />;
+}
+
+function spanNoun(columns: number) {
+  if (columns === 1) return "day";
+  if (columns === 7) return "week";
+  return `${columns} days`;
 }
 
 function minuteRange(item: { start_at: string; end_at: string }, timezone: string) {
