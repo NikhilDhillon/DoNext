@@ -4,7 +4,7 @@ Author: Nikhil Dhillon
 
 Status: Canonical product source of truth
 
-Last decision review: 2026-09-01
+Last decision review: 2026-09-02
 
 ## Purpose
 
@@ -48,6 +48,14 @@ remaining work estimates when deciding what should be started early.
 The semester layer identifies future pressure, dependencies, and opportunities to front-load work.
 It does not create exact calendar blocks months in advance. A semester-long block schedule would
 become stale too quickly and would imply precision that the product cannot honestly provide.
+
+Future pressure is proven with a deterministic daily max-flow forecast from the end of the rolling
+horizon through semester end. The forecast includes known required work, readiness, assignment
+24-hour targets, quiz defaults, confirmed deadlines, fixed and accepted commitments, preferred
+sleep, normal focus limits, and rollover capacity. It deliberately excludes flexible goals and
+break overhead, making its capacity estimate optimistic. A deficit under those assumptions is proof
+that some actionable assignment work must move into the current horizon. Exams with unknown
+estimates are shown as uncertainty and contribute no invented minutes.
 
 ### Rolling 14-day execution plan
 
@@ -104,6 +112,13 @@ pretending the course-readiness rule does not exist.
 Exam preparation may cover only material that has already been taught. When lectures remain before
 an exam, DoNext can continue preparing previously covered material and add further review capacity
 after later lectures occur.
+
+For a scheduled course, DoNext expands confirmed recurring lectures in local time through the exam.
+After each completed lecture, cumulative preparation unlocks as
+`floor(total estimate × completed lectures ÷ total lectures)` minutes. The scheduler rounds down to
+its one-minute duration unit; the final lecture unlocks the exact remainder. A preparation session
+becomes eligible only when its entire cumulative duration is unlocked. For an asynchronous course,
+the full estimate unlocks at `first_content_available_at`.
 
 The calendar label remains generic, such as `CSC 370 · Midterm prep`. DoNext does not need to invent
 or expose artificial phases such as orient, draft, practice, or final review.
@@ -162,6 +177,11 @@ An actionable assignment due more than 14 days away may use otherwise-unused foc
 current plan. Distant work should not normally remove flexible personal goals from the current plan.
 It fills spare capacity after nearer academic priorities and the normal plan have been covered.
 
+The only exception is the proven deficit from the optimistic semester-pressure forecast. Only that
+many minutes are promoted into a required `strategic lead` portion that may displace a flexible
+goal. The assignment's remaining minutes stay opportunistic. If no actionable distant assignment
+can absorb a proven deficit, DoNext reports the future risk without displacing a goal.
+
 ### Multiple sessions
 
 DoNext may schedule multiple blocks for the same assignment on one day when time permits or when
@@ -170,6 +190,11 @@ future capacity is tight.
 It must not make an individual session longer merely because the deadline is risky. It creates
 additional blocks at the student's normal session length and preserves the required break between
 them.
+
+Starts remain aligned to 15-minute boundaries, while durations use exact integer minutes. Remaining
+effort is partitioned entirely within the saved minimum and maximum, preferring the saved session
+length. When no exact partition exists, the largest valid partition is scheduled and the
+sub-minimum remainder stays visible as `BELOW_MINIMUM_SESSION`; minutes are never rounded away.
 
 ## Exam scheduling
 
@@ -207,6 +232,8 @@ When two or more exams fall inside the same horizon, DoNext prepares for them si
 does not finish all preparation for one exam before starting the next.
 
 Capacity is shared using each exam's date, remaining preparation hours, grade weight, and feasibility.
+Within the same urgency band, each simultaneous exam receives one valid preparation session when
+capacity permits. Remaining capacity then follows slack, date, remaining estimate, and known weight.
 
 ## Academic priority and risk
 
@@ -220,21 +247,24 @@ both rather than pretending one global sort order resolves every conflict.
 
 ### Priority rules
 
-The following rules govern academic allocation:
+The following lexicographic bands govern academic allocation in both the optimizer and its greedy
+fallback:
 
-1. Overdue assignments receive the highest academic urgency.
-2. Among overdue assignments, higher grade weight comes first; equal-weight ties use the oldest
-   missed deadline.
-3. Assignments due within 48 hours receive an urgent-deadline boost.
-4. When an exam is inside the horizon, same-course assignments due before that exam receive an
-   exam-readiness boost.
-5. Within the remaining work, lower slack, earlier deadline, more work remaining, and higher grade
-   weight increase priority.
-6. When two assignments have similar deadlines, the higher-weight assignment comes first.
-7. When weight is unknown, DoNext uses deadline and feasibility and does not invent a value.
-8. Work from other courses may proceed in parallel with exam preparation; allocation follows
-   deadline risk, remaining effort, and grade weight rather than guaranteeing every item a daily
-   block.
+1. required before optional;
+2. overdue before non-overdue, where overdue is evaluated against the one exact generation instant;
+3. among overdue work, compare weight only when both values are known, then use the oldest missed
+   deadline;
+4. exact 48-hour urgency, defined as `0 < deadline - planning_now <= 48 hours`;
+5. the same-course pre-exam relationship;
+6. lower semester-aware slack;
+7. earlier local due date;
+8. only for the same local due date, higher weight when both values are known; and
+9. exact deadline, more remaining work, then stable identifier.
+
+Unknown weight is never coerced to zero. The weight comparison is skipped whenever either value is
+unknown. Under genuine scarcity, required status and urgency therefore take precedence over grade
+weight. Work from other courses may proceed in parallel with exam preparation; no item is guaranteed
+a daily block.
 
 These rules are lexicographic guardrails and feasibility signals, not opaque user-facing scores.
 Every consequential choice must be explainable in plain language.
@@ -259,6 +289,10 @@ to make academic work fit.
 
 Required breaks remain intact. DoNext creates multiple normal-length sessions instead of eliminating
 breaks or silently creating marathon sessions.
+
+A break is required between consecutive generated sessions. No trailing break is required after the
+final generated session, or before a fixed commitment that already creates at least the required
+separation.
 
 ### Rollover buffer
 
@@ -285,6 +319,10 @@ DoNext asks the student for explicit permission before increasing focus time.
 
 The request must state how much extra focus time is needed and what risk it resolves. Extra focus
 time may use only waking, otherwise-available time; it must not reduce sleep implicitly.
+
+The comparison first maximizes protected required academic work, then minimizes total extra minutes,
+the peak daily excess, and the deterministic per-day excess vector. Permission is fingerprinted to
+that exact vector, and an approved generation cannot exceed it.
 
 ### Sleep fallback
 
@@ -315,16 +353,16 @@ only four usable hours.
 DoNext must never overlap commitments, cross a deadline, remove required breaks, or go below minimum
 sleep merely to claim that everything fits.
 
-When academic work must be left unresolved, sacrifice priority is:
-
-1. optional before required;
-2. lower grade weight before higher grade weight;
-3. later deadline before earlier deadline; and
-4. work unrelated to an approaching exam before work that directly reduces exam risk.
+When academic work must be left unresolved, the same priority bands apply in reverse: optional work
+yields before required work, then lower urgency, weaker exam relationship, greater slack, later
+local due date, and only then lower known weight for the same local due date. This keeps urgent
+required work ahead of weight under genuine scarcity.
 
 The item is not deleted. It remains visible with the exact unscheduled duration, the deadline at
 risk, the constraints that prevented placement, and the capacity change that would be required to
-fit it.
+fit it. That change comes from a constrained counterfactual using session length, breaks,
+eligibility, deadlines, remaining daily capacity, and permitted capacity layers. A displacement
+claim is made only when the named alternative could actually use the freed opening.
 
 ## Schedule-proposal lifecycle
 
