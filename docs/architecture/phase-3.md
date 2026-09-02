@@ -54,7 +54,9 @@ remaining effort, slack, exam relationship, and effective or unknown weight. Bot
 use the canonical lexicographic bands: required status, overdue state, exact 48-hour urgency,
 same-course pre-exam relationship, slack, local due date, same-date known weight, exact deadline,
 remaining work, and stable ID. Overdue weight is compared only when both values are known. Unknown
-weight is never converted into an invented value.
+weight is never converted into an invented value. Slack is measured against capacity across the
+whole semester rather than only the rolling horizon, so assignments due past day 14 keep distinct
+slack values instead of collapsing onto the one figure the horizon window produces for all of them.
 
 The scheduler preserves configured minimum, preferred, and maximum session sizes with exact
 integer-minute durations and 15-minute-aligned starts. It schedules the largest exact valid
@@ -63,7 +65,11 @@ the final session does not require a trailing break. The break is reserved acros
 opening rather than only inside the one being split, so two openings that meet exactly — midnight
 availability, or a fixed commitment shorter than the break — cannot yield adjacent sessions.
 Required academic coverage is optimized before optional academics, flexible work, and distant
-opportunistic assignments. Greedy fallback follows the same priority bands and hard constraints.
+opportunistic assignments. Distant assignments are then ranked among themselves by the same bands,
+in a stage that runs after goal coverage, goal fairness, and total distant coverage are fixed, so
+deadline order decides which distant assignment fills already-granted minutes and which one claims
+the earlier opening, without taking capacity from a flexible goal. Greedy fallback follows the same
+priority bands and hard constraints.
 Simultaneous exams each receive a valid session when capacity permits before remaining capacity
 follows slack, date, remaining estimate, and known weight. Early-review cadence is derived from
 actual proposed assignment completion and is omitted with a warning when saved session bounds do
@@ -175,6 +181,6 @@ remain future work. The calendar's visual redesign is also separate from this sc
 The repository test suite covers API contracts, defaults and provenance, linked and proportional
 class readiness, semester pressure, proposal lifecycle, core hard scheduling constraints, recovery
 layers, fallback behavior, revision-AI boundary, and stale input protection. On 2026-09-02,
-`pnpm check` passed with 106 API tests plus frontend lint, typecheck, and production build. Database
+`pnpm check` passed with 111 API tests plus frontend lint, typecheck, and production build. Database
 schema did not change, so no migration was required for this cutover. The gaps listed above remain
 open and are not covered by that suite.
