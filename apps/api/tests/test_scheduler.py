@@ -625,6 +625,38 @@ def test_placement_reports_the_window_energy_it_actually_used(
     assert details["energy_matched"] is matched
 
 
+def test_greedy_keeps_the_break_between_openings_that_meet_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Availability that runs to midnight leaves one opening ending exactly where the next
+    # begins. The break separates generated sessions, so it has to be reserved across the
+    # boundary rather than only inside the opening being split.
+    monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, 3, 23, tzinfo=UTC),
+            datetime(2026, 9, 4, tzinfo=UTC),
+            daily_capacity_minutes=600,
+        ),
+        SchedulingWindow(
+            datetime(2026, 9, 4, tzinfo=UTC),
+            datetime(2026, 9, 4, 3, tzinfo=UTC),
+            daily_capacity_minutes=600,
+        ),
+    ]
+    deadline = datetime(2026, 9, 4, 6, tzinfo=UTC)
+    items = [
+        task("first", minutes=60, due_at=deadline, latest_end_at=deadline),
+        task("second", minutes=60, due_at=deadline, latest_end_at=deadline),
+    ]
+
+    result = solve_schedule(items, windows, minimum_break_minutes=15)
+
+    assert result.used_baseline is True
+    assert not constraint_violations(items, windows, result, 15)
+    assert result.scheduled_minutes == {"first": 60, "second": 60}
+
+
 def test_session_partition_preserves_exact_minutes_and_never_breaks_minimum() -> None:
     exact = task("exact", minutes=151)
     impossible = SchedulingItem(

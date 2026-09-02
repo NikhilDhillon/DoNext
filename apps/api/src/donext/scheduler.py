@@ -269,14 +269,32 @@ def _greedy_baseline(
         if choice is None:
             continue
         segment_index, start_at = choice
+        energy_level = free[segment_index].energy_level
         occupied_end = start_at + timedelta(
             minutes=session.duration_minutes + minimum_break_minutes
         )
-        segment = free.pop(segment_index)
-        if segment.start_at < start_at:
-            free.append(_FreeSegment(segment.start_at, start_at, segment.energy_level))
-        if occupied_end < segment.end_at:
-            free.append(_FreeSegment(occupied_end, segment.end_at, segment.energy_level))
+        # The required break separates this session from every other generated session, so the
+        # gap is reserved across all remaining openings rather than only inside the one being
+        # split. Two openings can meet exactly - availability that runs to midnight, or a fixed
+        # commitment shorter than the break - and trimming only the chosen segment would leave
+        # the next session free to start with no gap at all.
+        reserved_start = start_at - timedelta(minutes=minimum_break_minutes)
+        remaining_free: list[_FreeSegment] = []
+        for segment in free:
+            if segment.end_at <= reserved_start or segment.start_at >= occupied_end:
+                remaining_free.append(segment)
+                continue
+            if segment.start_at < reserved_start:
+                remaining_free.append(
+                    _FreeSegment(segment.start_at, reserved_start, segment.energy_level)
+                )
+            if occupied_end < segment.end_at:
+                remaining_free.append(
+                    _FreeSegment(
+                        max(occupied_end, segment.start_at), segment.end_at, segment.energy_level
+                    )
+                )
+        free = remaining_free
         free.sort(key=lambda value: value.start_at)
         used_by_day[start_at.date()] += session.duration_minutes
         blocks_by_day[start_at.date()] += 1
@@ -284,7 +302,7 @@ def _greedy_baseline(
         item_days[session.item.id].add(start_at.date())
         scheduled[session.item.id] += session.duration_minutes
         item_ready_at[session.item.id] = occupied_end
-        placements.append(_placement(session, start_at, segment.energy_level))
+        placements.append(_placement(session, start_at, energy_level))
 
     placements.sort(key=lambda placement: (placement.start_at, placement.item_id))
     complete = all(scheduled[item.id] == item.target_minutes for item in items)
