@@ -591,8 +591,10 @@ def _build_proposal(
                 reason_details=_placement_capacity_details(
                     placement.reason_details,
                     placement.start_at,
+                    placement.end_at,
                     windows,
                     result,
+                    preferences,
                     timezone,
                     used_buffer,
                     used_extra_focus,
@@ -1166,8 +1168,15 @@ def _scheduling_windows(
             sleep_start_date, preferences.default_sleep_time, tzinfo=timezone
         )
         wake = datetime.combine(current, preferences.default_wake_time, tzinfo=timezone)
-        later_bedtime = sleep_reduction_minutes // 2
-        earlier_wake = sleep_reduction_minutes - later_bedtime
+        later_bedtime, earlier_wake = _sleep_edge_allocation(
+            current,
+            available,
+            exclusions,
+            availability,
+            preferences,
+            timezone,
+            sleep_reduction_minutes,
+        )
         sleep_start += timedelta(minutes=later_bedtime)
         wake -= timedelta(minutes=earlier_wake)
         day_end = datetime.combine(current + timedelta(days=1), time.min, tzinfo=timezone)
@@ -1219,6 +1228,91 @@ def _scheduling_windows(
                     )
                 )
     return windows
+
+
+def _sleep_edge_allocation(
+    current: date,
+    available: list[Interval],
+    exclusions: list[Interval],
+    availability: list[AvailabilityWindow],
+    preferences: UserPreference,
+    timezone: ZoneInfo,
+    reduction_minutes: int,
+) -> tuple[int, int]:
+    """Return later-bedtime and earlier-wake minutes, ranked by usable edge quality."""
+
+    if reduction_minutes <= 0:
+        return 0, 0
+    wake = datetime.combine(current, preferences.default_wake_time, tzinfo=timezone)
+    sleep_date = (
+        current + timedelta(days=1) if preferences.default_sleep_time == time.min else current
+    )
+    bedtime = datetime.combine(sleep_date, preferences.default_sleep_time, tzinfo=timezone)
+    open_intervals = subtract_intervals(available, exclusions)
+
+    candidates: list[tuple[int, int, int, Literal["later", "earlier"]]] = []
+    for start_at, end_at in open_intervals:
+        if start_at < wake <= end_at:
+            edge_start = max(start_at, wake - timedelta(minutes=reduction_minutes))
+            capacity = interval_minutes([(edge_start, wake)])
+            if capacity:
+                candidates.append(
+                    (
+                        _availability_energy_rank(
+                            wake - timedelta(minutes=1), current, availability, timezone
+                        ),
+                        capacity,
+                        0,
+                        "earlier",
+                    )
+                )
+        if start_at <= bedtime < end_at:
+            edge_end = min(end_at, bedtime + timedelta(minutes=reduction_minutes))
+            capacity = interval_minutes([(bedtime, edge_end)])
+            if capacity:
+                candidates.append(
+                    (
+                        _availability_energy_rank(
+                            bedtime + timedelta(minutes=1), current, availability, timezone
+                        ),
+                        capacity,
+                        1,
+                        "later",
+                    )
+                )
+
+    remaining = reduction_minutes
+    later_bedtime = 0
+    earlier_wake = 0
+    for _energy, capacity, _tie_break, edge in sorted(candidates, reverse=True):
+        used = min(capacity, remaining)
+        if edge == "later":
+            later_bedtime += used
+        else:
+            earlier_wake += used
+        remaining -= used
+        if remaining <= 0:
+            break
+    return later_bedtime, earlier_wake
+
+
+def _availability_energy_rank(
+    moment: datetime,
+    current: date,
+    availability: list[AvailabilityWindow],
+    timezone: ZoneInfo,
+) -> int:
+    ranks = {"low": 1, "medium": 2, "high": 3}
+    matches: list[int] = []
+    for window in availability:
+        if window.day_of_week != current.weekday() or window.type.value == "unavailable":
+            continue
+        end_date = current + timedelta(days=1) if window.end_time == time.min else current
+        start_at = datetime.combine(current, window.start_time, tzinfo=timezone)
+        end_at = datetime.combine(end_date, window.end_time, tzinfo=timezone)
+        if start_at <= moment < end_at:
+            matches.append(ranks[window.energy_level.value])
+    return max(matches, default=0)
 
 
 def _apply_avoid_time_ranges(
@@ -1419,28 +1513,40 @@ def _additional_minutes_summary(
 def _placement_capacity_details(
     original: dict[str, object],
     start_at: datetime,
+    end_at: datetime,
     normal_windows: list[SchedulingWindow],
     result: SchedulingResult,
+    preferences: UserPreference,
     timezone: ZoneInfo,
     used_buffer: bool,
     used_extra_focus: bool,
     sleep_reduction: int,
 ) -> dict[str, object]:
-    day = start_at.astimezone(timezone).date()
+    local_start = start_at.astimezone(timezone)
+    local_end = end_at.astimezone(timezone)
+    day = local_start.date()
     caps = _window_cap_by_day(normal_windows)
     totals = {
         date.fromisoformat(cast(str, row["date"])): cast(int, row["minutes"])
         for row in _scheduled_minutes_by_day(result, timezone)
     }
     above_normal = max(totals.get(day, 0) - caps.get(day, 0), 0)
+    wake = datetime.combine(day, preferences.default_wake_time, tzinfo=timezone)
+    sleep_day = day + timedelta(days=1) if preferences.default_sleep_time == time.min else day
+    bedtime = datetime.combine(sleep_day, preferences.default_sleep_time, tzinfo=timezone)
+    sleep_minutes_used = min(
+        max(round((wake - local_start).total_seconds() / 60), 0)
+        + max(round((local_end - bedtime).total_seconds() / 60), 0),
+        sleep_reduction,
+    )
     return {
         **original,
         "rollover_capacity_used": used_buffer and above_normal > 0,
         "extra_focus_capacity_used": (
             used_extra_focus and above_normal > (ROLLOVER_BUFFER_MINUTES if used_buffer else 0)
         ),
-        "reduced_sleep_capacity_used": sleep_reduction > 0,
-        "sleep_reduction_minutes": sleep_reduction,
+        "reduced_sleep_capacity_used": sleep_minutes_used > 0,
+        "sleep_reduction_minutes": sleep_minutes_used,
     }
 
 
@@ -1456,8 +1562,6 @@ def _sleep_summary(
         return []
     preferred = sleep_window_minutes(preferences.default_sleep_time, preferences.default_wake_time)
     summary: list[dict[str, object]] = []
-    later_limit = reduction // 2
-    earlier_limit = reduction - later_limit
     for offset in range((end_date - start_date).days + 1):
         day = start_date + timedelta(days=offset)
         wake = datetime.combine(day, preferences.default_wake_time, tzinfo=timezone)
@@ -1473,14 +1577,14 @@ def _sleep_summary(
             if block_start < wake:
                 earlier_used = max(
                     earlier_used,
-                    min(round((wake - block_start).total_seconds() / 60), earlier_limit),
+                    min(round((wake - block_start).total_seconds() / 60), reduction),
                 )
             if block_end > bedtime:
                 later_used = max(
                     later_used,
-                    min(round((block_end - bedtime).total_seconds() / 60), later_limit),
+                    min(round((block_end - bedtime).total_seconds() / 60), reduction),
                 )
-        actual_reduction = earlier_used + later_used
+        actual_reduction = min(earlier_used + later_used, reduction)
         if actual_reduction <= 0:
             continue
         summary.append(

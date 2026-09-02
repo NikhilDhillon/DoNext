@@ -388,3 +388,79 @@ def test_urgent_buffer_is_used_for_required_work_before_optional_work(
     assert any(
         day["consumed_minutes"] == 50 for day in proposal["generation_summary"]["rollover_by_day"]
     )
+
+
+def test_sleep_fallback_uses_the_higher_energy_edge_and_reports_exact_blocks(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    client.patch(
+        "/api/v1/preferences",
+        json={
+            "default_sleep_time": "23:00:00",
+            "default_wake_time": "08:00:00",
+            "minimum_sleep_minutes": 480,
+            "maximum_daily_focus_minutes": 600,
+            "minimum_break_minutes": 10,
+            "freeze_window_minutes": 0,
+        },
+    )
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": 2,
+                    "start_time": "07:00:00",
+                    "end_time": "09:00:00",
+                    "type": "available",
+                    "energy_level": "high",
+                },
+                {
+                    "day_of_week": 2,
+                    "start_time": "22:00:00",
+                    "end_time": "00:00:00",
+                    "type": "available",
+                    "energy_level": "low",
+                },
+            ]
+        },
+    )
+    task = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Urgent report",
+            "estimated_minutes": 150,
+            "minimum_session_minutes": 50,
+            "preferred_session_minutes": 50,
+            "maximum_session_minutes": 50,
+            "deadline_at": "2026-09-03T23:59:00-07:00",
+            "required": True,
+        },
+    ).json()
+
+    response = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert response.status_code == 201
+    proposal = response.json()
+    blocks = [block for block in proposal["blocks"] if block["task_id"] == task["id"]]
+    local_starts = [datetime.fromisoformat(block["start_at"]) for block in blocks]
+    local_ends = [datetime.fromisoformat(block["end_at"]) for block in blocks]
+
+    assert len(blocks) == 3
+    assert any(start.hour < 8 for start in local_starts)
+    assert all(end.hour < 23 or (end.hour == 23 and end.minute == 0) for end in local_ends)
+    assert proposal["generation_summary"]["sleep_by_day"] == [
+        {
+            "date": "2026-09-02",
+            "preferred_minutes": 540,
+            "planned_minutes": 480,
+            "reduction_minutes": 60,
+            "minimum_minutes": 480,
+        }
+    ]
+    reduced_sleep_blocks = [
+        block for block in blocks if block["reason_details"]["reduced_sleep_capacity_used"]
+    ]
+    assert len(reduced_sleep_blocks) == 1
+    assert reduced_sleep_blocks[0]["reason_details"]["sleep_reduction_minutes"] == 60

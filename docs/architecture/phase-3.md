@@ -73,6 +73,11 @@ Proposal construction uses explicit escalation passes:
 6. incremental preferred-sleep reduction toward the hard minimum, followed by honest unresolved
    work if required academics still cannot fit.
 
+For each sleep-reduction pass, the window builder measures contiguous usable availability at the
+bedtime and wake-time edges after fixed exclusions. It unlocks the edge with the stronger saved
+energy first, then the larger usable capacity, using the other edge only when necessary. Generated
+block details and the proposal summary report only the reduced-sleep capacity actually consumed.
+
 The extra-focus response includes a fingerprint, total and per-day extra minutes, resulting daily
 focus, and protected work. Stale fingerprints are rejected by issuing a newly calculated request.
 Generation rolls back before returning either an exam-estimate or extra-focus requirement, so the
@@ -113,10 +118,6 @@ fully implemented yet:
   academic coverage is fixed, but it does not explicitly target one 30-to-45-minute review block
   approximately every three days while urgent pre-exam assignments are still underway, nor does it
   minimize excessive gaps as preparation intensifies.
-- **Least-disruptive sleep edges:** sleep reduction respects the configured minimum and is reported
-  in the proposal, but the current window builder splits each allowed reduction between a later
-  bedtime and earlier wake time. It does not compare saved availability and energy suitability to
-  choose the least disruptive edge or combination.
 - **Complete extra-focus explanation before consent:** the API returns the extra minutes by date,
   resulting focus totals, and protected work, but the onboarding and regeneration confirmations
   currently show only the aggregate extra time. The student does not yet see every affected date
