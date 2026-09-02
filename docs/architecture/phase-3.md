@@ -59,12 +59,20 @@ weight is never converted into an invented value.
 The scheduler preserves configured minimum, preferred, and maximum session sizes with exact
 integer-minute durations and 15-minute-aligned starts. It schedules the largest exact valid
 partition and reports any sub-minimum remainder. Multiple sessions retain required separation, but
-the final session does not require a trailing break. Required academic coverage is optimized before
-optional academics, flexible work, and distant opportunistic assignments. Greedy fallback follows
-the same priority bands and hard constraints. Simultaneous exams each receive a valid session when
-capacity permits before remaining capacity follows slack, date, remaining estimate, and known
-weight. Early-review cadence is derived from actual proposed assignment completion and is omitted
-with a warning when saved session bounds do not overlap 30–45 minutes.
+the final session does not require a trailing break. The break is reserved across every remaining
+opening rather than only inside the one being split, so two openings that meet exactly — midnight
+availability, or a fixed commitment shorter than the break — cannot yield adjacent sessions.
+Required academic coverage is optimized before optional academics, flexible work, and distant
+opportunistic assignments. Greedy fallback follows the same priority bands and hard constraints.
+Simultaneous exams each receive a valid session when capacity permits before remaining capacity
+follows slack, date, remaining estimate, and known weight. Early-review cadence is derived from
+actual proposed assignment completion and is omitted with a warning when saved session bounds do
+not overlap 30–45 minutes.
+
+Openings are split at every saved availability boundary, so contiguous rows keep their own energy
+instead of merging into one unlabeled block, and the strongest saved energy wins where rows overlap.
+A placement reports the level saved for the opening it actually used, whether or not that level
+matched, so the mismatch objective and the block explanation read the same value.
 
 ## Capacity passes
 
@@ -72,7 +80,8 @@ Proposal construction uses explicit escalation passes:
 
 1. normal waking availability, preferred daily focus, fixed commitments, breaks, and a 60-minute
    daily rollover buffer;
-2. buffer release when overdue or 48-hour work remains;
+2. buffer release when overdue or 48-hour work remains, where the released hour stays a reserve
+   that only that work may spend and every other item keeps the day's ordinary capacity;
 3. flexible-goal reduction through academic-first allocation;
 4. a comparison solve using waking capacity above the preferred focus cap, maximizing protected
    required work and then minimizing total, peak-daily, and deterministic per-day excess;
@@ -99,8 +108,10 @@ Proposal summaries report academic coverage, proportional material release, seme
 checkpoints, exam estimates and sources, opportunistic work, flexible reductions, rollover use,
 extra focus, sleep changes, and counterfactual unresolved-work diagnostics. Generated blocks store
 a versioned explanation with priority, readiness, remaining work, deadline, slack, exam and weight
-effects, requested and chosen energy, capacity source, and verified displacement. Legacy blocks use
-generic fallback copy. Fixed events and the student's minimum sleep never move.
+effects, requested and chosen energy, capacity source, and verified displacement. Because a capacity
+pass solves with untouched work pinned to what it already had, displacement is restated against the
+real targets once the adopted result is known, so escalation does not silently erase the trade-off.
+Legacy blocks use generic fallback copy. Fixed events and the student's minimum sleep never move.
 
 ## Optional revision interpretation
 
@@ -133,7 +144,26 @@ lecture release, future-pressure promotion, simultaneous exams, exact durations,
 isolation, sleep reporting, truthful displacement, and proposal lifecycle safety. Shared hard and
 priority cases run through CP-SAT and forced greedy fallback.
 
+### Known gaps against the scheduling specification
 
+- **Extra-focus minimization is optimizer-only:** the greedy fallback ignores `minimize_excess_over`,
+  so a solver timeout can produce an extra-focus request that is not the minimal total, peak-daily,
+  and per-day excess the specification promises.
+- **Distant assignments are reported as unresolved:** an assignment due beyond the horizon is
+  designed to take only spare capacity, but its unused minutes still appear in the unresolved list
+  under `ACADEMIC_CAPACITY_LIMIT`, which reads as deadline risk that does not exist.
+- **Post-exam assignments disappear silently:** an assignment due after an active same-course exam
+  is withheld with no warning and no unresolved entry, so the student cannot see that it was held
+  back or why. Re-entry is also driven by exam-task completion alone; remaining usable capacity is
+  never evaluated.
+- **Quiz preparation ignores proportional release:** only midterms and finals build a material
+  release schedule, so quiz preparation unlocks in full at the course's first lecture.
+- **Semester forecast ignores accepted work past the horizon:** post-horizon capacity is computed
+  against horizon-bounded preserved blocks, so any accepted commitment beyond day 14 is not excluded
+  from the optimistic capacity estimate.
+- **Acceptance coverage is thinner than the scenario list in two places:** scenario 12 asserts buffer
+  consumption but never that the buffer is retained under normal load, and scenario 14 asserts the
+  permission handshake but never that an approved draft leaves sleep untouched.
 
 ## Out of scope
 
@@ -145,5 +175,6 @@ remain future work. The calendar's visual redesign is also separate from this sc
 The repository test suite covers API contracts, defaults and provenance, linked and proportional
 class readiness, semester pressure, proposal lifecycle, core hard scheduling constraints, recovery
 layers, fallback behavior, revision-AI boundary, and stale input protection. On 2026-09-02,
-`pnpm check` passed with 97 API tests plus frontend lint, typecheck, and production build. Database
-schema did not change, so no migration was required for this cutover.
+`pnpm check` passed with 106 API tests plus frontend lint, typecheck, and production build. Database
+schema did not change, so no migration was required for this cutover. The gaps listed above remain
+open and are not covered by that suite.
