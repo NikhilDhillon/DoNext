@@ -168,7 +168,7 @@ def solve_schedule(
             minimize_excess_over,
         )
     result = improved or baseline
-    placements = _attach_displacement(items, result.placements, result.scheduled_minutes)
+    placements = attach_displacement(items, result.placements, result.scheduled_minutes)
     return SchedulingResult(
         status=result.status,
         placements=placements,
@@ -1121,10 +1121,27 @@ def _could_have_used(item: SchedulingItem, placement: Placement) -> bool:
     return available >= min(valid_session, item.preferred_session_minutes)
 
 
+_DISPLACEMENT_KEYS = (
+    "displaced_item_id",
+    "displaced_title",
+    "displaced_kind",
+    "displaced_shortfall_minutes",
+)
+
+
+def _without_displacement(reason_details: dict[str, object]) -> dict[str, object]:
+    cleared = {key: value for key, value in reason_details.items() if key not in _DISPLACEMENT_KEYS}
+    cleared["weight_tie_result"] = "not_compared"
+    return cleared
+
+
 # Names the specific alternative that lost capacity because this block was selected: the most
 # protected item that still finished short, could have used this exact slot, and ranks below
 # the placed work. Blocks that displaced nothing carry no claim.
-def _attach_displacement(
+#
+# Safe to re-run against a different item set: any earlier claim is cleared first, so a caller
+# that solved with rewritten targets can restate the trade-off against the real ones.
+def attach_displacement(
     items: list[SchedulingItem],
     placements: list[Placement],
     scheduled_minutes: dict[str, int],
@@ -1134,8 +1151,6 @@ def _attach_displacement(
         for item in items
         if item.target_minutes - scheduled_minutes.get(item.id, 0) > 0
     ]
-    if not shortfalls:
-        return placements
     by_id = {item.id: item for item in items}
     enriched: list[Placement] = []
     for placement in placements:
@@ -1149,7 +1164,9 @@ def _attach_displacement(
             and _could_have_used(item, placement)
         ]
         if not candidates:
-            enriched.append(placement)
+            enriched.append(
+                replace(placement, reason_details=_without_displacement(placement.reason_details))
+            )
             continue
         assert placed is not None
         item, missing = sorted(
@@ -1160,7 +1177,7 @@ def _attach_displacement(
             replace(
                 placement,
                 reason_details={
-                    **placement.reason_details,
+                    **_without_displacement(placement.reason_details),
                     "displaced_item_id": item.id,
                     "displaced_title": item.title,
                     "displaced_kind": item.kind,

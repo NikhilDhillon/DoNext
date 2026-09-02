@@ -61,6 +61,7 @@ from donext.scheduler import (
     SchedulingPolicy,
     SchedulingResult,
     SchedulingWindow,
+    attach_displacement,
     solve_schedule,
 )
 from donext.schemas import (
@@ -685,7 +686,11 @@ def _build_proposal(
                 sleep_reduction = reduction
             if not _required_academic_shortfall(items, result):
                 break
-    for placement in result.placements:
+    # Capacity passes solve with the untouched work pinned to what it already had, which hides
+    # every shortfall from the solver's own displacement pass. Restate the trade-off here
+    # against the real targets so each block still names the work it cost.
+    placements = attach_displacement(items, result.placements, result.scheduled_minutes)
+    for placement in placements:
         task_id, goal_id, block_type = item_links[placement.item_id]
         db.add(
             ScheduledBlock(

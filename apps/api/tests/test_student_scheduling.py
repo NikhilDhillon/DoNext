@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import cast
 
 from fastapi.testclient import TestClient
 from test_api import create_semester, register
@@ -511,6 +512,84 @@ def test_urgent_buffer_is_used_for_required_work_before_optional_work(
     assert any(
         day["consumed_minutes"] == 50 for day in proposal["generation_summary"]["rollover_by_day"]
     )
+
+
+def _flexible_goal(client: TestClient, semester: dict[str, object]) -> None:
+    response = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Portfolio",
+            "semester_id": semester["id"],
+            "category": "personal",
+            "start_date": semester["start_date"],
+            "planning_kind": "goal",
+            "minimum_weekly_minutes": 60,
+            "preferred_weekly_minutes": 600,
+            "maximum_weekly_minutes": 700,
+            "minimum_session_minutes": 30,
+            "preferred_session_minutes": 30,
+            "maximum_session_minutes": 30,
+        },
+    )
+    assert response.status_code == 201
+
+
+def _pressured_plan(client: TestClient) -> dict[str, object]:
+    """A 48-hour deadline that only fits once the rollover buffer is released."""
+
+    semester = create_semester(client)
+    client.patch(
+        "/api/v1/preferences",
+        json={"maximum_daily_focus_minutes": 120, "freeze_window_minutes": 0},
+    )
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": day,
+                    "start_time": "10:00:00",
+                    "end_time": "13:00:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+                for day in range(7)
+            ]
+        },
+    )
+    _flexible_goal(client, semester)
+    client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Required work",
+            "estimated_minutes": 90,
+            "deadline_at": "2026-09-02T23:59:00-07:00",
+            "required": True,
+        },
+    )
+    return cast(
+        dict[str, object],
+        client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json(),
+    )
+
+
+def test_capacity_passes_still_name_the_work_a_block_displaced(client: TestClient) -> None:
+    register(client)
+    proposal = _pressured_plan(client)
+    blocks = cast(list[dict[str, object]], proposal["blocks"])
+
+    # The buffer pass solves with untouched work pinned to what it already had, which hides
+    # every shortfall from the solver's own displacement pass. The block still has to name the
+    # goal time it cost.
+    required = [
+        cast(dict[str, object], block["reason_details"])
+        for block in blocks
+        if block["title"] == "Required work"
+    ]
+    assert required
+    assert all(detail["capacity_source"] == "rollover" for detail in required)
+    assert all(detail["displaced_title"] == "Portfolio" for detail in required)
+    assert all(detail["displaced_kind"] == "goal" for detail in required)
 
 
 def test_sleep_fallback_uses_the_higher_energy_edge_and_reports_exact_blocks(
