@@ -46,6 +46,9 @@ class SchedulingItem:
     material_release_schedule: tuple[tuple[datetime, int], ...] = ()
     material_release_method: str | None = None
     strategic_lead: bool = False
+    # Only overdue work and assignments due within 48 hours may spend a day's released
+    # rollover reserve. Everything else stays inside the day's ordinary capacity.
+    may_use_reserve: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,8 @@ class SchedulingWindow:
     energy_level: str = "medium"
     daily_capacity_minutes: int | None = None
     protected_free_minutes: int = 0
+    # Minutes inside `daily_capacity_minutes` that only reserve-eligible items may use.
+    reserve_minutes: int = 0
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,8 @@ def _greedy_baseline(
         for window in sorted(windows, key=lambda value: value.start_at)
     ]
     used_by_day: dict[date, int] = defaultdict(int)
+    restricted_used_by_day: dict[date, int] = defaultdict(int)
+    reserve_by_day = _reserve_by_day(windows)
     blocks_by_day: dict[date, int] = defaultdict(int)
     item_dates: dict[tuple[str, date], int] = defaultdict(int)
     item_days: dict[str, set[date]] = defaultdict(set)
@@ -258,7 +265,9 @@ def _greedy_baseline(
             session,
             free,
             used_by_day,
+            restricted_used_by_day,
             capacity_by_day,
+            reserve_by_day,
             item_dates,
             blocks_by_day,
             minimum_break_minutes,
@@ -297,6 +306,8 @@ def _greedy_baseline(
         free = remaining_free
         free.sort(key=lambda value: value.start_at)
         used_by_day[start_at.date()] += session.duration_minutes
+        if not session.item.may_use_reserve:
+            restricted_used_by_day[start_at.date()] += session.duration_minutes
         blocks_by_day[start_at.date()] += 1
         item_dates[(session.item.id, start_at.date())] += 1
         item_days[session.item.id].add(start_at.date())
@@ -319,7 +330,9 @@ def _best_greedy_slot(
     session: _Session,
     free: list[_FreeSegment],
     used_by_day: dict[date, int],
+    restricted_used_by_day: dict[date, int],
     capacity_by_day: dict[date, int],
+    reserve_by_day: dict[date, int],
     item_dates: dict[tuple[str, date], int],
     blocks_by_day: dict[date, int],
     minimum_break_minutes: int,
@@ -334,6 +347,10 @@ def _best_greedy_slot(
             continue
         if used_by_day[day] + session.duration_minutes > capacity_by_day.get(day, 0):
             continue
+        if not session.item.may_use_reserve:
+            restricted = restricted_used_by_day[day] + session.duration_minutes
+            if restricted > _restricted_capacity(day, capacity_by_day, reserve_by_day):
+                continue
         if (
             policy is not None
             and policy.max_blocks_per_day is not None
@@ -461,6 +478,8 @@ def _optimize_sessions(
     presence_by_session: dict[tuple[str, int], cp_model.IntVar] = {}
     intervals: list[cp_model.IntervalVar] = []
     day_selected: dict[date, list[tuple[cp_model.IntVar, int]]] = defaultdict(list)
+    day_restricted: dict[date, list[tuple[cp_model.IntVar, int]]] = defaultdict(list)
+    reserve_by_day = _reserve_by_day(windows)
 
     for session in sessions:
         key = (session.item.id, session.index)
@@ -492,6 +511,8 @@ def _optimize_sessions(
                 alternatives_by_session[key].append(alternative)
                 intervals.append(interval)
                 day_selected[day].append((selected, session.duration_minutes))
+                if not session.item.may_use_reserve:
+                    day_restricted[day].append((selected, session.duration_minutes))
         model.add(sum(alt.selected for alt in alternatives_by_session[key]) == presence)
 
     model.add_no_overlap(intervals)
@@ -504,6 +525,13 @@ def _optimize_sessions(
             model.add(
                 sum(choice for choice, _duration in daily_choices) <= policy.max_blocks_per_day
             )
+    # A released rollover reserve stays reserved: work that is neither overdue nor due within
+    # 48 hours is held to the day's ordinary capacity even though the reserve is open.
+    for day, restricted_choices in day_restricted.items():
+        model.add(
+            sum(choice * duration for choice, duration in restricted_choices)
+            <= _restricted_capacity(day, capacity_by_day, reserve_by_day)
+        )
     for item in items:
         item_sessions = [session for session in sessions if session.item.id == item.id]
         for previous, current in zip(item_sessions, item_sessions[1:], strict=False):
@@ -992,6 +1020,22 @@ def _capacity_by_day(windows: list[SchedulingWindow]) -> dict[date, int]:
     return {day: explicit.get(day, minutes) for day, minutes in raw.items()}
 
 
+def _reserve_by_day(windows: list[SchedulingWindow]) -> dict[date, int]:
+    reserve: dict[date, int] = {}
+    for window in windows:
+        day = window.start_at.date()
+        reserve[day] = max(reserve.get(day, 0), window.reserve_minutes)
+    return reserve
+
+
+def _restricted_capacity(
+    day: date, capacity_by_day: dict[date, int], reserve_by_day: dict[date, int]
+) -> int:
+    """Return the capacity available to work that may not spend the day's reserve."""
+
+    return max(capacity_by_day.get(day, 0) - reserve_by_day.get(day, 0), 0)
+
+
 def _protected_free_minutes(windows: list[SchedulingWindow]) -> int:
     grouped: dict[date, list[SchedulingWindow]] = defaultdict(list)
     for window in windows:
@@ -1062,6 +1106,7 @@ def _placement(session: _Session, start_at: datetime, energy_level: str) -> Plac
                 session.remaining_before_minutes - session.duration_minutes, 0
             ),
             "strategic_lead": item.strategic_lead,
+            "rollover_eligible": item.may_use_reserve,
             **({"due_at": item.due_at.isoformat()} if item.due_at else {}),
             **({"eligible_date": start_at.date().isoformat()} if item.eligible_dates else {}),
         },

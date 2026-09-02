@@ -657,6 +657,55 @@ def test_greedy_keeps_the_break_between_openings_that_meet_exactly(
     assert result.scheduled_minutes == {"first": 60, "second": 60}
 
 
+@pytest.mark.parametrize("force_greedy", [False, True])
+def test_released_reserve_is_spendable_only_by_reserve_eligible_work(
+    force_greedy: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A released rollover buffer stays reserved: the day offers 180 minutes but 60 of them are
+    # reachable only by overdue or 48-hour work, so the goal is held to 120 either way.
+    if force_greedy:
+        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, 3, 8, tzinfo=UTC),
+            datetime(2026, 9, 3, 20, tzinfo=UTC),
+            daily_capacity_minutes=180,
+            reserve_minutes=60,
+        )
+    ]
+    goal = SchedulingItem(
+        id="goal:run",
+        title="Evening run",
+        target_minutes=180,
+        minimum_session_minutes=60,
+        preferred_session_minutes=60,
+        maximum_session_minutes=60,
+        priority_rank=2,
+        intensity="moderate",
+        kind="goal",
+        required=False,
+    )
+    urgent = SchedulingItem(
+        id="task:urgent",
+        title="Due tomorrow",
+        target_minutes=60,
+        minimum_session_minutes=60,
+        preferred_session_minutes=60,
+        maximum_session_minutes=60,
+        priority_rank=3,
+        intensity="moderate",
+        risk_tier=4,
+        may_use_reserve=True,
+    )
+
+    alone = solve_schedule([goal], windows, minimum_break_minutes=15)
+    shared = solve_schedule([urgent, goal], windows, minimum_break_minutes=15)
+
+    assert alone.scheduled_minutes["goal:run"] == 120
+    assert shared.scheduled_minutes["task:urgent"] == 60
+    assert shared.scheduled_minutes["goal:run"] == 120
+
+
 def test_session_partition_preserves_exact_minutes_and_never_breaks_minimum() -> None:
     exact = task("exact", minutes=151)
     impossible = SchedulingItem(

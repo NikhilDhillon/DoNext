@@ -573,6 +573,18 @@ def _pressured_plan(client: TestClient) -> dict[str, object]:
     )
 
 
+def test_released_rollover_only_funds_the_urgent_day(client: TestClient) -> None:
+    register(client)
+    proposal = _pressured_plan(client)
+    summary = cast(dict[str, list[dict[str, object]]], proposal["generation_summary"])
+
+    # Releasing the buffer opens it for the 48-hour deadline; it must not become ordinary
+    # capacity that a flexible goal can spend on days with no urgent work at all.
+    consumed = [day for day in summary["rollover_by_day"] if day["consumed_minutes"]]
+    assert [day["date"] for day in consumed] == ["2026-09-02"]
+    assert summary["flexible_adjustments"], "the goal should still have been reduced"
+
+
 def test_capacity_passes_still_name_the_work_a_block_displaced(client: TestClient) -> None:
     register(client)
     proposal = _pressured_plan(client)

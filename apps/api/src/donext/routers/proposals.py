@@ -478,6 +478,11 @@ def _build_proposal(
         semester_windows,
         planning_now.astimezone(timezone),
     )
+    # Reserve access is inert until a pass actually releases the buffer, so it is settled once
+    # here and travels with the item through every later pass.
+    items = [
+        replace(item, may_use_reserve=True) if _may_use_rollover(item) else item for item in items
+    ]
     scheduler_policy = _scheduler_policy(policy)
     solve_seconds = 3.0 if revision_of is not None else 5.0
     result = solve_schedule(
@@ -517,9 +522,7 @@ def _build_proposal(
     sleep_reduction = 0
 
     urgent_shortfall = any(
-        item.risk_tier >= 4
-        and item.kind in {"task", "exam_prep"}
-        and result.scheduled_minutes[item.id] < item.target_minutes
+        _may_use_rollover(item) and result.scheduled_minutes[item.id] < item.target_minutes
         for item in items
     )
     if urgent_shortfall:
@@ -536,11 +539,7 @@ def _build_proposal(
         )
         if policy is not None:
             buffer_windows = _apply_avoid_time_ranges(buffer_windows, policy, timezone)
-        buffer_items = _items_for_capacity_pass(
-            items,
-            result,
-            lambda item: item.kind in {"task", "exam_prep"} and item.risk_tier >= 4,
-        )
+        buffer_items = _items_for_capacity_pass(items, result, _may_use_rollover)
         buffer_result = solve_schedule(
             buffer_items,
             buffer_windows,
@@ -1328,6 +1327,10 @@ def _scheduling_windows(
         )
         usable = max(focus_limited_minutes - protected_free, 0)
         usable -= usable % 5
+        # A released buffer is opened, not dissolved: it becomes a reserve that only overdue
+        # work and assignments due within 48 hours may spend, so ordinary work stays inside
+        # the capacity it would have had without the release.
+        reserve = min(ROLLOVER_BUFFER_MINUTES, usable) if release_buffer and usable else 0
         for start_at, end_at in open_intervals:
             duration = round((end_at - start_at).total_seconds() / 60)
             duration -= duration % 5
@@ -1355,6 +1358,7 @@ def _scheduling_windows(
                         energy,
                         usable,
                         protected_free,
+                        reserve,
                     )
                 )
     return windows
@@ -1472,6 +1476,7 @@ def _apply_avoid_time_ranges(
                         window.energy_level,
                         window.daily_capacity_minutes,
                         window.protected_free_minutes,
+                        window.reserve_minutes,
                     )
                 )
     return adjusted
@@ -1500,6 +1505,14 @@ def _required_academic_minutes(items: list[SchedulingItem], result: SchedulingRe
     return sum(
         scheduled[item.id] for item in items if item.required and item.kind in {"task", "exam_prep"}
     )
+
+
+def _may_use_rollover(item: SchedulingItem) -> bool:
+    """The buffer is released for overdue work and for assignments due within 48 hours."""
+
+    if item.kind not in {"task", "exam_prep"}:
+        return False
+    return item.risk_tier >= 5 or (item.risk_tier == 4 and item.kind == "task")
 
 
 def _items_for_capacity_pass(
@@ -1677,11 +1690,8 @@ def _placement_capacity_details(
         + max(round((local_end - bedtime).total_seconds() / 60), 0),
         sleep_reduction,
     )
-    risk_tier = original.get("risk_tier")
     required = original.get("required") is True
-    rollover_used = (
-        used_buffer and above_normal > 0 and isinstance(risk_tier, int) and risk_tier >= 4
-    )
+    rollover_used = used_buffer and above_normal > 0 and original.get("rollover_eligible") is True
     extra_used = (
         used_extra_focus
         and required
