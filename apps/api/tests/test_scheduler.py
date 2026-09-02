@@ -5,7 +5,7 @@ from typing import cast
 import pytest
 
 import donext.scheduler as scheduler
-from donext.scheduler import SchedulingItem, SchedulingWindow, solve_schedule
+from donext.scheduler import SchedulingItem, SchedulingWindow, session_durations, solve_schedule
 
 
 def task(
@@ -91,6 +91,37 @@ def test_cp_sat_shares_partial_capacity_fairly_across_simultaneous_exams() -> No
 
     assert result.used_baseline is False
     assert result.scheduled_minutes == {"exam-0": 50, "exam-1": 50}
+
+
+@pytest.mark.parametrize("force_greedy", [False, True], ids=["cp-sat", "greedy"])
+def test_exam_fairness_does_not_cross_urgency_bands(
+    monkeypatch: pytest.MonkeyPatch, force_greedy: bool
+) -> None:
+    if force_greedy:
+        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    start = datetime(2026, 9, 9, 9, tzinfo=UTC)
+
+    def exam(identifier: str, risk_tier: int) -> SchedulingItem:
+        return SchedulingItem(
+            id=identifier,
+            title=identifier,
+            target_minutes=100,
+            minimum_session_minutes=50,
+            preferred_session_minutes=50,
+            maximum_session_minutes=50,
+            priority_rank=3,
+            intensity="moderate",
+            kind="exam_prep",
+            risk_tier=risk_tier,
+        )
+
+    result = solve_schedule(
+        [exam("urgent-exam", 4), exam("later-exam", 2)],
+        [SchedulingWindow(start, start + timedelta(minutes=110))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.scheduled_minutes == {"urgent-exam": 100, "later-exam": 0}
 
 
 def test_solver_uses_a_valid_remainder_session() -> None:
@@ -459,3 +490,402 @@ def test_a_block_that_displaced_nothing_makes_no_claim() -> None:
 
     assert result.placements
     assert all("displaced_title" not in placement.reason_details for placement in result.placements)
+
+
+def test_urgent_work_beats_the_pre_exam_boost_when_capacity_is_scarce() -> None:
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    urgent = SchedulingItem(
+        id="urgent",
+        title="Urgent assignment",
+        target_minutes=50,
+        minimum_session_minutes=50,
+        preferred_session_minutes=50,
+        maximum_session_minutes=50,
+        priority_rank=3,
+        intensity="moderate",
+        risk_tier=4,
+        importance_rank=4_000_000,
+    )
+    pre_exam = SchedulingItem(
+        id="pre-exam",
+        title="Pre-exam assignment",
+        target_minutes=50,
+        minimum_session_minutes=50,
+        preferred_session_minutes=50,
+        maximum_session_minutes=50,
+        priority_rank=3,
+        intensity="moderate",
+        risk_tier=3,
+        importance_rank=3_000_000,
+        exam_relationship="same_course_pre_exam",
+    )
+
+    result = solve_schedule(
+        [pre_exam, urgent],
+        [SchedulingWindow(start, start + timedelta(minutes=50))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.used_baseline is False
+    assert result.scheduled_minutes == {"pre-exam": 0, "urgent": 50}
+
+
+@pytest.mark.parametrize("force_greedy", [False, True], ids=["cp-sat", "greedy"])
+def test_same_course_pre_exam_relationship_beats_otherwise_equal_work(
+    monkeypatch: pytest.MonkeyPatch, force_greedy: bool
+) -> None:
+    if force_greedy:
+        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    common = {
+        "target_minutes": 50,
+        "minimum_session_minutes": 50,
+        "preferred_session_minutes": 50,
+        "maximum_session_minutes": 50,
+        "priority_rank": 3,
+        "intensity": "moderate",
+        "due_at": datetime(2026, 9, 8, 17, tzinfo=UTC),
+        "slack_minutes": 300,
+    }
+    ordinary = SchedulingItem(id="ordinary", title="Ordinary", risk_tier=2, **common)
+    pre_exam = SchedulingItem(
+        id="pre-exam",
+        title="Pre-exam",
+        risk_tier=3,
+        exam_relationship="same_course_pre_exam",
+        **common,
+    )
+
+    result = solve_schedule(
+        [ordinary, pre_exam],
+        [SchedulingWindow(start, start + timedelta(minutes=50))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.scheduled_minutes == {"ordinary": 0, "pre-exam": 50}
+
+
+def test_optimizer_uses_and_reports_the_actual_window_energy() -> None:
+    day = datetime(2026, 9, 2, tzinfo=UTC)
+    deep = SchedulingItem(
+        id="deep",
+        title="Deep work",
+        target_minutes=50,
+        minimum_session_minutes=50,
+        preferred_session_minutes=50,
+        maximum_session_minutes=50,
+        priority_rank=3,
+        intensity="deep",
+    )
+    result = solve_schedule(
+        [deep],
+        [
+            SchedulingWindow(day.replace(hour=9), day.replace(hour=10), "low"),
+            SchedulingWindow(day.replace(hour=15), day.replace(hour=16), "high"),
+        ],
+        minimum_break_minutes=0,
+    )
+
+    assert result.placements[0].start_at.hour == 15
+    assert result.placements[0].reason_details["energy_level"] == "high"
+    assert result.placements[0].reason_details["energy_matched"] is True
+
+
+def test_session_partition_preserves_exact_minutes_and_never_breaks_minimum() -> None:
+    exact = task("exact", minutes=151)
+    impossible = SchedulingItem(
+        id="remainder",
+        title="Remainder",
+        target_minutes=15,
+        minimum_session_minutes=10,
+        preferred_session_minutes=10,
+        maximum_session_minutes=10,
+        priority_rank=1,
+        intensity="moderate",
+    )
+
+    assert sum(session_durations(exact)) == 151
+    assert all(25 <= duration <= 90 for duration in session_durations(exact))
+    assert session_durations(impossible) == [10]
+
+
+def test_final_session_does_not_need_a_trailing_break_inside_the_window() -> None:
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    result = solve_schedule(
+        [task("deadline", minutes=50)],
+        [SchedulingWindow(start, start + timedelta(minutes=50))],
+        minimum_break_minutes=10,
+    )
+
+    assert result.scheduled_minutes["deadline"] == 50
+
+
+def test_start_alignment_rounds_a_boundary_with_seconds_to_the_next_quarter_hour() -> None:
+    window_start = datetime(2026, 9, 2, 12, 54, 23, tzinfo=UTC)
+    result = solve_schedule(
+        [task("aligned", minutes=50)],
+        [SchedulingWindow(window_start, window_start.replace(hour=15))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.placements[0].start_at == datetime(2026, 9, 2, 13, 0, tzinfo=UTC)
+
+
+def test_displacement_requires_a_session_that_fits_the_freed_block() -> None:
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    required = SchedulingItem(
+        id="required",
+        title="Required",
+        target_minutes=30,
+        minimum_session_minutes=30,
+        preferred_session_minutes=30,
+        maximum_session_minutes=30,
+        priority_rank=3,
+        intensity="moderate",
+    )
+    goal = SchedulingItem(
+        id="goal",
+        title="Goal",
+        target_minutes=60,
+        minimum_session_minutes=60,
+        preferred_session_minutes=60,
+        maximum_session_minutes=60,
+        priority_rank=2,
+        intensity="moderate",
+        kind="goal",
+        required=False,
+    )
+    result = solve_schedule(
+        [required, goal],
+        [SchedulingWindow(start, start + timedelta(minutes=30))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.placements
+    assert "displaced_title" not in result.placements[0].reason_details
+
+
+@pytest.mark.parametrize("force_greedy", [False, True], ids=["cp-sat", "greedy"])
+def test_same_local_due_date_uses_known_weight_as_the_tie_breaker(
+    monkeypatch: pytest.MonkeyPatch, force_greedy: bool
+) -> None:
+    if force_greedy:
+        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    due_at = datetime(2026, 9, 8, 23, 59, tzinfo=UTC)
+
+    def weighted(identifier: str, weight: float) -> SchedulingItem:
+        return SchedulingItem(
+            id=identifier,
+            title=identifier,
+            target_minutes=50,
+            minimum_session_minutes=50,
+            preferred_session_minutes=50,
+            maximum_session_minutes=50,
+            priority_rank=3,
+            intensity="moderate",
+            due_at=due_at,
+            risk_tier=2,
+            slack_minutes=500,
+            weight_percent=weight,
+        )
+
+    result = solve_schedule(
+        [weighted("low-weight", 5), weighted("high-weight", 30)],
+        [SchedulingWindow(start, start + timedelta(minutes=50))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.scheduled_minutes == {"low-weight": 0, "high-weight": 50}
+
+
+@pytest.mark.parametrize("force_greedy", [False, True], ids=["cp-sat", "greedy"])
+def test_unknown_weight_skips_weight_comparison_and_falls_back_to_exact_deadline(
+    monkeypatch: pytest.MonkeyPatch, force_greedy: bool
+) -> None:
+    if force_greedy:
+        monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    start = datetime(2026, 9, 2, 9, tzinfo=UTC)
+    common = {
+        "target_minutes": 50,
+        "minimum_session_minutes": 50,
+        "preferred_session_minutes": 50,
+        "maximum_session_minutes": 50,
+        "priority_rank": 3,
+        "intensity": "moderate",
+        "risk_tier": 2,
+        "slack_minutes": 500,
+    }
+    earlier_unknown = SchedulingItem(
+        id="earlier-unknown",
+        title="Earlier unknown weight",
+        due_at=datetime(2026, 9, 8, 12, tzinfo=UTC),
+        weight_percent=None,
+        **common,
+    )
+    later_known = SchedulingItem(
+        id="later-known",
+        title="Later known weight",
+        due_at=datetime(2026, 9, 8, 18, tzinfo=UTC),
+        weight_percent=80,
+        **common,
+    )
+
+    result = solve_schedule(
+        [later_known, earlier_unknown],
+        [SchedulingWindow(start, start + timedelta(minutes=50))],
+        minimum_break_minutes=0,
+    )
+
+    assert result.scheduled_minutes == {"later-known": 0, "earlier-unknown": 50}
+
+
+def constraint_violations(
+    items: list[SchedulingItem],
+    windows: list[SchedulingWindow],
+    result: object,
+    minimum_break_minutes: int,
+) -> list[str]:
+    """Hard constraints that must hold whichever path produced the placements."""
+    placements = sorted(
+        cast(list[object], getattr(result, "placements")),  # noqa: B009
+        key=lambda placement: getattr(placement, "start_at"),  # noqa: B009
+    )
+    by_id = {item.id: item for item in items}
+    problems: list[str] = []
+    for earlier, later in zip(placements, placements[1:], strict=False):
+        gap = (later.start_at - earlier.end_at).total_seconds() / 60  # type: ignore[attr-defined]
+        if gap < 0:
+            problems.append("overlapping placements")
+        elif gap < minimum_break_minutes:
+            problems.append("break shorter than the configured minimum")
+    used_by_day: dict[date, int] = {}
+    for placement in placements:
+        minutes = round((placement.end_at - placement.start_at).total_seconds() / 60)  # type: ignore[attr-defined]
+        day = placement.start_at.date()  # type: ignore[attr-defined]
+        used_by_day[day] = used_by_day.get(day, 0) + minutes
+        item = by_id[placement.item_id]  # type: ignore[attr-defined]
+        if item.earliest_start_at is not None and placement.start_at < item.earliest_start_at:  # type: ignore[attr-defined]
+            problems.append(f"{item.id} started before its earliest start")
+        if item.latest_end_at is not None and placement.end_at > item.latest_end_at:  # type: ignore[attr-defined]
+            problems.append(f"{item.id} finished after its deadline")
+        if item.eligible_dates is not None and day not in item.eligible_dates:
+            problems.append(f"{item.id} landed on an ineligible day")
+        if not any(
+            window.start_at <= placement.start_at and placement.end_at <= window.end_at  # type: ignore[attr-defined]
+            for window in windows
+        ):
+            problems.append(f"{item.id} landed outside every availability window")
+    for day, minutes in used_by_day.items():
+        cap = max(
+            (
+                window.daily_capacity_minutes
+                for window in windows
+                if window.start_at.date() == day and window.daily_capacity_minutes is not None
+            ),
+            default=None,
+        )
+        if cap is not None and minutes > cap:
+            problems.append(f"{day} exceeded its daily capacity")
+    return problems
+
+
+def mixed_load() -> tuple[list[SchedulingItem], list[SchedulingWindow]]:
+    start = datetime(2026, 9, 7, 9, tzinfo=UTC)
+    windows = [
+        SchedulingWindow(
+            start_at=start + timedelta(days=offset),
+            end_at=start + timedelta(days=offset, hours=8),
+            daily_capacity_minutes=300,
+        )
+        for offset in range(5)
+    ]
+    items = [
+        task("task:early", minutes=150, importance=90, latest_end_at=start + timedelta(days=2)),
+        task("task:late", minutes=200, importance=40, latest_end_at=start + timedelta(days=4)),
+        SchedulingItem(
+            id="exam:midterm",
+            title="CSC 370 · Midterm prep",
+            target_minutes=240,
+            minimum_session_minutes=30,
+            preferred_session_minutes=45,
+            maximum_session_minutes=45,
+            priority_rank=4,
+            intensity="deep",
+            kind="exam_prep",
+        ),
+        SchedulingItem(
+            id="goal:run",
+            title="Evening run",
+            target_minutes=90,
+            minimum_session_minutes=30,
+            preferred_session_minutes=30,
+            maximum_session_minutes=30,
+            priority_rank=2,
+            intensity="light",
+            kind="goal",
+            required=False,
+        ),
+    ]
+    return items, windows
+
+
+def test_a_long_assignment_starts_early_when_delay_would_make_it_infeasible() -> None:
+    # Ten hours due in four days against exactly ten hours of capacity: any idle day makes the
+    # deadline impossible, so the long assignment has to begin on the first day even though a
+    # one-hour assignment is due sooner.
+    start = datetime(2026, 9, 7, 9, tzinfo=UTC)
+    windows = [
+        SchedulingWindow(
+            start_at=start + timedelta(days=offset),
+            end_at=start + timedelta(days=offset, hours=6),
+            daily_capacity_minutes=165,
+        )
+        for offset in range(4)
+    ]
+    long_assignment = task(
+        "task:capstone",
+        minutes=600,
+        importance=50,
+        latest_end_at=start + timedelta(days=3, hours=6),
+    )
+    short_assignment = task(
+        "task:worksheet",
+        minutes=60,
+        importance=60,
+        latest_end_at=start + timedelta(days=1, hours=6),
+    )
+
+    result = solve_schedule([long_assignment, short_assignment], windows, minimum_break_minutes=10)
+
+    long_days = sorted(
+        {
+            placement.start_at.date()
+            for placement in result.placements
+            if placement.item_id == "task:capstone"
+        }
+    )
+    assert long_days
+    assert long_days[0] == start.date()
+    assert result.scheduled_minutes["task:worksheet"] == 60
+    assert not constraint_violations([long_assignment, short_assignment], windows, result, 10)
+
+
+def test_greedy_and_optimized_paths_satisfy_the_same_hard_constraints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items, windows = mixed_load()
+    optimized = solve_schedule(items, windows, minimum_break_minutes=10)
+
+    monkeypatch.setattr(scheduler, "_optimize_sessions", lambda *args, **kwargs: None)
+    greedy = solve_schedule(items, windows, minimum_break_minutes=10)
+
+    assert optimized.used_baseline is False
+    assert greedy.used_baseline is True
+    assert not constraint_violations(items, windows, optimized, 10)
+    assert not constraint_violations(items, windows, greedy, 10)
+    # Both paths must respect the same sacrifice order: required academics never lose capacity
+    # to the flexible goal.
+    for result in (optimized, greedy):
+        assert result.scheduled_minutes["task:early"] == 150
+        assert result.scheduled_minutes["task:late"] == 200

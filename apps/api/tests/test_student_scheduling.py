@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi.testclient import TestClient
 from test_api import create_semester, register
 from test_planning import replace_weekday_availability
+
+from donext.routers import proposals
 
 
 def create_course(
@@ -86,7 +88,9 @@ def test_assignment_waits_until_linked_lecture_ends_then_front_loads(
         "2026-09-10T23:59:00-07:00",
     )
 
-    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    response = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert response.status_code == 201, response.text
+    proposal = response.json()
     blocks = [block for block in proposal["blocks"] if block["task_id"] == item["task_id"]]
 
     lecture_end = datetime.fromisoformat("2026-09-03T10:00:00-07:00")
@@ -151,6 +155,72 @@ def test_exam_preparation_waits_until_course_material_is_available(
     ]
     assert all(start >= lecture_end for start in starts)
     assert all(block["reason_details"]["readiness_at"] for block in blocks)
+
+
+def test_exam_preparation_unlocks_proportionally_after_recurring_lectures(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 361")
+    lecture = client.post(
+        "/api/v1/events",
+        json={
+            "title": "CSC 361 lecture",
+            "semester_id": semester["id"],
+            "course_id": course["id"],
+            "meeting_kind": "lecture",
+            "category": "class",
+            "start_at": "2026-09-02T09:00:00-07:00",
+            "end_at": "2026-09-02T10:00:00-07:00",
+            "recurrence_rule": "FREQ=WEEKLY;BYDAY=WE;UNTIL=20260910T235959Z",
+        },
+    )
+    assert lecture.status_code == 201
+    exam = create_item(
+        client,
+        course["id"],
+        "midterm",
+        "Midterm",
+        "2026-09-10T23:59:00-07:00",
+    )
+    resolve_exam(client, exam, 120)
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    blocks = [block for block in proposal["blocks"] if block["task_id"] == exam["task_id"]]
+    second_lecture_end = datetime.fromisoformat("2026-09-09T10:00:00-07:00")
+    before_second = sum(
+        round(
+            (
+                datetime.fromisoformat(block["end_at"]) - datetime.fromisoformat(block["start_at"])
+            ).total_seconds()
+            / 60
+        )
+        for block in blocks
+        if datetime.fromisoformat(block["start_at"]).replace(
+            tzinfo=datetime.fromisoformat(block["start_at"]).tzinfo or second_lecture_end.tzinfo
+        )
+        < second_lecture_end
+    )
+    exam_summary = proposal["generation_summary"]["exam_preparation"][0]
+
+    assert (
+        sum(
+            round(
+                (
+                    datetime.fromisoformat(block["end_at"])
+                    - datetime.fromisoformat(block["start_at"])
+                ).total_seconds()
+                / 60
+            )
+            for block in blocks
+        )
+        == 120
+    )
+    assert before_second <= 60
+    assert exam_summary["material_release"]["method"] == "lecture_proportion"
+    assert exam_summary["material_release"]["total_checkpoints"] == 2
 
 
 def test_academic_defaults_and_exam_requirement_are_typed(client: TestClient) -> None:
@@ -244,6 +314,50 @@ def test_distant_assignment_uses_spare_capacity_after_flexible_goal(
     assert any(block["task_id"] == distant["task_id"] for block in proposal["blocks"])
 
 
+def test_proven_future_pressure_promotes_only_required_distant_minutes(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": day,
+                    "start_time": "10:00:00",
+                    "end_time": "11:00:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+                for day in range(5)
+            ]
+        },
+    )
+    course = create_course(client, semester["id"], "CSC 421", asynchronous=True)
+    distant = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Capacity project",
+        "2026-09-16T23:59:00Z",
+    )
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    pressure = proposal["generation_summary"]["semester_pressure"]
+
+    assert any(entry["required_lead_minutes"] == 150 for entry in pressure)
+    assert any(
+        promoted["task_id"] == distant["task_id"]
+        for entry in pressure
+        for promoted in entry.get("promoted_items", [])
+    )
+    unresolved = proposal["generation_summary"]["unscheduled"]
+    assert any(item["id"].endswith(":lead") for item in unresolved)
+
+
 def test_overlapping_exams_both_receive_generic_preparation(client: TestClient) -> None:
     register(client)
     semester = create_semester(client)
@@ -308,6 +422,13 @@ def test_extra_focus_requires_exact_one_draft_decision(client: TestClient) -> No
     error = paused.json()["error"]
     assert error["code"] == "SCHEDULER_EXTRA_FOCUS_PERMISSION_REQUIRED"
     assert error["details"]["total_extra_minutes"] > 0
+    assert error["details"]["required_minutes_gained"] > 0
+    assert error["details"]["approved_capacity_by_day"]
+    assert error["details"]["protected_items"] == error["details"]["protected_work"]
+    assert (
+        sum(day["minutes"] for day in error["details"]["extra_minutes_by_day"])
+        == error["details"]["total_extra_minutes"]
+    )
     assert client.get(f"/api/v1/semesters/{semester['id']}/schedule/proposal").json() is None
 
     stale = client.post(
@@ -331,8 +452,10 @@ def test_extra_focus_requires_exact_one_draft_decision(client: TestClient) -> No
             }
         },
     )
-    assert approved.status_code == 201
-    assert approved.json()["generation_summary"]["extra_focus_by_day"]
+    assert approved.status_code == 201, approved.text
+    approved_days = approved.json()["generation_summary"]["extra_focus_by_day"]
+    assert approved_days
+    assert all(day["used_minutes"] <= day["approved_minutes"] for day in approved_days)
 
 
 def test_urgent_buffer_is_used_for_required_work_before_optional_work(
@@ -392,7 +515,13 @@ def test_urgent_buffer_is_used_for_required_work_before_optional_work(
 
 def test_sleep_fallback_uses_the_higher_energy_edge_and_reports_exact_blocks(
     client: TestClient,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setattr(
+        proposals,
+        "_planning_now",
+        lambda: datetime(2026, 9, 2, 14, 0, tzinfo=UTC),
+    )
     register(client)
     semester = create_semester(client)
     client.patch(
@@ -464,3 +593,149 @@ def test_sleep_fallback_uses_the_higher_energy_edge_and_reports_exact_blocks(
     ]
     assert len(reduced_sleep_blocks) == 1
     assert reduced_sleep_blocks[0]["reason_details"]["sleep_reduction_minutes"] == 60
+
+
+def test_deadline_earlier_today_is_overdue_at_the_captured_generation_instant(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        proposals,
+        "_planning_now",
+        lambda: datetime(2026, 9, 2, 18, 0, tzinfo=UTC),
+    )
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
+    overdue = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Earlier today",
+            "estimated_minutes": 50,
+            "deadline_at": "2026-09-02T17:00:00Z",
+            "required": True,
+        },
+    ).json()
+
+    response = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert response.status_code == 201, response.text
+    proposal = response.json()
+    block = next(block for block in proposal["blocks"] if block["task_id"] == overdue["id"])
+
+    assert block["reason_details"]["primary_priority_reason"] == "overdue"
+    assert block["reason_details"]["risk_tier"] == 5
+    assert any("was due" in warning for warning in proposal["generation_summary"]["warnings"])
+
+
+def test_subminimum_remainder_is_visible_with_the_smallest_session_setting_change(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        proposals,
+        "_planning_now",
+        lambda: datetime(2026, 9, 2, 14, 0, tzinfo=UTC),
+    )
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
+    created = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": "Odd remainder",
+            "estimated_minutes": 15,
+            "minimum_session_minutes": 10,
+            "preferred_session_minutes": 10,
+            "maximum_session_minutes": 10,
+            "deadline_at": "2026-09-08T23:59:00Z",
+            "required": True,
+        },
+    ).json()
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    unresolved = next(
+        item
+        for item in proposal["generation_summary"]["unscheduled"]
+        if item["id"] == f"task:{created['id']}"
+    )
+
+    assert unresolved["remaining_minutes"] == 5
+    assert unresolved["capacity_needed_minutes"] == 0
+    assert unresolved["reason_code"] == "BELOW_MINIMUM_SESSION"
+    assert unresolved["session_setting_change"] == {
+        "minimum_session_minutes": 5,
+        "decrease_minutes": 5,
+    }
+
+
+def test_impossible_plan_sacrifices_lower_same_day_weight_and_reports_exact_shortfall(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        proposals,
+        "_planning_now",
+        lambda: datetime(2026, 9, 2, 14, 0, tzinfo=UTC),
+    )
+    register(client)
+    semester = create_semester(client)
+    client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": 2,
+                    "start_time": "10:00:00",
+                    "end_time": "10:50:00",
+                    "type": "available",
+                    "energy_level": "medium",
+                }
+            ]
+        },
+    )
+    course = create_course(client, semester["id"], "CSC 499", asynchronous=True)
+    low = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Low-weight report",
+        "2026-09-02T23:59:00-07:00",
+        weight=5,
+    )
+    high = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "High-weight report",
+        "2026-09-02T23:59:00-07:00",
+        weight=30,
+    )
+    for item in (low, high):
+        response = client.patch(
+            f"/api/v1/tasks/{item['task_id']}",
+            json={
+                "estimated_minutes": 50,
+                "remaining_minutes": 50,
+                "minimum_session_minutes": 50,
+                "preferred_session_minutes": 50,
+                "maximum_session_minutes": 50,
+            },
+        )
+        assert response.status_code == 200
+
+    response = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert response.status_code == 201, response.text
+    proposal = response.json()
+    unresolved = next(
+        item
+        for item in proposal["generation_summary"]["unscheduled"]
+        if item["id"] == f"task:{low['task_id']}"
+    )
+
+    assert any(block["task_id"] == high["task_id"] for block in proposal["blocks"])
+    assert not any(block["task_id"] == low["task_id"] for block in proposal["blocks"])
+    assert unresolved["remaining_minutes"] == 50
+    assert unresolved["capacity_needed_minutes"] == 50

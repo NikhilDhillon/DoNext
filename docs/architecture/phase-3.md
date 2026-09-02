@@ -29,9 +29,10 @@ escalation, or acceptance. Schedules are identical whether an OpenAI key exists 
 
 Class events carry a `course_id` and `meeting_kind`. Scheduled-course assignments become actionable
 at the end of the first linked lecture. Asynchronous courses use `first_content_available_at`.
-Missing readiness and deadlines that predate readiness are reported for correction.
-Assignment, quiz, midterm, and final work cannot begin before that readiness timestamp, so generic
-exam preparation is never placed before any course material is available.
+Missing readiness and deadlines that predate readiness are reported for correction. Recurring
+lectures are expanded in local time through semester end. Exam preparation unlocks cumulatively in
+proportion to completed lectures, with the final lecture releasing the exact remainder; asynchronous
+courses release the full estimate at their content-available timestamp.
 
 Academic items are created atomically with their tasks. Assignment, quiz, midterm, and final defaults
 are 150, 120, 480, and 480 minutes respectively. Exam defaults begin with `pending_exam`; proposal
@@ -39,26 +40,31 @@ generation pauses until the student enters an estimate or explicitly chooses the
 `remaining_minutes` remains the scheduling source of truth.
 
 Assignments remain eligible after readiness even when their deadlines are beyond the current
-horizon. Those distant assignments are classified as opportunistic and compete only after current
-academic work and flexible goals. Exams activate only when their deadline is inside the 14-day
-horizon. Exam blocks use generic labels such as `CSC 370 · Midterm prep`.
+horizon. A deterministic daily max-flow forecast tests known future required demand against
+optimistic post-horizon capacity through semester end. Only a proven deficit becomes a required
+strategic-lead portion; the rest remains opportunistic behind flexible goals. Unknown future exam
+estimates are reported but add no demand. Exams activate only when their deadline is inside the
+14-day horizon. Exam blocks use generic labels such as `CSC 370 · Midterm prep`.
 
 ## Risk and allocation
 
-Every academic scheduling item carries explicit metadata for required status, readiness, deadline,
-24-hour assignment completion target, remaining effort, slack, exam relationship, and effective or
-unknown weight. Allocation prioritizes required work, overdue work, 48-hour urgency, pre-exam
-same-course assignments, lower slack, earlier deadlines, remaining effort, and known effective
-weight. Unknown weight is never converted into an invented value.
+Every generation captures one injectable planning instant. Each academic scheduling item carries
+explicit metadata for required status, readiness, deadline, 24-hour assignment completion target,
+remaining effort, slack, exam relationship, and effective or unknown weight. Both scheduling paths
+use the canonical lexicographic bands: required status, overdue state, exact 48-hour urgency,
+same-course pre-exam relationship, slack, local due date, same-date known weight, exact deadline,
+remaining work, and stable ID. Overdue weight is compared only when both values are known. Unknown
+weight is never converted into an invented value.
 
-The scheduler preserves configured minimum, preferred, and maximum session sizes. It may place
-multiple sessions on one day but always reserves the configured break and never lengthens a session
-to make overload disappear. Required academic coverage is optimized before optional academics,
-flexible work, and distant opportunistic assignments. Greedy fallback follows the same priority
-bands and constraints. When simultaneous exams cannot both be completed, the greedy path
-round-robins their sessions and CP-SAT maximizes the minimum completion ratio before allocating
-remaining exam capacity by the existing date, slack, effort, and weight signals. Required
-same-course pre-exam assignment coverage is protected before that fairness pass.
+The scheduler preserves configured minimum, preferred, and maximum session sizes with exact
+integer-minute durations and 15-minute-aligned starts. It schedules the largest exact valid
+partition and reports any sub-minimum remainder. Multiple sessions retain required separation, but
+the final session does not require a trailing break. Required academic coverage is optimized before
+optional academics, flexible work, and distant opportunistic assignments. Greedy fallback follows
+the same priority bands and hard constraints. Simultaneous exams each receive a valid session when
+capacity permits before remaining capacity follows slack, date, remaining estimate, and known
+weight. Early-review cadence is derived from actual proposed assignment completion and is omitted
+with a warning when saved session bounds do not overlap 30–45 minutes.
 
 ## Capacity passes
 
@@ -68,8 +74,9 @@ Proposal construction uses explicit escalation passes:
    daily rollover buffer;
 2. buffer release when overdue or 48-hour work remains;
 3. flexible-goal reduction through academic-first allocation;
-4. a comparison solve using waking capacity above the preferred focus cap;
-5. an exact-draft permission response before that extra focus may be used; and
+4. a comparison solve using waking capacity above the preferred focus cap, maximizing protected
+   required work and then minimizing total, peak-daily, and deterministic per-day excess;
+5. an exact-vector, fingerprinted permission response before that extra focus may be used; and
 6. incremental preferred-sleep reduction toward the hard minimum, followed by honest unresolved
    work if required academics still cannot fit.
 
@@ -78,8 +85,9 @@ bedtime and wake-time edges after fixed exclusions. It unlocks the edge with the
 energy first, then the larger usable capacity, using the other edge only when necessary. Generated
 block details and the proposal summary report only the reduced-sleep capacity actually consumed.
 
-The extra-focus response includes a fingerprint, total and per-day extra minutes, resulting daily
-focus, and protected work. Stale fingerprints are rejected by issuing a newly calculated request.
+The extra-focus response includes a fingerprint, required minutes gained, exact per-day approved
+capacity, protected work, and residual shortfall. Stale fingerprints are rejected by issuing a newly
+calculated request, and approved generation is capped to that vector.
 Generation rolls back before returning either an exam-estimate or extra-focus requirement, so the
 current proposal is not superseded while input is pending.
 
@@ -87,9 +95,12 @@ Both onboarding and regeneration render those response details before the one-dr
 affected date shows the extra and resulting focus totals, and each protected item shows its deadline
 and remaining work at risk.
 
-Proposal summaries report academic coverage, exam estimates and sources, opportunistic work,
-flexible reductions, rollover use, extra focus, sleep changes, and unresolved work. Fixed events and
-the student's minimum sleep never move.
+Proposal summaries report academic coverage, proportional material release, semester-pressure
+checkpoints, exam estimates and sources, opportunistic work, flexible reductions, rollover use,
+extra focus, sleep changes, and counterfactual unresolved-work diagnostics. Generated blocks store
+a versioned explanation with priority, readiness, remaining work, deadline, slack, exam and weight
+effects, requested and chosen energy, capacity source, and verified displacement. Legacy blocks use
+generic fallback copy. Fixed events and the student's minimum sleep never move.
 
 ## Optional revision interpretation
 
@@ -113,26 +124,16 @@ The review experience preserves editable blocks, warnings, placement reasons, un
 stale-input protection, rejection/revision, and explicit acceptance. Accepted Today and Week views
 remain isolated from unaccepted proposals.
 
-## Known gaps against the scheduling specification
+## Canonical conformance
 
-The student-aware cutover establishes the intended architecture, but the following behavior is not
-fully implemented yet:
+The scheduling pipeline implements the current decisions in `docs/scheduling.md`. Named regression
+tests cover the 17 acceptance scenarios and the selected clarifications, including urgency versus
+pre-exam priority, slack-driven early starts, known and unknown weight behavior, proportional
+lecture release, future-pressure promotion, simultaneous exams, exact durations, recovery-layer
+isolation, sleep reporting, truthful displacement, and proposal lifecycle safety. Shared hard and
+priority cases run through CP-SAT and forced greedy fallback.
 
-- **Early exam-review cadence:** the optimizer rewards using more exam-preparation days after
-  academic coverage is fixed, but it does not explicitly target one 30-to-45-minute review block
-  approximately every three days while urgent pre-exam assignments are still underway, nor does it
-  minimize excessive gaps as preparation intensifies.
-- **Per-block displacement explanations:** block reasons contain readiness, deadline, slack, exam
-  relationship, weight, energy, and capacity-source details. They do not yet identify the specific
-  flexible or academic alternative that lost capacity because that block was selected.
-- **Canonical acceptance coverage:** the suite covers many of the required behaviors, but it does
-  not yet encode all 17 scenarios in `docs/scheduling.md` as explicit automated acceptance tests.
-  Missing explicit coverage includes the pre-exam versus 48-hour priority interaction, slack-driven
-  early starts, effective-weight and unknown-weight ties, sleep fallback reporting, least-important
-  academic sacrifice, and equivalent hard-constraint checks for both greedy and CP-SAT paths.
 
-Until these gaps are implemented and tested, this snapshot should not be treated as complete
-conformance with `docs/scheduling.md`.
 
 ## Out of scope
 
@@ -141,9 +142,8 @@ remain future work. The calendar's visual redesign is also separate from this sc
 
 ## Verification
 
-The repository test suite currently covers the API contracts, defaults and provenance, linked class
-readiness, proposal lifecycle, core hard scheduling constraints, fallback behavior, revision-AI
-boundary, and stale input protection. Delivery validation includes an isolated Alembic
-upgrade-downgrade-upgrade cycle, API lint/type/tests, frontend lint/type/build, and the
-repository-wide `pnpm check`. The missing acceptance coverage listed above remains required before
-the scheduling specification can be considered fully implemented.
+The repository test suite covers API contracts, defaults and provenance, linked and proportional
+class readiness, semester pressure, proposal lifecycle, core hard scheduling constraints, recovery
+layers, fallback behavior, revision-AI boundary, and stale input protection. On 2026-09-02,
+`pnpm check` passed with 97 API tests plus frontend lint, typecheck, and production build. Database
+schema did not change, so no migration was required for this cutover.

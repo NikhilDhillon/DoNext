@@ -766,6 +766,7 @@ class ProposalSummaryRead(ApiModel):
     academic_requested_minutes: int = 0
     academic_scheduled_minutes: int = 0
     opportunistic_scheduled_minutes: int = 0
+    semester_pressure: list[dict[str, object]] = Field(default_factory=list)
     exam_preparation: list[dict[str, object]] = Field(default_factory=list)
     flexible_adjustments: list[dict[str, object]] = Field(default_factory=list)
     rollover_by_day: list[dict[str, object]] = Field(default_factory=list)
