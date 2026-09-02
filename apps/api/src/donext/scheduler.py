@@ -873,6 +873,7 @@ def _optimize_sessions(
         fairness_terms.append(minimum_satisfaction * (priority + 1))
 
     timing_terms: list[cp_model.LinearExpr] = []
+    distant_earliness_terms: list[cp_model.LinearExpr] = []
     for index, alternative in enumerate(alternatives):
         effective_start = model.new_int_var(0, latest_tick, f"effective_{index}")
         model.add_multiplication_equality(
@@ -884,6 +885,11 @@ def _optimize_sessions(
             else 0
         )
         timing_terms.append(alternative.selected * (latest_tick + energy_bonus) - effective_start)
+        if alternative.session.item.kind == "distant_task":
+            distant_earliness_terms.append(
+                (alternative.selected * latest_tick - effective_start)
+                * distant_rank[alternative.session.item.id]
+            )
     model.maximize(
         flexible_minutes * 100_000_000
         + sum(fairness_terms) * 10_000_000
@@ -899,22 +905,31 @@ def _optimize_sessions(
         active_solver = first_solver
         active_status = first_status
     # Goal coverage, goal fairness and total distant coverage are settled above and stay fixed,
-    # so ranking the distant work cannot take capacity from a flexible goal. Only the choice of
-    # which distant assignment fills the already-granted minutes is still open, and it outranks
-    # the timing bonus: starting the nearer deadline matters more than starting a tick earlier.
+    # so ranking the distant work cannot take capacity from a flexible goal. What is still open
+    # is which distant assignment gets the already-granted minutes, and when.
     if len(ordered_distant) > 1 and second_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         model.add(flexible_minutes == second_solver.value(flexible_minutes))
         if fairness_terms:
             fairness_total = sum(fairness_terms)
             model.add(fairness_total == second_solver.value(fairness_total))
         model.add(distant_minutes == second_solver.value(distant_minutes))
-        timing_ceiling = len(sessions) * (latest_tick + 30) + 1
-        model.maximize(distant_importance * timing_ceiling + sum(timing_terms))
-        distant_solver = _solver(max(time_limit_seconds * 0.08, 0.05))
-        distant_status = distant_solver.solve(model)
-        if distant_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-            active_solver = distant_solver
-            active_status = distant_status
+        model.maximize(distant_importance)
+        importance_solver = _solver(max(time_limit_seconds * 0.06, 0.05))
+        importance_status = importance_solver.solve(model)
+        if importance_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            active_solver = importance_solver
+            active_status = importance_status
+            model.add(distant_importance == importance_solver.value(distant_importance))
+            # Coverage alone cannot order equal-sized assignments that all fit, so weight each
+            # distant session's earliness by its rank. Ranked earliness outranks the ordinary
+            # timing bonus: starting the nearer deadline beats starting a tick earlier.
+            timing_base = len(sessions) * (latest_tick + 30) + 1
+            model.maximize(sum(distant_earliness_terms) * timing_base + sum(timing_terms))
+            earliness_solver = _solver(max(time_limit_seconds * 0.08, 0.05))
+            earliness_status = earliness_solver.solve(model)
+            if earliness_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+                active_solver = earliness_solver
+                active_status = earliness_status
     placements: list[Placement] = []
     scheduled = {item.id: 0 for item in items}
     for alternative in alternatives:
