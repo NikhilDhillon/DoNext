@@ -591,6 +591,40 @@ def test_optimizer_uses_and_reports_the_actual_window_energy() -> None:
     assert result.placements[0].reason_details["energy_matched"] is True
 
 
+@pytest.mark.parametrize(
+    ("intensity", "window_energy", "matched"),
+    [("moderate", "high", False), ("deep", "low", False), ("deep", "high", True)],
+)
+def test_placement_reports_the_window_energy_it_actually_used(
+    intensity: str, window_energy: str, matched: bool
+) -> None:
+    # The only opening is the one under test, so the reported energy has to be that window's
+    # own level. Reporting a match instead would make the mismatch objective blind to ordinary
+    # work and would let a block claim an energy fit that was never checked.
+    day = datetime(2026, 9, 2, tzinfo=UTC)
+    item = SchedulingItem(
+        id="work",
+        title="Work",
+        target_minutes=50,
+        minimum_session_minutes=50,
+        preferred_session_minutes=50,
+        maximum_session_minutes=50,
+        priority_rank=3,
+        intensity=intensity,
+    )
+
+    result = solve_schedule(
+        [item],
+        [SchedulingWindow(day.replace(hour=9), day.replace(hour=11), window_energy)],
+        minimum_break_minutes=0,
+    )
+
+    details = result.placements[0].reason_details
+    assert details["energy_level"] == window_energy
+    assert details["chosen_energy_level"] == window_energy
+    assert details["energy_matched"] is matched
+
+
 def test_session_partition_preserves_exact_minutes_and_never_breaks_minimum() -> None:
     exact = task("exact", minutes=151)
     impossible = SchedulingItem(

@@ -890,10 +890,15 @@ def _allowed_starts(
             window.end_at,
             session.item.latest_end_at or window.end_at,
         )
+        window_starts: list[int] = []
         while cursor + timedelta(minutes=session.duration_minutes) <= latest_end:
-            starts.append(_ticks_from(epoch, cursor))
+            window_starts.append(_ticks_from(epoch, cursor))
             cursor += timedelta(minutes=START_GRID_MINUTES)
-        if starts and _energy_matches(session.item.intensity, window.energy_level):
+        if window_starts:
+            starts.extend(window_starts)
+            # Report the energy the student actually saved for this opening. Reporting a match
+            # instead would make the mismatch objective blind to ordinary work and would let a
+            # block claim an energy fit that was never checked.
             energy = window.energy_level
     return sorted(set(starts)), energy
 
