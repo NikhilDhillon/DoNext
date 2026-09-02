@@ -20,6 +20,7 @@ from donext.models import (
     AcademicItem,
     AcademicItemType,
     AssessmentGroup,
+    AvailabilityType,
     AvailabilityWindow,
     Course,
     CourseDeliveryMode,
@@ -82,6 +83,7 @@ from donext.schemas import (
 router = APIRouter(tags=["schedule proposals"])
 logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"optional": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+ENERGY_RANK = {"low": 1, "medium": 2, "high": 3}
 ROLLOVER_BUFFER_MINUTES = 60
 COMPLETE_TIMEOUT_WARNING = "Everything fits. Regenerate for a different arrangement."
 PARTIAL_TIMEOUT_WARNING = (
@@ -1331,37 +1333,68 @@ def _scheduling_windows(
         # work and assignments due within 48 hours may spend, so ordinary work stays inside
         # the capacity it would have had without the release.
         reserve = min(ROLLOVER_BUFFER_MINUTES, usable) if release_buffer and usable else 0
+        energy_segments = _energy_segments(current, availability, timezone)
         for start_at, end_at in open_intervals:
-            duration = round((end_at - start_at).total_seconds() / 60)
-            duration -= duration % 5
-            if duration >= 5:
-                energy = next(
-                    (
-                        window.energy_level.value
-                        for window in availability
-                        if window.day_of_week == current.weekday()
-                        and datetime.combine(current, window.start_time, tzinfo=timezone)
-                        <= start_at
-                        and datetime.combine(
-                            current + timedelta(days=1) if window.end_time == time.min else current,
-                            window.end_time,
-                            tzinfo=timezone,
+            for piece_start, piece_end, energy in _split_by_energy(
+                start_at, end_at, energy_segments
+            ):
+                duration = round((piece_end - piece_start).total_seconds() / 60)
+                duration -= duration % 5
+                if duration >= 5:
+                    windows.append(
+                        SchedulingWindow(
+                            piece_start,
+                            piece_start + timedelta(minutes=duration),
+                            energy,
+                            usable,
+                            protected_free,
+                            reserve,
                         )
-                        >= end_at
-                    ),
-                    "medium",
-                )
-                windows.append(
-                    SchedulingWindow(
-                        start_at,
-                        start_at + timedelta(minutes=duration),
-                        energy,
-                        usable,
-                        protected_free,
-                        reserve,
                     )
-                )
     return windows
+
+
+def _energy_segments(
+    current: date, availability: list[AvailabilityWindow], timezone: ZoneInfo
+) -> list[tuple[datetime, datetime, str]]:
+    """Split the day at every saved availability boundary, keeping each piece's energy.
+
+    Availability that runs contiguously merges into one opening, so energy cannot be recovered
+    by asking which single saved row contains it. Where rows overlap, the strongest saved energy
+    wins, matching how the sleep-edge allocation ranks the same rows.
+    """
+
+    rows: list[tuple[datetime, datetime, str]] = []
+    for window in availability:
+        if window.day_of_week != current.weekday() or window.type == AvailabilityType.unavailable:
+            continue
+        end_date = current + timedelta(days=1) if window.end_time == time.min else current
+        start_at = datetime.combine(current, window.start_time, tzinfo=timezone)
+        end_at = datetime.combine(end_date, window.end_time, tzinfo=timezone)
+        if end_at > start_at:
+            rows.append((start_at, end_at, window.energy_level.value))
+    boundaries = sorted({edge for start_at, end_at, _ in rows for edge in (start_at, end_at)})
+    segments: list[tuple[datetime, datetime, str]] = []
+    for start_at, end_at in zip(boundaries, boundaries[1:], strict=False):
+        covering = [
+            energy
+            for row_start, row_end, energy in rows
+            if row_start <= start_at and end_at <= row_end
+        ]
+        if covering:
+            segments.append((start_at, end_at, max(covering, key=ENERGY_RANK.__getitem__)))
+    return segments
+
+
+def _split_by_energy(
+    start_at: datetime, end_at: datetime, segments: list[tuple[datetime, datetime, str]]
+) -> list[tuple[datetime, datetime, str]]:
+    pieces = [
+        (max(start_at, segment_start), min(end_at, segment_end), energy)
+        for segment_start, segment_end, energy in segments
+        if segment_start < end_at and start_at < segment_end
+    ]
+    return pieces or [(start_at, end_at, "medium")]
 
 
 def _sleep_edge_allocation(
@@ -1436,7 +1469,6 @@ def _availability_energy_rank(
     availability: list[AvailabilityWindow],
     timezone: ZoneInfo,
 ) -> int:
-    ranks = {"low": 1, "medium": 2, "high": 3}
     matches: list[int] = []
     for window in availability:
         if window.day_of_week != current.weekday() or window.type.value == "unavailable":
@@ -1445,7 +1477,7 @@ def _availability_energy_rank(
         start_at = datetime.combine(current, window.start_time, tzinfo=timezone)
         end_at = datetime.combine(end_date, window.end_time, tzinfo=timezone)
         if start_at <= moment < end_at:
-            matches.append(ranks[window.energy_level.value])
+            matches.append(ENERGY_RANK[window.energy_level.value])
     return max(matches, default=0)
 
 

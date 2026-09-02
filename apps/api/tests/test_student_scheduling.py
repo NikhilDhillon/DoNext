@@ -573,6 +573,44 @@ def _pressured_plan(client: TestClient) -> dict[str, object]:
     )
 
 
+def test_contiguous_availability_keeps_each_saved_energy_level(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    client.patch("/api/v1/preferences", json={"freeze_window_minutes": 0})
+    # Saved back to back, which is how a day is normally described. The openings merge, so the
+    # window builder has to split them at the saved boundaries instead of asking which single
+    # row contains the merged opening.
+    client.put(
+        "/api/v1/availability",
+        json={
+            "windows": [
+                {
+                    "day_of_week": day,
+                    "start_time": start,
+                    "end_time": end,
+                    "type": "available",
+                    "energy_level": energy,
+                }
+                for day in range(7)
+                for start, end, energy in (
+                    ("09:00:00", "12:00:00", "high"),
+                    ("12:00:00", "17:00:00", "low"),
+                )
+            ]
+        },
+    )
+    course = create_course(client, semester["id"], "CSC 370", asynchronous=True)
+    create_item(client, course["id"], "assignment", "Deep work", "2026-09-08T23:59:00Z")
+
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    blocks = cast(list[dict[str, object]], proposal["blocks"])
+    levels = {cast(dict[str, object], block["reason_details"])["energy_level"] for block in blocks}
+
+    assert blocks
+    assert levels <= {"high", "low"}
+    assert "medium" not in levels
+
+
 def test_released_rollover_only_funds_the_urgent_day(client: TestClient) -> None:
     register(client)
     proposal = _pressured_plan(client)
