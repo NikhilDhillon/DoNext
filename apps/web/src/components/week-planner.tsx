@@ -1,12 +1,12 @@
 "use client";
 
-import { CalendarClock, LoaderCircle, Pencil, Plus } from "lucide-react";
+import { LoaderCircle, Pencil } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { ScheduleProposalReview } from "@/components/schedule-proposal-review";
 import { useApiResource } from "@/hooks/use-api-resource";
-import type { PlannerTask, PlanningEntry, PlanningView, Semester } from "@/lib/types";
+import type { PlanningEntry, PlanningView, Semester } from "@/lib/types";
 
 export function WeekPlanner() {
   const plan = useApiResource<PlanningView>("/planning/week");
@@ -17,7 +17,6 @@ export function WeekPlanner() {
   );
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
-  const [suggestedTask, setSuggestedTask] = useState<PlannerTask | null>(null);
   const [editorDate, setEditorDate] = useState("");
 
   if ((plan.loading || semesters.loading) && !plan.data) return <WeekState loading message="Building your real week" />;
@@ -26,17 +25,12 @@ export function WeekPlanner() {
 
   const data = plan.data;
   const days = data.days;
-  const commitmentMinutes = entryMinutes(data.entries.filter((entry) => entry.kind === "fixed_event" || entry.block_type === "commitment"));
-  const focusMinutes = entryMinutes(data.entries.filter((entry) => entry.block_type === "focus"));
-  const goalMinutes = entryMinutes(data.entries.filter((entry) => entry.block_type === "goal" || entry.block_type === "personal"));
-  const openMinutes = days.reduce((total, day) => total + day.capacity.remaining_focus_minutes, 0);
   const { startHour, endHour } = calendarBounds(data.entries, data.timezone);
   const hours = Array.from({ length: endHour - startHour }, (_, index) => startHour + index);
   const rows = (endHour - startHour) * 2;
 
-  function openNew(date: string, task: PlannerTask | null = null) {
+  function openNew(date: string) {
     setSelectedEntry(null);
-    setSuggestedTask(task);
     setEditorDate(date);
     setEditorOpen(true);
   }
@@ -44,7 +38,6 @@ export function WeekPlanner() {
   function openEntry(entry: PlanningEntry) {
     if (!entry.editable) return;
     setSelectedEntry(entry);
-    setSuggestedTask(null);
     setEditorDate(dateInTimezone(entry.start_at, data.timezone));
     setEditorOpen(true);
   }
@@ -67,32 +60,7 @@ export function WeekPlanner() {
         />
       ) : null}
 
-      <section className="week-summary" aria-label="Weekly totals">
-        <div><span className="summary-icon violet" /> <strong>{formatMinutes(commitmentMinutes)}</strong><small>Commitments</small></div>
-        <div><span className="summary-icon mint" /> <strong>{formatMinutes(focusMinutes)}</strong><small>Focused work</small></div>
-        <div><span className="summary-icon coral" /> <strong>{formatMinutes(goalMinutes)}</strong><small>Personal goals</small></div>
-        <div><span className="summary-icon outline" /> <strong>{formatMinutes(openMinutes)}</strong><small>Open capacity</small></div>
-      </section>
-
       {data.warnings.length > 0 && <p className="planner-alert warning">{data.warnings[0]}</p>}
-
-      <section className="week-task-tray">
-        <div><p className="eyebrow">Unscheduled work</p><h2>Give unfinished work a place</h2></div>
-        <div className="week-task-list">
-          {data.unscheduled_tasks.length ? data.unscheduled_tasks.slice(0, 6).map((task) => (
-            <button type="button" key={task.id} onClick={() => openNew(defaultEditorDate(data), task)}>
-              <span>{task.course_code || task.goal_name || "Task"}</span>
-              <strong>{task.name}</strong>
-              <small>{formatMinutes(task.remaining_minutes)} remaining</small>
-              <small className={`task-due ${taskDeadline(task, data.timezone).tone}`}>
-                <CalendarClock size={12} aria-hidden="true" />
-                {taskDeadline(task, data.timezone).text}
-              </small>
-              <Plus size={15} />
-            </button>
-          )) : <p>Every unfinished task already has a block in the accepted plan.</p>}
-        </div>
-      </section>
 
       {data.entries.length > 0 ? (
         <section className="calendar-card" aria-label="Weekly calendar">
@@ -132,7 +100,7 @@ export function WeekPlanner() {
           date={editorDate || data.start_date}
           tasks={data.unscheduled_tasks}
           entry={selectedEntry}
-          suggestedTask={suggestedTask}
+          suggestedTask={null}
           onClose={() => setEditorOpen(false)}
           onSaved={plan.reload}
         />
@@ -178,11 +146,6 @@ function dateInTimezone(value: string, timezone: string) {
 
 function dateDifference(start: string, end: string) {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000);
-}
-
-function defaultEditorDate(plan: PlanningView) {
-  const today = localToday(plan.timezone);
-  return today >= plan.start_date && today <= plan.end_date ? today : plan.start_date;
 }
 
 function localToday(timezone: string) {
@@ -235,41 +198,3 @@ function entryColor(entry: PlanningEntry) {
   return "mint";
 }
 
-function entryMinutes(entries: PlanningEntry[]) {
-  return entries.reduce((total, entry) => total + Math.round((new Date(entry.end_at).getTime() - new Date(entry.start_at).getTime()) / 60_000), 0);
-}
-
-// Unscheduled work is only actionable if the student can see how soon it is due, so the tray
-// states the deadline in the plan's timezone and leads with urgency for anything inside a week.
-// The tone is carried by wording as well as colour so it never depends on colour alone.
-function taskDeadline(task: PlannerTask, timezone: string) {
-  if (!task.deadline_at) return { text: "No deadline", tone: "none" as const };
-  const dueDate = dateInTimezone(task.deadline_at, timezone);
-  const days = dateDifference(localToday(timezone), dueDate);
-  if (days < 0) {
-    const overdueBy = Math.abs(days);
-    return {
-      text: `Overdue by ${overdueBy} ${overdueBy === 1 ? "day" : "days"}`,
-      tone: "overdue" as const,
-    };
-  }
-  if (days === 0) return { text: "Due today", tone: "urgent" as const };
-  if (days === 1) return { text: "Due tomorrow", tone: "urgent" as const };
-  if (days <= 6) return { text: `Due ${weekday(dueDate)}`, tone: "soon" as const };
-  return { text: `Due ${shortDate(dueDate)}`, tone: "later" as const };
-}
-
-function shortDate(value: string) {
-  return new Intl.DateTimeFormat("en-CA", {
-    month: "short",
-    day: "numeric",
-    timeZone: "UTC",
-  }).format(new Date(`${value}T12:00:00Z`));
-}
-
-function formatMinutes(minutes: number) {
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
-}
