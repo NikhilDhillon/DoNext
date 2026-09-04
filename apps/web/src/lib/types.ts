@@ -218,15 +218,21 @@ export type ScheduleProposal = Schedule & {
 export type ScheduleGenerationRequirements = {
   horizon_start: string;
   horizon_end: string;
-  exams: {
-    academic_item_id: string;
-    task_id: string;
-    course_code: string;
-    name: string;
-    due_at: string;
-    default_minutes: number;
-  }[];
   blocking_inputs: { code: string; message: string; course_id: string | null }[];
+};
+
+// A known deadline holds no time in the plan until the student activates it, so the queue is
+// what DoNext still needs an answer about rather than a list of work it has decided to do.
+export type ActivationPrompt = {
+  academic_item_id: string;
+  task_id: string;
+  course_code: string | null;
+  name: string;
+  item_type: AcademicItem["item_type"];
+  due_at: string;
+  fallback_minutes: number;
+  capacity_before_due_minutes: number;
+  urgent: boolean;
 };
 
 export type ScheduleRevisionReason =

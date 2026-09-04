@@ -23,11 +23,11 @@ from donext.models import (
     Task,
     WeightOrigin,
 )
-from donext.planning import aware, resolve_timezone
+from donext.planning import academic_effort_default, aware, resolve_timezone
 from donext.routers.courses import owned_course
 from donext.routers.semesters import owned_semester
 from donext.schemas import (
-    AcademicEffortEstimateUpdate,
+    AcademicActivationUpdate,
     AcademicImpactRead,
     AcademicItemCreate,
     AcademicItemRead,
@@ -47,16 +47,6 @@ from donext.schemas import (
 )
 
 router = APIRouter(tags=["grading"])
-
-
-def academic_effort_default(item_type: AcademicItemType) -> tuple[int | None, EstimateOrigin]:
-    if item_type == AcademicItemType.assignment:
-        return 150, EstimateOrigin.system_default
-    if item_type == AcademicItemType.quiz:
-        return 120, EstimateOrigin.system_default
-    if item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}:
-        return 480, EstimateOrigin.pending_exam
-    return None, EstimateOrigin.system_default
 
 
 def owned_academic_item(db: DbSession, user_id: uuid.UUID, item_id: uuid.UUID) -> AcademicItem:
@@ -647,7 +637,12 @@ def create_academic_item(
     db.add(item)
     db.flush()
     default_minutes, estimate_origin = academic_effort_default(item.item_type)
-    estimated_minutes = default_minutes or 180
+    estimated_minutes = payload.estimated_minutes or default_minutes or 180
+    if payload.estimated_minutes is not None:
+        estimate_origin = EstimateOrigin.student_provided
+    elif payload.activate and estimate_origin == EstimateOrigin.pending_exam:
+        # An activated exam is sized, even if the size is the named eight-hour fallback.
+        estimate_origin = EstimateOrigin.system_default
     task = Task(
         user_id=current_user.id,
         course_id=course.id,
@@ -664,6 +659,7 @@ def create_academic_item(
         estimate_origin=estimate_origin,
         deadline_at=item.due_at,
         required=payload.required,
+        activated_at=datetime.now(UTC) if payload.activate else None,
     )
     db.add(task)
     db.commit()
@@ -691,33 +687,59 @@ def create_academic_item(
     )
 
 
-@router.put("/academic-items/{item_id}/effort-estimate", response_model=TaskRead)
-def set_academic_effort_estimate(
+def _activation_task(db: DbSession, user_id: uuid.UUID, item: AcademicItem) -> Task:
+    task = db.scalar(select(Task).where(Task.user_id == user_id, Task.academic_item_id == item.id))
+    if task is None:
+        raise ApiError("NOT_FOUND", "The academic item has no planning task.", 404)
+    return task
+
+
+@router.put("/academic-items/{item_id}/activation", response_model=TaskRead)
+def activate_academic_item(
     item_id: uuid.UUID,
-    payload: AcademicEffortEstimateUpdate,
+    payload: AcademicActivationUpdate,
     db: DbSession,
     current_user: CurrentUser,
 ) -> Task:
+    """Confirm the work exists and say how long it takes. This is the availability signal."""
     item = owned_academic_item(db, current_user.id, item_id)
-    if item.item_type not in {AcademicItemType.midterm, AcademicItemType.final_exam}:
+    task = _activation_task(db, current_user.id, item)
+    fallback_minutes, _origin = academic_effort_default(item.item_type)
+    if payload.decision == "use_default" and fallback_minutes is None:
         raise ApiError(
-            "VALIDATION_ERROR", "Preparation estimates are only requested for exams.", 422
+            "VALIDATION_ERROR",
+            f"{item.item_type.value} work has no fallback estimate; give the hours instead.",
+            422,
         )
-    task = db.scalar(
-        select(Task).where(Task.user_id == current_user.id, Task.academic_item_id == item.id)
-    )
-    if task is None:
-        raise ApiError("NOT_FOUND", "The exam has no planning task.", 404)
-    minutes = payload.minutes if payload.decision == "student" else 480
+    minutes = payload.minutes if payload.decision == "student" else fallback_minutes
     assert minutes is not None
     completed_minutes = max(task.estimated_minutes - task.remaining_minutes, 0)
     task.estimated_minutes = minutes
     task.remaining_minutes = max(minutes - completed_minutes, 0)
+    # A stated figure and a named fallback are different claims, and the plan says which it used.
     task.estimate_origin = (
         EstimateOrigin.student_provided
         if payload.decision == "student"
         else EstimateOrigin.system_default
     )
+    if task.activated_at is None:
+        task.activated_at = datetime.now(UTC)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+@router.delete("/academic-items/{item_id}/activation", response_model=TaskRead)
+def deactivate_academic_item(
+    item_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> Task:
+    """Return work entered in error or withdrawn by the course to the known state."""
+    item = owned_academic_item(db, current_user.id, item_id)
+    task = _activation_task(db, current_user.id, item)
+    # The estimate survives deactivation so re-activating does not ask the same question twice.
+    task.activated_at = None
     db.commit()
     db.refresh(task)
     return task

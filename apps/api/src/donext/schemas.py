@@ -236,6 +236,7 @@ class TaskUpdate(ApiModel):
 class TaskRead(TaskBase):
     id: uuid.UUID
     remaining_minutes: int
+    activated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -426,19 +427,39 @@ class AcademicItemCreate(ApiModel):
     due_at: datetime
     direct_weight_percent: float | None = Field(default=None, ge=0, le=100)
     required: bool = True
+    # Work entered from the intake surface is in the student's hands already, so it arrives
+    # activated. Work entered anywhere else is a known deadline until they say otherwise.
+    activate: bool = False
+    estimated_minutes: int | None = Field(default=None, ge=15, le=10080, multiple_of=5)
 
 
-class AcademicEffortEstimateUpdate(ApiModel):
+class AcademicActivationUpdate(ApiModel):
+    """Activation carries the estimate: saying how long the work takes is how it is activated."""
+
     decision: Literal["student", "use_default"]
     minutes: int | None = Field(default=None, ge=15, le=10080, multiple_of=5)
 
     @model_validator(mode="after")
-    def validate_decision(self) -> "AcademicEffortEstimateUpdate":
+    def validate_decision(self) -> "AcademicActivationUpdate":
         if self.decision == "student" and self.minutes is None:
             raise ValueError("minutes are required for a student estimate")
         if self.decision == "use_default" and self.minutes is not None:
-            raise ValueError("minutes must be omitted when using the default")
+            raise ValueError("minutes must be omitted when using the fallback")
         return self
+
+
+class ActivationPromptRead(ApiModel):
+    """A known deadline that holds no time in the plan until the student activates it."""
+
+    academic_item_id: uuid.UUID
+    task_id: uuid.UUID
+    course_code: str | None
+    name: str
+    item_type: AcademicItemType
+    due_at: datetime
+    fallback_minutes: int
+    capacity_before_due_minutes: int
+    urgent: bool
 
 
 AcademicImpactTier = Literal["critical", "high", "normal", "low"]
@@ -798,15 +819,6 @@ class ScheduleProposalGenerate(ApiModel):
     extra_focus_decision: ExtraFocusDecision | None = None
 
 
-class GenerationExamRequirement(ApiModel):
-    academic_item_id: uuid.UUID
-    task_id: uuid.UUID
-    course_code: str
-    name: str
-    due_at: datetime
-    default_minutes: int = 480
-
-
 class GenerationBlockingInput(ApiModel):
     code: str
     message: str
@@ -816,7 +828,6 @@ class GenerationBlockingInput(ApiModel):
 class ScheduleGenerationRequirementsRead(ApiModel):
     horizon_start: date
     horizon_end: date
-    exams: list[GenerationExamRequirement] = Field(default_factory=list)
     blocking_inputs: list[GenerationBlockingInput] = Field(default_factory=list)
 
 

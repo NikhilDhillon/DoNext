@@ -43,6 +43,7 @@ from donext.models import (
 from donext.planning import (
     EventOccurrence,
     Interval,
+    academic_effort_default,
     availability_intervals,
     aware,
     expand_events,
@@ -66,9 +67,9 @@ from donext.scheduler import (
     solve_schedule,
 )
 from donext.schemas import (
+    ActivationPromptRead,
     ExtraFocusDecision,
     GenerationBlockingInput,
-    GenerationExamRequirement,
     ProposalSummaryRead,
     ScheduleBlockCreate,
     ScheduleBlockRead,
@@ -241,7 +242,6 @@ def _generation_requirements(
     task_by_item = {task.academic_item_id: task for task in tasks}
     events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == user.id)))
     readiness = _course_readiness(events, courses, timezone, semester)
-    exams: list[GenerationExamRequirement] = []
     blocking: list[GenerationBlockingInput] = []
     blocked_courses: set[uuid.UUID] = set()
     for item in items:
@@ -249,28 +249,14 @@ def _generation_requirements(
         if item.due_at is None or task is None:
             continue
         due_at = aware(item.due_at).astimezone(timezone)
+        # Exam preparation still needs to know what has been taught, so a course with no
+        # confirmed lecture or content time genuinely cannot be planned against. Assignments
+        # and quizzes no longer consult the lecture calendar at all: activation answers that.
         if (
             item.item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}
             and horizon_start <= due_at.date() <= horizon_end
-            and task.estimate_origin == EstimateOrigin.pending_exam
+            and task.activated_at is not None
         ):
-            course = course_by_id[item.course_id]
-            exams.append(
-                GenerationExamRequirement(
-                    academic_item_id=item.id,
-                    task_id=task.id,
-                    course_code=course.code,
-                    name=item.name,
-                    due_at=due_at,
-                    default_minutes=480,
-                )
-            )
-        if item.item_type in {
-            AcademicItemType.assignment,
-            AcademicItemType.quiz,
-            AcademicItemType.midterm,
-            AcademicItemType.final_exam,
-        }:
             course_readiness = readiness.get(item.course_id)
             if (
                 course_readiness is None or course_readiness.ready_at is None
@@ -283,14 +269,13 @@ def _generation_requirements(
                         course_id=course.id,
                         message=(
                             f"{course.code} needs a lecture or asynchronous content-available "
-                            "time before assignments can be scheduled."
+                            "time before exam preparation can be scheduled."
                         ),
                     )
                 )
     return ScheduleGenerationRequirementsRead(
         horizon_start=horizon_start,
         horizon_end=horizon_end,
-        exams=exams,
         blocking_inputs=blocking,
     )
 
@@ -306,6 +291,102 @@ def generation_requirements(
     return _generation_requirements(db, current_user, semester)
 
 
+@router.get(
+    "/semesters/{semester_id}/activation-queue",
+    response_model=list[ActivationPromptRead],
+)
+def activation_queue(
+    semester_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> list[ActivationPromptRead]:
+    """Known deadlines inside the horizon that hold no time until the student activates them.
+
+    An unactivated deadline must never read as free time, so the work waiting on an answer is
+    listed with the capacity still standing between now and the deadline. When that capacity has
+    fallen below what the work is expected to need, the prompt is marked urgent.
+    """
+
+    semester = owned_semester(db, current_user.id, semester_id)
+    timezone = resolve_timezone(current_user.timezone)
+    planning_now = _planning_now()
+    horizon_start, horizon_end = _horizon(semester, timezone, planning_now)
+    courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
+    course_by_id = {course.id: course for course in courses}
+    if not course_by_id:
+        return []
+    items = list(
+        db.scalars(select(AcademicItem).where(AcademicItem.course_id.in_(list(course_by_id))))
+    )
+    tasks = list(
+        db.scalars(
+            select(Task).where(
+                Task.user_id == current_user.id,
+                Task.academic_item_id.in_([item.id for item in items]),
+                Task.status.in_((TaskStatus.pending, TaskStatus.in_progress)),
+                Task.activated_at.is_(None),
+            )
+        )
+    )
+    if not tasks:
+        return []
+    task_by_item = {task.academic_item_id: task for task in tasks}
+
+    availability = list(
+        db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == current_user.id))
+    )
+    preferences = db.scalar(
+        select(UserPreference).where(UserPreference.user_id == current_user.id)
+    ) or UserPreference(user_id=current_user.id)
+    accepted = _accepted_schedule(db, current_user.id, semester_id)
+    events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == current_user.id)))
+    occurrences, _warnings = expand_events(
+        events, horizon_start, semester.end_date + timedelta(days=1), timezone
+    )
+    capacity_by_day: dict[date, int] = {}
+    if availability:
+        windows = _scheduling_windows(
+            horizon_start,
+            semester.end_date,
+            availability,
+            occurrences,
+            list(accepted.blocks) if accepted else [],
+            preferences,
+            timezone,
+            planning_now.astimezone(timezone),
+        )
+        capacity_by_day = _daily_capacity(windows)
+
+    prompts: list[ActivationPromptRead] = []
+    for item in items:
+        task = task_by_item.get(item.id)
+        if task is None or item.due_at is None:
+            continue
+        due_at = aware(item.due_at).astimezone(timezone)
+        if not (horizon_start <= due_at.date() <= horizon_end):
+            continue
+        fallback_minutes, _origin = academic_effort_default(item.item_type)
+        expected_minutes = fallback_minutes or task.estimated_minutes
+        capacity_before_due = sum(
+            minutes
+            for day, minutes in capacity_by_day.items()
+            if horizon_start <= day <= due_at.date()
+        )
+        prompts.append(
+            ActivationPromptRead(
+                academic_item_id=item.id,
+                task_id=task.id,
+                course_code=course_by_id[item.course_id].code,
+                name=item.name,
+                item_type=item.item_type,
+                due_at=due_at,
+                fallback_minutes=expected_minutes,
+                capacity_before_due_minutes=capacity_before_due,
+                urgent=capacity_before_due < expected_minutes,
+            )
+        )
+    prompts.sort(key=lambda prompt: (not prompt.urgent, prompt.due_at, prompt.name))
+    return prompts
+
+
 @router.post(
     "/semesters/{semester_id}/schedule/proposals",
     response_model=ScheduleProposalRead,
@@ -318,14 +399,9 @@ def generate_proposal(
     payload: ScheduleProposalGenerate | None = None,
 ) -> ScheduleProposalRead:
     semester = owned_semester(db, current_user.id, semester_id)
+    # Generation never blocks on a question the intake surface could have asked earlier. Work
+    # without an estimate is simply unactivated, and unactivated work holds no time in the plan.
     requirements = _generation_requirements(db, current_user, semester)
-    if requirements.exams:
-        raise ApiError(
-            "SCHEDULER_ESTIMATE_REQUIRED",
-            "Choose preparation time for the exams inside this plan.",
-            409,
-            {"exams": [exam.model_dump(mode="json") for exam in requirements.exams]},
-        )
     if requirements.blocking_inputs:
         raise ApiError(
             "SCHEDULER_INPUT_INCOMPLETE",
@@ -1894,7 +1970,6 @@ def _cap_windows_by_day(
 def _semester_pressure_forecast(
     tasks: list[Task],
     academic_items_by_id: dict[uuid.UUID, AcademicItem],
-    course_readiness: dict[uuid.UUID, CourseReadiness],
     preserved_minutes: dict[uuid.UUID, int],
     future_windows: list[SchedulingWindow],
     horizon_end: date,
@@ -1934,9 +2009,8 @@ def _semester_pressure_forecast(
             AcademicItemType.final_exam,
         }:
             continue
-        readiness = course_readiness.get(academic.course_id)
-        if readiness is None or readiness.ready_at is None or readiness.ready_at >= due_at:
-            continue
+        # Known work counts here whether or not it has been activated, at its fallback
+        # estimate when the student has not given one. Pressure does not wait for the handout.
         remaining = max(task.remaining_minutes - preserved_minutes.get(task.id, 0), 0)
         if not remaining:
             continue
@@ -1958,12 +2032,14 @@ def _semester_pressure_forecast(
                 (
                     max(
                         horizon_end + timedelta(days=1),
-                        cast(datetime, course_readiness[academic.course_id].ready_at).date(),
+                        aware(entry_task.activated_at).astimezone(timezone).date()
+                        if entry_task.activated_at is not None
+                        else horizon_end + timedelta(days=1),
                     ),
                     target.date(),
                     remaining,
                 )
-                for _task, academic, target, remaining in eligible
+                for entry_task, _academic, target, remaining in eligible
             ],
             capacity_by_day,
             checkpoint,
@@ -1973,14 +2049,14 @@ def _semester_pressure_forecast(
         )
         proved_deficit = max(known_demand - schedulable, 0)
         to_promote = max(proved_deficit - promoted_total, 0)
+        # Only activated work can absorb a deficit. Promoting work the student has not been
+        # handed would book time they cannot use and call the future risk resolved.
         candidates = sorted(
             (
                 entry
                 for entry in eligible
                 if entry[1].item_type == AcademicItemType.assignment
-                and course_readiness[entry[1].course_id].ready_at is not None
-                and cast(datetime, course_readiness[entry[1].course_id].ready_at).date()
-                <= horizon_end
+                and entry[0].activated_at is not None
             ),
             key=lambda entry: (entry[2], -entry[3], str(entry[0].id)),
         )
@@ -2179,6 +2255,7 @@ def _scheduling_items(
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []
     invalid_deadlines: dict[str, list[tuple[str, date]]] = {}
+    awaiting_activation: list[str] = []
     task_by_academic_item = {
         task.academic_item_id: task for task in tasks if task.academic_item_id is not None
     }
@@ -2205,7 +2282,6 @@ def _scheduling_items(
     lead_by_task, semester_pressure = _semester_pressure_forecast(
         tasks,
         academic_items_by_id,
-        course_readiness,
         preserved_minutes,
         semester_windows,
         horizon_end,
@@ -2244,9 +2320,6 @@ def _scheduling_items(
         is_assignment = item_type == AcademicItemType.assignment
         if is_exam and not (horizon_start <= due_date <= horizon_end):
             continue
-        if is_exam and task.estimate_origin == EstimateOrigin.pending_exam:
-            warnings.append(f'"{task.name}" needs a preparation estimate before scheduling.')
-            continue
         if not is_assignment and not is_exam and not is_quiz and due_date > horizon_end:
             continue
         if is_quiz and due_date > horizon_end:
@@ -2254,8 +2327,32 @@ def _scheduling_items(
 
         earliest_start_at = datetime.combine(semester.start_date, time.min, tzinfo=timezone)
         readiness = course_readiness.get(task.course_id) if task.course_id else None
-        requires_course_material = is_assignment or is_exam or is_quiz
-        if requires_course_material:
+        # Anything carrying an academic item is course work the student has to be handed,
+        # whatever its type. Work with no academic item is something they entered themselves,
+        # which activated it at the moment they typed it out.
+        is_academic = linked_item is not None
+        if is_academic:
+            # Activation is the availability signal. A known deadline the student has not
+            # activated is not workable yet, whatever the lecture calendar says about it.
+            if task.activated_at is None:
+                # Only deadlines in view are worth naming: work due in November is not making
+                # today look emptier than it is.
+                if due_date <= horizon_end:
+                    awaiting_activation.append(task.name)
+                continue
+            # Activation is always in the past by the time a plan is generated, so this floor
+            # is normally inert. Clamping it keeps the single generation instant authoritative
+            # if the two ever disagree.
+            earliest_start_at = max(
+                earliest_start_at,
+                min(
+                    aware(task.activated_at).astimezone(timezone),
+                    planning_now.astimezone(timezone),
+                ),
+            )
+        if is_exam:
+            # Exam preparation still covers only material that has already been taught, which
+            # is a fact about the course rather than about what the student has been handed.
             if readiness is None or readiness.ready_at is None:
                 course_code = (
                     course_codes.get(task.course_id, "Course") if task.course_id else "Course"
@@ -2443,6 +2540,17 @@ def _scheduling_items(
         else:
             items.append(scheduling_item)
             links[identifier] = (task.id, None, "focus")
+    if awaiting_activation:
+        # The plan must never imply that an unactivated deadline is free time, so the work the
+        # student has not confirmed yet is named rather than silently dropped.
+        examples = ", ".join(sorted(awaiting_activation)[:3])
+        remainder = len(awaiting_activation) - 3
+        suffix = f", plus {remainder} more" if remainder > 0 else ""
+        warnings.append(
+            f"{len(awaiting_activation)} "
+            f"{'deadline is' if len(awaiting_activation) == 1 else 'deadlines are'} waiting to be "
+            f"activated and hold no time in this plan: {examples}{suffix}."
+        )
     for course_code, invalid in sorted(invalid_deadlines.items()):
         examples = ", ".join(f"{name} ({deadline.isoformat()})" for name, deadline in invalid[:3])
         remainder = len(invalid) - 3

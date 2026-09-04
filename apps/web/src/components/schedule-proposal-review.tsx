@@ -88,31 +88,6 @@ export function ScheduleProposalReview({
       if (requirements.blocking_inputs.length) {
         throw new Error(requirements.blocking_inputs.map((item) => item.message).join(" "));
       }
-      for (const exam of requirements.exams) {
-        const useDefault = window.confirm(
-          `${exam.course_code} · ${exam.name} is now inside the 14-day plan. Use the 8-hour preparation default? Choose Cancel to enter your own estimate.`,
-        );
-        if (useDefault) {
-          await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
-            method: "PUT",
-            body: JSON.stringify({ decision: "use_default" }),
-          });
-          continue;
-        }
-        const hours = window.prompt(
-          `How many hours of preparation will you need for ${exam.course_code} · ${exam.name}?`,
-          "",
-        );
-        if (hours === null) throw new Error("Schedule generation was cancelled.");
-        const minutes = Math.round(Number(hours) * 12) * 5;
-        if (!Number.isFinite(minutes) || minutes < 15) {
-          throw new Error("Enter a valid exam preparation estimate.");
-        }
-        await apiRequest(`/academic-items/${exam.academic_item_id}/effort-estimate`, {
-          method: "PUT",
-          body: JSON.stringify({ decision: "student", minutes }),
-        });
-      }
       let generated: ScheduleProposal;
       try {
         generated = await apiRequest<ScheduleProposal>(

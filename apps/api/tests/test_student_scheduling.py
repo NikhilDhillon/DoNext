@@ -36,7 +36,10 @@ def create_item(
     *,
     required: bool = True,
     weight: float | None = None,
+    activate: bool = True,
 ) -> dict[str, object]:
+    """Create academic work. Tests activate by default: the student has the handout in hand."""
+
     response = client.post(
         f"/api/v1/courses/{course_id}/academic-items",
         json={
@@ -45,42 +48,39 @@ def create_item(
             "due_at": due_at,
             "required": required,
             "direct_weight_percent": weight,
+            "activate": activate,
         },
     )
     assert response.status_code == 201
     return response.json()
 
 
-def resolve_exam(client: TestClient, item: dict[str, object], minutes: int | None = None) -> None:
+def activate_item(
+    client: TestClient, item: dict[str, object], minutes: int | None = None
+) -> dict[str, object]:
     payload = (
         {"decision": "student", "minutes": minutes}
         if minutes is not None
         else {"decision": "use_default"}
     )
-    response = client.put(f"/api/v1/academic-items/{item['id']}/effort-estimate", json=payload)
-    assert response.status_code == 200
+    response = client.put(f"/api/v1/academic-items/{item['id']}/activation", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()
 
 
-def test_assignment_waits_until_linked_lecture_ends_then_front_loads(
+def resolve_exam(client: TestClient, item: dict[str, object], minutes: int | None = None) -> None:
+    activate_item(client, item, minutes)
+
+
+def test_an_activated_assignment_front_loads_without_consulting_any_lecture(
     client: TestClient,
 ) -> None:
+    """Activation is the availability signal; the lecture calendar no longer gates the work."""
+
     register(client)
     semester = create_semester(client)
     replace_weekday_availability(client)
     course = create_course(client, semester["id"], "CSC 349A")
-    lecture = client.post(
-        "/api/v1/events",
-        json={
-            "title": "CSC 349A lecture",
-            "semester_id": semester["id"],
-            "course_id": course["id"],
-            "meeting_kind": "lecture",
-            "category": "class",
-            "start_at": "2026-09-03T09:00:00-07:00",
-            "end_at": "2026-09-03T10:00:00-07:00",
-        },
-    )
-    assert lecture.status_code == 201
     item = create_item(
         client,
         course["id"],
@@ -94,7 +94,6 @@ def test_assignment_waits_until_linked_lecture_ends_then_front_loads(
     proposal = response.json()
     blocks = [block for block in proposal["blocks"] if block["task_id"] == item["task_id"]]
 
-    lecture_end = datetime.fromisoformat("2026-09-03T10:00:00-07:00")
     assert (
         sum(
             round(
@@ -108,11 +107,102 @@ def test_assignment_waits_until_linked_lecture_ends_then_front_loads(
         )
         == 150
     )
-    first_start = min(datetime.fromisoformat(block["start_at"]) for block in blocks)
-    if first_start.tzinfo is None:
-        first_start = first_start.replace(tzinfo=lecture_end.tzinfo)
-    assert first_start >= lecture_end
-    assert all(block["reason_details"]["readiness_at"] for block in blocks)
+
+
+def test_an_unactivated_deadline_holds_no_time_and_is_named(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    item = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Problem set 1",
+        "2026-09-10T23:59:00-07:00",
+        activate=False,
+    )
+
+    response = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert response.status_code == 201, response.text
+    proposal = response.json()
+
+    assert not [block for block in proposal["blocks"] if block["task_id"] == item["task_id"]]
+    # The plan says the deadline is there rather than letting the day read as free.
+    assert any(
+        "waiting to be activated" in warning
+        for warning in proposal["generation_summary"]["warnings"]
+    )
+
+
+def test_activation_places_work_and_deactivation_removes_it(client: TestClient) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    item = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Problem set 1",
+        "2026-09-10T23:59:00-07:00",
+        activate=False,
+    )
+
+    activate_item(client, item, 120)
+    activated = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    assert [block for block in activated["blocks"] if block["task_id"] == item["task_id"]]
+
+    removed = client.delete(f"/api/v1/academic-items/{item['id']}/activation")
+    assert removed.status_code == 200
+    # The estimate survives so re-activating does not ask the same question twice.
+    assert removed.json()["estimated_minutes"] == 120
+    assert removed.json()["activated_at"] is None
+
+    deactivated = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    assert not [block for block in deactivated["blocks"] if block["task_id"] == item["task_id"]]
+
+
+def test_the_activation_queue_surfaces_known_deadlines_inside_the_horizon(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    inside = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Problem set 1",
+        "2026-09-10T23:59:00-07:00",
+        activate=False,
+    )
+    create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Problem set 4",
+        "2026-11-20T23:59:00-07:00",
+        activate=False,
+    )
+    activated = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Problem set 2",
+        "2026-09-11T23:59:00-07:00",
+    )
+
+    queue = client.get(f"/api/v1/semesters/{semester['id']}/activation-queue")
+    assert queue.status_code == 200, queue.text
+    prompts = queue.json()
+
+    # Only unactivated work with a deadline in view is worth asking about.
+    assert [prompt["academic_item_id"] for prompt in prompts] == [inside["id"]]
+    assert prompts[0]["fallback_minutes"] == 150
+    assert prompts[0]["course_code"] == "CSC 349A"
+    assert activated["id"] not in {prompt["academic_item_id"] for prompt in prompts}
 
 
 def test_exam_preparation_waits_until_course_material_is_available(
@@ -224,40 +314,49 @@ def test_exam_preparation_unlocks_proportionally_after_recurring_lectures(
     assert exam_summary["material_release"]["total_checkpoints"] == 2
 
 
-def test_academic_defaults_and_exam_requirement_are_typed(client: TestClient) -> None:
+def test_academic_fallback_estimates_are_typed_and_named(client: TestClient) -> None:
     register(client)
     semester = create_semester(client)
     replace_weekday_availability(client)
     course = create_course(client, semester["id"], "CSC 370", asynchronous=True)
     assignment = create_item(
-        client, course["id"], "assignment", "Assignment 1", "2026-09-10T23:59:00Z"
+        client,
+        course["id"],
+        "assignment",
+        "Assignment 1",
+        "2026-09-10T23:59:00Z",
+        activate=False,
     )
-    quiz = create_item(client, course["id"], "quiz", "Quiz 1", "2026-09-09T23:59:00Z")
-    midterm = create_item(client, course["id"], "midterm", "Midterm", "2026-09-10T23:59:00Z")
+    quiz = create_item(
+        client, course["id"], "quiz", "Quiz 1", "2026-09-09T23:59:00Z", activate=False
+    )
+    midterm = create_item(
+        client, course["id"], "midterm", "Midterm", "2026-09-10T23:59:00Z", activate=False
+    )
     tasks = {task["id"]: task for task in client.get("/api/v1/tasks").json()}
 
     assert tasks[assignment["task_id"]]["estimated_minutes"] == 150
     assert tasks[assignment["task_id"]]["estimate_origin"] == "system_default"
     assert tasks[quiz["task_id"]]["estimated_minutes"] == 120
     assert tasks[midterm["task_id"]]["estimate_origin"] == "pending_exam"
+    assert all(task["activated_at"] is None for task in tasks.values())
 
-    requirements = client.get(
-        f"/api/v1/semesters/{semester['id']}/schedule/generation-requirements"
-    ).json()
-    assert [exam["academic_item_id"] for exam in requirements["exams"]] == [midterm["id"]]
-    paused = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
-    assert paused.status_code == 409
-    assert paused.json()["error"]["code"] == "SCHEDULER_ESTIMATE_REQUIRED"
+    # An estimate DoNext does not have is a fallback it names, never a dialog it blocks on.
+    generated = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+    assert generated.status_code == 201, generated.text
+    assert generated.json()["blocks"] == []
 
-    resolve_exam(client, midterm)
-    task = next(
-        task for task in client.get("/api/v1/tasks").json() if task["id"] == midterm["task_id"]
-    )
-    assert task["estimated_minutes"] == 480
-    assert task["estimate_origin"] == "system_default"
+    activated = activate_item(client, midterm)
+    assert activated["estimated_minutes"] == 480
+    assert activated["estimate_origin"] == "system_default"
+    assert activated["activated_at"] is not None
+
+    stated = activate_item(client, assignment, 300)
+    assert stated["estimated_minutes"] == 300
+    assert stated["estimate_origin"] == "student_provided"
 
 
-def test_exam_requirement_does_not_supersede_the_current_proposal(
+def test_a_new_known_deadline_does_not_supersede_the_current_proposal(
     client: TestClient,
 ) -> None:
     register(client)
@@ -265,12 +364,10 @@ def test_exam_requirement_does_not_supersede_the_current_proposal(
     replace_weekday_availability(client)
     first = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
     course = create_course(client, semester["id"], "SENG 310", asynchronous=True)
-    create_item(client, course["id"], "midterm", "Midterm", "2026-09-10T23:59:00Z")
+    create_item(client, course["id"], "midterm", "Midterm", "2026-09-10T23:59:00Z", activate=False)
 
-    paused = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
     current = client.get(f"/api/v1/semesters/{semester['id']}/schedule/proposal").json()
 
-    assert paused.status_code == 409
     assert current["id"] == first["id"]
     assert current["status"] == "proposed"
 

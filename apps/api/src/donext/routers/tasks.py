@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Query
@@ -111,7 +111,8 @@ def create_task(payload: TaskCreate, db: DbSession, current_user: CurrentUser) -
         db.add(academic_item)
         db.flush()
         values["academic_item_id"] = academic_item.id
-    task = Task(user_id=current_user.id, **values)
+    # A task the student typed out is work they know they have: creating it activates it.
+    task = Task(user_id=current_user.id, activated_at=datetime.now(UTC), **values)
     db.add(task)
     db.commit()
     db.refresh(task)

@@ -542,6 +542,10 @@ class Task(UuidTimestampMixin, Base):
     earliest_start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     required: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Activation is the availability signal for academic work: a task the student has not
+    # activated is a known deadline, never a schedulable block. Non-academic tasks are
+    # activated the moment the student creates them.
+    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class FixedEvent(UuidTimestampMixin, Base):

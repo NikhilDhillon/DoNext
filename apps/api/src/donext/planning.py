@@ -9,9 +9,11 @@ from sqlalchemy.orm import Session
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
+    AcademicItemType,
     AvailabilityType,
     AvailabilityWindow,
     Course,
+    EstimateOrigin,
     FixedEvent,
     Goal,
     ScheduledBlock,
@@ -53,6 +55,21 @@ def resolve_timezone(value: str) -> ZoneInfo:
         return ZoneInfo(value)
     except ZoneInfoNotFoundError as error:
         raise ApiError("VALIDATION_ERROR", "The account timezone is not supported.", 422) from error
+
+
+def academic_effort_default(item_type: AcademicItemType) -> tuple[int | None, EstimateOrigin]:
+    """The fallback estimate for work the student has not sized, and how to label it.
+
+    These are named fallbacks rather than assumed defaults: a plan built on them says so.
+    """
+
+    if item_type == AcademicItemType.assignment:
+        return 150, EstimateOrigin.system_default
+    if item_type == AcademicItemType.quiz:
+        return 120, EstimateOrigin.system_default
+    if item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}:
+        return 480, EstimateOrigin.pending_exam
+    return None, EstimateOrigin.system_default
 
 
 def aware(value: datetime) -> datetime:
