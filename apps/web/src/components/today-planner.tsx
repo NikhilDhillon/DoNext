@@ -16,6 +16,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
+import { WorkIntake } from "@/components/work-intake";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import type { PlannerTask, PlanningEntry, PlanningView, ScheduleProposal, Semester, User } from "@/lib/types";
@@ -97,6 +98,15 @@ export function TodayPlanner() {
 
       {proposal.data ? (
         <Link className="proposal-pending-banner" href="/week"><Sparkles size={17} /><span><strong>A 14-day draft is waiting for review.</strong><small>Today still reflects your accepted schedule.</small></span><ArrowRight size={17} /></Link>
+      ) : null}
+
+      {currentSemester ? (
+        <WorkIntake
+          semester={currentSemester}
+          onChanged={async () => {
+            await Promise.all([plan.reload(), proposal.reload()]);
+          }}
+        />
       ) : null}
 
       <section className="day-overview" aria-label="Day overview">

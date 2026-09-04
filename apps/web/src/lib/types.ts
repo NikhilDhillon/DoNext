@@ -235,6 +235,14 @@ export type ActivationPrompt = {
   urgent: boolean;
 };
 
+export type DirectPlacement = {
+  placed: boolean;
+  blocks: ScheduleBlock[];
+  placed_minutes: number;
+  remaining_minutes: number;
+  reason: string;
+};
+
 export type ScheduleRevisionReason =
   | "too_packed"
   | "wrong_times"
