@@ -68,6 +68,8 @@ from donext.scheduler import (
 )
 from donext.schemas import (
     ActivationPromptRead,
+    DirectPlacementRead,
+    DirectPlacementRequest,
     ExtraFocusDecision,
     GenerationBlockingInput,
     ProposalSummaryRead,
@@ -385,6 +387,167 @@ def activation_queue(
         )
     prompts.sort(key=lambda prompt: (not prompt.urgent, prompt.due_at, prompt.name))
     return prompts
+
+
+@router.post(
+    "/semesters/{semester_id}/schedule/direct-placement",
+    response_model=DirectPlacementRead,
+)
+def place_activated_work(
+    semester_id: uuid.UUID,
+    payload: DirectPlacementRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> DirectPlacementRead:
+    """Absorb newly activated work into the accepted plan when it costs nothing to do so.
+
+    The placement is add-only: it uses capacity the accepted schedule is not already using and
+    moves or removes nothing. Work that will not fit that way returns unplaced, and the student
+    reviews an ordinary proposal instead of having a decision rewritten underneath them.
+    """
+
+    semester = owned_semester(db, current_user.id, semester_id)
+    timezone = resolve_timezone(current_user.timezone)
+    planning_now = _planning_now()
+    horizon_start, horizon_end = _horizon(semester, timezone, planning_now)
+    task = db.scalar(
+        select(Task).where(Task.id == payload.task_id, Task.user_id == current_user.id)
+    )
+    if task is None:
+        raise ApiError("NOT_FOUND", "Task not found.", 404)
+    if task.activated_at is None:
+        raise ApiError("VALIDATION_ERROR", "Activate the work before placing it.", 422)
+    accepted = _accepted_schedule(db, current_user.id, semester_id, for_update=True)
+    if accepted is None:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="There is no accepted schedule to add this to yet.",
+        )
+    if task.deadline_at is None:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="Work without a deadline is placed through a reviewed proposal.",
+        )
+    due_at = aware(task.deadline_at).astimezone(timezone)
+    if due_at.date() > horizon_end or due_at <= planning_now:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="This deadline sits outside the current plan; regenerate to place it.",
+        )
+
+    availability = list(
+        db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == current_user.id))
+    )
+    preferences = db.scalar(
+        select(UserPreference).where(UserPreference.user_id == current_user.id)
+    ) or UserPreference(user_id=current_user.id)
+    if not availability:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="Add availability before work can be placed.",
+        )
+    events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == current_user.id)))
+    occurrences, recurrence_warnings = expand_events(
+        events, horizon_start, horizon_end + timedelta(days=1), timezone
+    )
+    if recurrence_warnings:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="Recurring commitments need attention before work can be placed.",
+        )
+    # Every accepted block is immovable here, so the solver only ever sees genuinely free time.
+    windows = _scheduling_windows(
+        horizon_start,
+        horizon_end,
+        availability,
+        occurrences,
+        list(accepted.blocks),
+        preferences,
+        timezone,
+        planning_now.astimezone(timezone),
+    )
+    identifier = f"task:{task.id}"
+    course_code = None
+    if task.course_id is not None:
+        course = db.scalar(select(Course).where(Course.id == task.course_id))
+        course_code = course.code if course else None
+    item = SchedulingItem(
+        id=identifier,
+        title=f"{course_code} · {task.name}" if course_code else task.name,
+        target_minutes=task.remaining_minutes,
+        minimum_session_minutes=task.minimum_session_minutes,
+        preferred_session_minutes=task.preferred_session_minutes,
+        maximum_session_minutes=task.maximum_session_minutes,
+        priority_rank=PRIORITY_RANK[task.priority.value],
+        intensity=task.intensity.value,
+        kind="task",
+        importance_rank=0,
+        due_at=due_at,
+        earliest_start_at=max(
+            planning_now.astimezone(timezone),
+            datetime.combine(horizon_start, time.min, tzinfo=timezone),
+        ),
+        latest_end_at=due_at,
+        required=task.required,
+        risk_tier=1,
+        slack_minutes=0,
+        weight_percent=None,
+        exam_relationship=None,
+        readiness_at=None,
+        preferred_completion_at=due_at,
+        course_id=str(task.course_id) if task.course_id is not None else None,
+    )
+    result = solve_schedule([item], windows, preferences.minimum_break_minutes)
+    placed_minutes = sum(
+        round((placement.end_at - placement.start_at).total_seconds() / 60)
+        for placement in result.placements
+        if placement.item_id == identifier
+    )
+    if placed_minutes < task.remaining_minutes:
+        return DirectPlacementRead(
+            placed=False,
+            placed_minutes=placed_minutes,
+            remaining_minutes=task.remaining_minutes,
+            reason=(
+                "This does not fit the time your plan is not already using. Regenerate to see "
+                "the trade-off before anything moves."
+            ),
+        )
+    blocks: list[ScheduledBlock] = []
+    for placement in result.placements:
+        if placement.item_id != identifier:
+            continue
+        block = ScheduledBlock(
+            schedule_version_id=accepted.id,
+            user_id=current_user.id,
+            task_id=task.id,
+            title=placement.title,
+            start_at=placement.start_at,
+            end_at=placement.end_at,
+            block_type="focus",
+            locked=False,
+            source="direct_placement",
+            stability_weight=1.0,
+            reason_code=placement.reason_code,
+            reason_details={"message": "Added when you activated this work."},
+        )
+        db.add(block)
+        blocks.append(block)
+    db.commit()
+    for block in blocks:
+        db.refresh(block)
+    return DirectPlacementRead(
+        placed=True,
+        blocks=[ScheduleBlockRead.model_validate(block) for block in blocks],
+        placed_minutes=placed_minutes,
+        remaining_minutes=0,
+        reason="Added to your schedule without moving anything.",
+    )
 
 
 @router.post(

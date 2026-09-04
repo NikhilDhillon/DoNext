@@ -205,6 +205,87 @@ def test_the_activation_queue_surfaces_known_deadlines_inside_the_horizon(
     assert activated["id"] not in {prompt["academic_item_id"] for prompt in prompts}
 
 
+def test_activated_work_lands_directly_when_it_costs_the_plan_nothing(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    create_item(client, course["id"], "assignment", "Problem set 1", "2026-09-10T23:59:00-07:00")
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    accepted = client.post(f"/api/v1/schedule-proposals/{proposal['id']}/accept")
+    assert accepted.status_code == 200
+    settled = {
+        (block["id"], block["start_at"], block["end_at"]) for block in accepted.json()["blocks"]
+    }
+
+    fresh = create_item(
+        client,
+        course["id"],
+        "quiz",
+        "Pop quiz",
+        "2026-09-11T23:59:00-07:00",
+        activate=False,
+    )
+    activate_item(client, fresh, 60)
+    placement = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/direct-placement",
+        json={"task_id": fresh["task_id"]},
+    )
+
+    assert placement.status_code == 200, placement.text
+    body = placement.json()
+    assert body["placed"] is True
+    assert body["placed_minutes"] == 60
+    assert all(block["task_id"] == fresh["task_id"] for block in body["blocks"])
+
+    schedule = client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()
+    still_settled = {
+        (block["id"], block["start_at"], block["end_at"])
+        for block in schedule["blocks"]
+        if block["task_id"] != fresh["task_id"]
+    }
+    # Add-only: nothing the student already agreed to was moved or removed.
+    assert still_settled == settled
+
+    # Undo is a single action against the blocks the placement reports.
+    for block in body["blocks"]:
+        assert client.delete(f"/api/v1/schedule-blocks/{block['id']}").status_code == 204
+
+
+def test_activated_work_that_does_not_fit_waits_for_a_reviewed_proposal(
+    client: TestClient,
+) -> None:
+    register(client)
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    create_item(client, course["id"], "assignment", "Problem set 1", "2026-09-10T23:59:00-07:00")
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    assert client.post(f"/api/v1/schedule-proposals/{proposal['id']}/accept").status_code == 200
+
+    oversized = create_item(
+        client,
+        course["id"],
+        "assignment",
+        "Term project",
+        "2026-09-08T23:59:00-07:00",
+        activate=False,
+    )
+    activate_item(client, oversized, 6000)
+    placement = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/direct-placement",
+        json={"task_id": oversized["task_id"]},
+    )
+
+    assert placement.status_code == 200, placement.text
+    body = placement.json()
+    assert body["placed"] is False
+    assert body["blocks"] == []
+    assert "Regenerate" in body["reason"]
+
+
 def test_exam_preparation_waits_until_course_material_is_available(
     client: TestClient,
 ) -> None:

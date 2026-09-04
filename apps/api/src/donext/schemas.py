@@ -825,6 +825,20 @@ class GenerationBlockingInput(ApiModel):
     course_id: uuid.UUID | None = None
 
 
+class DirectPlacementRequest(ApiModel):
+    task_id: uuid.UUID
+
+
+class DirectPlacementRead(ApiModel):
+    """The outcome of trying to absorb newly activated work without disturbing the plan."""
+
+    placed: bool
+    blocks: list[ScheduleBlockRead] = Field(default_factory=list)
+    placed_minutes: int = 0
+    remaining_minutes: int = 0
+    reason: str
+
+
 class ScheduleGenerationRequirementsRead(ApiModel):
     horizon_start: date
     horizon_end: date
