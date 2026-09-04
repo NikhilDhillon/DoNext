@@ -27,24 +27,34 @@ escalation, or acceptance. Schedules are identical whether an OpenAI key exists 
 
 ## Academic inputs
 
-Class events carry a `course_id` and `meeting_kind`. Scheduled-course assignments become actionable
-at the end of the first linked lecture. Asynchronous courses use `first_content_available_at`.
-Missing readiness and deadlines that predate readiness are reported for correction. Recurring
-lectures are expanded in local time through semester end. Exam preparation unlocks cumulatively in
-proportion to completed lectures, with the final lecture releasing the exact remainder; asynchronous
-courses release the full estimate at their content-available timestamp.
+Academic work is gated on `Task.activated_at`. Work the student has not activated is a known
+deadline: it is never placed, it is named in the proposal warnings so the day cannot read as free,
+and `GET /semesters/{id}/activation-queue` lists what is waiting with the focus capacity still
+standing before each deadline. `PUT` and `DELETE` on `/academic-items/{id}/activation` move an item
+between the two states; the estimate survives deactivation. The lecture calendar no longer gates
+assignments or quizzes at all.
 
-Academic items are created atomically with their tasks. Assignment, quiz, midterm, and final defaults
-are 150, 120, 480, and 480 minutes respectively. Exam defaults begin with `pending_exam`; proposal
-generation pauses until the student enters an estimate or explicitly chooses the eight-hour default.
+Class events still carry a `course_id` and `meeting_kind`, and exam preparation still covers only
+taught material: recurring lectures are expanded in local time through semester end, preparation
+unlocks cumulatively in proportion to completed lectures with the final lecture releasing the exact
+remainder, and asynchronous courses release the full estimate at `first_content_available_at`. A
+course with no confirmed lecture or content time blocks generation only when an activated exam sits
+inside the horizon.
+
+Academic items are created atomically with their tasks, unactivated unless the caller passes
+`activate`. Assignment, quiz, midterm, and final fallbacks are 150, 120, 480, and 480 minutes.
+Activation records `student_provided` for a stated figure and `system_default` for a named fallback;
+`pending_exam` now marks an exam nobody has sized. Generation never pauses for an estimate.
 `remaining_minutes` remains the scheduling source of truth.
 
-Assignments remain eligible after readiness even when their deadlines are beyond the current
+Activated assignments remain eligible even when their deadlines are beyond the current
 horizon. A deterministic daily max-flow forecast tests known future required demand against
 optimistic post-horizon capacity through semester end. Only a proven deficit becomes a required
 strategic-lead portion; the rest remains opportunistic behind flexible goals. Unknown future exam
-estimates are reported but add no demand. Exams activate only when their deadline is inside the
-14-day horizon. Exam blocks use generic labels such as `CSC 370 · Midterm prep`.
+estimates are reported but add no demand. The forecast counts known work whether or not it has been
+activated, at its fallback estimate, but only activated assignments can absorb a proven deficit.
+Exam preparation still enters the plan only when its deadline is inside the 14-day horizon.
+Exam blocks use generic labels such as `CSC 370 · Midterm prep`.
 
 ## Risk and allocation
 
@@ -171,6 +181,13 @@ priority cases run through CP-SAT and forced greedy fallback.
   consumption but never that the buffer is retained under normal load, and scenario 14 asserts the
   permission handshake but never that an approved draft leaves sleep untouched.
 
+Newly activated work is absorbed without a review ceremony when it costs the plan nothing.
+`POST /semesters/{id}/schedule/direct-placement` solves the single task against the capacity the
+accepted schedule is not already using and commits the blocks only if every required minute fits;
+the placement is add-only, so nothing accepted is moved or removed, and undo is a delete of the
+blocks it reports. Work that does not fit returns unplaced with the reason, and the student
+regenerates an ordinary reviewable proposal instead.
+
 ## Out of scope
 
 Daily completion check-ins, partial block completion, and learned course-specific effort estimates
@@ -180,7 +197,11 @@ remain future work. The calendar's visual redesign is also separate from this sc
 
 The repository test suite covers API contracts, defaults and provenance, linked and proportional
 class readiness, semester pressure, proposal lifecycle, core hard scheduling constraints, recovery
-layers, fallback behavior, revision-AI boundary, and stale input protection. On 2026-09-02,
-`pnpm check` passed with 111 API tests plus frontend lint, typecheck, and production build. Database
-schema did not change, so no migration was required for this cutover. The gaps listed above remain
-open and are not covered by that suite.
+layers, fallback behavior, revision-AI boundary, and stale input protection. Activation adds
+coverage for unactivated work holding no time, the activation queue, deactivation, named fallbacks,
+and both direct-placement outcomes. On 2026-09-04, `pnpm check` ran 116 API tests with 114 passing
+plus frontend lint, typecheck, and production build. Two failures predate this work and are
+unrelated to it: `test_preserved_flexible_time_only_reduces_its_calendar_week` and
+`test_proven_future_pressure_promotes_only_required_distant_minutes`. Migration `d3f7a2c65b81` adds
+`tasks.activated_at` and backfills existing work as activated, except exams still carrying
+`pending_exam`. The gaps listed above remain open and are not covered by that suite.
