@@ -300,11 +300,12 @@ def generation_requirements(
 def activation_queue(
     semester_id: uuid.UUID, db: DbSession, current_user: CurrentUser
 ) -> list[ActivationPromptRead]:
-    """Known deadlines inside the horizon that hold no time until the student activates them.
+    """Course work with a deadline inside the horizon, and where it stands on activation.
 
-    An unactivated deadline must never read as free time, so the work waiting on an answer is
-    listed with the capacity still standing between now and the deadline. When that capacity has
-    fallen below what the work is expected to need, the prompt is marked urgent.
+    An unactivated deadline must never read as free time, so work waiting on an answer is listed
+    with the capacity still standing between now and the deadline; when that capacity has fallen
+    below what the work is expected to need, the prompt is marked urgent. Work already activated
+    is listed too, so an answer given by mistake can be taken back.
     """
 
     semester = owned_semester(db, current_user.id, semester_id)
@@ -324,7 +325,6 @@ def activation_queue(
                 Task.user_id == current_user.id,
                 Task.academic_item_id.in_([item.id for item in items]),
                 Task.status.in_((TaskStatus.pending, TaskStatus.in_progress)),
-                Task.activated_at.is_(None),
             )
         )
     )
@@ -365,8 +365,11 @@ def activation_queue(
         due_at = aware(item.due_at).astimezone(timezone)
         if not (horizon_start <= due_at.date() <= horizon_end):
             continue
+        activated = task.activated_at is not None
         fallback_minutes, _origin = academic_effort_default(item.item_type)
-        expected_minutes = fallback_minutes or task.estimated_minutes
+        expected_minutes = (
+            task.remaining_minutes if activated else (fallback_minutes or task.estimated_minutes)
+        )
         capacity_before_due = sum(
             minutes
             for day, minutes in capacity_by_day.items()
@@ -382,10 +385,16 @@ def activation_queue(
                 due_at=due_at,
                 fallback_minutes=expected_minutes,
                 capacity_before_due_minutes=capacity_before_due,
-                urgent=capacity_before_due < expected_minutes,
+                # Only unanswered work can be running out of room; activated work already holds
+                # whatever time the plan gave it.
+                urgent=not activated and capacity_before_due < expected_minutes,
+                activated=activated,
+                estimate_is_fallback=task.estimate_origin != EstimateOrigin.student_provided,
             )
         )
-    prompts.sort(key=lambda prompt: (not prompt.urgent, prompt.due_at, prompt.name))
+    prompts.sort(
+        key=lambda prompt: (prompt.activated, not prompt.urgent, prompt.due_at, prompt.name)
+    )
     return prompts
 
 

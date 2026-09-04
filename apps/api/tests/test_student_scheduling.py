@@ -198,11 +198,16 @@ def test_the_activation_queue_surfaces_known_deadlines_inside_the_horizon(
     assert queue.status_code == 200, queue.text
     prompts = queue.json()
 
-    # Only unactivated work with a deadline in view is worth asking about.
-    assert [prompt["academic_item_id"] for prompt in prompts] == [inside["id"]]
-    assert prompts[0]["fallback_minutes"] == 150
-    assert prompts[0]["course_code"] == "CSC 349A"
-    assert activated["id"] not in {prompt["academic_item_id"] for prompt in prompts}
+    # Work due beyond the horizon is a known deadline, not a question worth asking today.
+    assert [prompt["academic_item_id"] for prompt in prompts] == [inside["id"], activated["id"]]
+    waiting, answered = prompts
+    assert waiting["activated"] is False
+    assert waiting["fallback_minutes"] == 150
+    assert waiting["estimate_is_fallback"] is True
+    assert waiting["course_code"] == "CSC 349A"
+    # Activated work is listed so the answer can be taken back, never as something still urgent.
+    assert answered["activated"] is True
+    assert answered["urgent"] is False
 
 
 def test_activated_work_lands_directly_when_it_costs_the_plan_nothing(

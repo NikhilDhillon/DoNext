@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarPlus, Check, CircleAlert, LoaderCircle, Plus, X } from "lucide-react";
+import { CalendarPlus, Check, CircleAlert, LoaderCircle, Plus, Undo2, X } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
@@ -36,9 +36,11 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
   const [composing, setComposing] = useState(false);
 
   const prompts = useMemo(() => queue.data ?? [], [queue.data]);
+  const waiting = useMemo(() => prompts.filter((prompt) => !prompt.activated), [prompts]);
+  const answered = useMemo(() => prompts.filter((prompt) => prompt.activated), [prompts]);
   const urgentCount = useMemo(
-    () => prompts.filter((prompt) => prompt.urgent).length,
-    [prompts],
+    () => waiting.filter((prompt) => prompt.urgent).length,
+    [waiting],
   );
 
   async function refresh() {
@@ -95,6 +97,31 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
     }
   }
 
+  // Work entered by mistake, or withdrawn by the course, goes back to being a known deadline.
+  // The estimate is kept, so activating it again does not ask the same question twice.
+  async function deactivate(prompt: ActivationPrompt) {
+    setBusyItem(prompt.academic_item_id);
+    setError(null);
+    setOutcome(null);
+    try {
+      await apiRequest(`/academic-items/${prompt.academic_item_id}/activation`, {
+        method: "DELETE",
+      });
+      setOutcome(
+        `${prompt.name} is back to a known deadline. Regenerate your plan to release the time it holds.`,
+      );
+      await refresh();
+    } catch (deactivationError) {
+      setError(
+        deactivationError instanceof ApiRequestError
+          ? deactivationError.message
+          : "That could not be moved back.",
+      );
+    } finally {
+      setBusyItem(null);
+    }
+  }
+
   return (
     <section className="intake-card" aria-label="Work intake">
       <header className="intake-header">
@@ -144,28 +171,71 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
         <p className="planner-quiet">
           <LoaderCircle className="spin" size={15} /> Checking what is waiting
         </p>
-      ) : prompts.length ? (
-        <>
-          <p className="intake-summary">
-            {prompts.length} {prompts.length === 1 ? "deadline is" : "deadlines are"} in view with
-            no time booked
-            {urgentCount ? ` · ${urgentCount} running out of room` : ""}.
-          </p>
-          <ul className="intake-queue">
-            {prompts.map((prompt) => (
-              <ActivationRow
-                busy={busyItem === prompt.academic_item_id}
-                key={prompt.academic_item_id}
-                prompt={prompt}
-                onActivate={(hours) => activate(prompt, hours)}
-              />
-            ))}
-          </ul>
-        </>
       ) : (
-        <p className="planner-quiet">
-          Every deadline DoNext knows about in the next two weeks has an answer.
-        </p>
+        <>
+          {waiting.length ? (
+            <>
+              <p className="intake-summary">
+                {waiting.length} {waiting.length === 1 ? "deadline is" : "deadlines are"} in view
+                with no time booked
+                {urgentCount ? ` · ${urgentCount} running out of room` : ""}.
+              </p>
+              <ul className="intake-queue">
+                {waiting.map((prompt) => (
+                  <ActivationRow
+                    busy={busyItem === prompt.academic_item_id}
+                    key={prompt.academic_item_id}
+                    prompt={prompt}
+                    onActivate={(hours) => activate(prompt, hours)}
+                  />
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="planner-quiet">
+              Every deadline DoNext knows about in the next two weeks has an answer.
+            </p>
+          )}
+
+          {answered.length ? (
+            <>
+              <p className="intake-summary answered">
+                Holding time in your plan · say so if any of these are not really out.
+              </p>
+              <ul className="intake-queue">
+                {answered.map((prompt) => (
+                  <li className="intake-row answered" key={prompt.academic_item_id}>
+                    <div className="intake-row-copy">
+                      <span>
+                        {prompt.course_code || "Course"} ·{" "}
+                        {KIND_LABELS[prompt.item_type as NewWorkKind] || "Work"}
+                      </span>
+                      <strong>{prompt.name}</strong>
+                      <small>
+                        Due {formatDate(prompt.due_at)} ·{" "}
+                        {formatMinutes(prompt.fallback_minutes)} left
+                        {prompt.estimate_is_fallback ? " (estimated for you)" : " (your estimate)"}
+                      </small>
+                    </div>
+                    <button
+                      className="secondary-button"
+                      disabled={busyItem === prompt.academic_item_id}
+                      type="button"
+                      onClick={() => void deactivate(prompt)}
+                    >
+                      {busyItem === prompt.academic_item_id ? (
+                        <LoaderCircle className="spin" size={15} />
+                      ) : (
+                        <Undo2 size={15} />
+                      )}
+                      Not out yet
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </>
       )}
     </section>
   );

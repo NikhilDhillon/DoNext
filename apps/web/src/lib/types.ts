@@ -233,6 +233,8 @@ export type ActivationPrompt = {
   fallback_minutes: number;
   capacity_before_due_minutes: number;
   urgent: boolean;
+  activated: boolean;
+  estimate_is_fallback: boolean;
 };
 
 export type DirectPlacement = {

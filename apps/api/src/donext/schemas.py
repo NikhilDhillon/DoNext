@@ -449,7 +449,11 @@ class AcademicActivationUpdate(ApiModel):
 
 
 class ActivationPromptRead(ApiModel):
-    """A known deadline that holds no time in the plan until the student activates it."""
+    """Course work with a deadline in view, and whether the student has activated it yet.
+
+    Unactivated entries hold no time in the plan and are what DoNext still needs an answer
+    about. Activated entries are listed so an answer can be taken back.
+    """
 
     academic_item_id: uuid.UUID
     task_id: uuid.UUID
@@ -460,6 +464,8 @@ class ActivationPromptRead(ApiModel):
     fallback_minutes: int
     capacity_before_due_minutes: int
     urgent: bool
+    activated: bool = False
+    estimate_is_fallback: bool = True
 
 
 AcademicImpactTier = Literal["critical", "high", "normal", "low"]
