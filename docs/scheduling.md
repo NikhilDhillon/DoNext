@@ -4,7 +4,7 @@ Author: Nikhil Dhillon
 
 Status: Canonical product source of truth
 
-Last decision review: 2026-09-02
+Last decision review: 2026-09-04
 
 ## Purpose
 
@@ -29,6 +29,8 @@ The student should be able to trust that DoNext:
 
 - understands what is fixed and what can move;
 - knows which academic work is actually ready to begin;
+- does not invent work the student has not been given, and never presents an unbooked deadline as
+  free time;
 - accounts for deadlines, grade weight, remaining effort, and upcoming exams together;
 - starts actionable assignments early instead of manufacturing avoidable pressure later;
 - preserves realistic session lengths and breaks;
@@ -52,10 +54,13 @@ become stale too quickly and would imply precision that the product cannot hones
 Future pressure is proven with a deterministic daily max-flow forecast from the end of the rolling
 horizon through semester end. The forecast includes known required work, readiness, assignment
 24-hour targets, quiz defaults, confirmed deadlines, fixed and accepted commitments, preferred
-sleep, normal focus limits, and rollover capacity. It deliberately excludes flexible goals and
-break overhead, making its capacity estimate optimistic. A deficit under those assumptions is proof
-that some actionable assignment work must move into the current horizon. Exams with unknown
-estimates are shown as uncertainty and contribute no invented minutes.
+sleep, normal focus limits, and rollover capacity. Known work counts here whether or not it has
+been activated, at its fallback estimate when the student has not given one: the forecast exists to
+see pressure coming, and pressure does not wait for the handout. It deliberately excludes flexible
+goals and break overhead, making its capacity estimate optimistic. A deficit under those assumptions
+is proof that some activated assignment work must move into the current horizon, or that work still
+waiting on activation needs to be raised with the student now. Exams with unknown estimates are
+shown as uncertainty and contribute no invented minutes.
 
 ### Rolling 14-day execution plan
 
@@ -76,7 +81,8 @@ Scheduling uses confirmed data only:
 
 - semester start and end dates;
 - course identities and class meetings;
-- assignment, quiz, midterm, and final dates;
+- assignment, quiz, midterm, and final deadlines;
+- student activation of academic work, and the effort estimate given at activation;
 - grade weights when known;
 - task status and remaining work;
 - fixed and recurring commitments, including commute buffers;
@@ -91,21 +97,66 @@ Scheduling uses confirmed data only:
 DoNext must not invent deadlines or grade weights. When an assignment weight is unknown, deadline
 and feasibility drive its priority. Unknown values stay visibly unknown.
 
+DoNext must not infer availability either. A confirmed deadline says when work is due, never whether
+the student has been given it. That question is answered by activation alone.
+
 ## Academic readiness
 
-### Assignment readiness gate
+### Activation
 
-An assignment becomes actionable after at least one lecture for its course has occurred.
+Academic work exists in DoNext in one of two states.
 
-- A scheduled lecture counts as attended automatically once its end time has passed.
-- The student is not required to confirm attendance to unlock assignment work.
-- The assignment may be scheduled in the earliest reasonable opening after that lecture, including
-  later on the same day.
-- Before the first lecture has occurred, the assignment remains blocked.
+A *known* item has a confirmed identity and deadline but has not been handed out, or has not yet been
+acknowledged by the student. It is never scheduled. It informs the semester-pressure forecast, it
+stays visible as an unbooked deadline, and DoNext prompts the student about it as the deadline
+approaches.
 
-Course data is expected not to contain an assignment due before its first lecture. If invalid or
-legacy data violates that invariant, DoNext must flag the conflict for correction rather than quietly
-pretending the course-readiness rule does not exist.
+An *activated* item is one the student has confirmed is real and workable, together with an effort
+estimate. Only activated work is placed on the calendar.
+
+Activation is the availability signal, and the activation instant is the earliest an item may be
+worked. DoNext does not infer when an assignment was handed out from lecture dates, from the previous
+assignment's deadline, or from any other proxy. The student is the authority on whether the work
+exists, and a course outline is not evidence that it does: an outline states what will be due, months
+before the handout appears. Inference here is guesswork that produces confident calendar blocks for
+work the student cannot open.
+
+Items reach the known state from a parsed course outline or from direct student entry. Items reach
+the activated state only through an explicit student action.
+
+The student may deactivate an item entered in error or withdrawn by the course. It returns to the
+known state, its blocks leave the next plan, and its estimate is retained in case it is activated
+again.
+
+### Intake
+
+Activation happens on a persistent intake surface rather than inside plan generation. The surface
+must accept, without an AI provider and without leaving the student's current view:
+
+- activation of a known item, with its course, identity, and deadline already filled in, plus an
+  effort estimate;
+- creation and activation of academic work the outline never contained, including its course when it
+  has one, its type, its deadline, and its estimate; and
+- creation of a flexible personal goal.
+
+Plan generation never blocks on a question the intake surface could have asked earlier. An estimate
+DoNext does not have is a fallback it names, not a dialog it interrupts with.
+
+### Prompting for unactivated work
+
+An unactivated deadline must never read as free time.
+
+DoNext surfaces a known item for activation when its deadline enters the rolling 14-day horizon, and
+again with escalating prominence once the usable capacity remaining before that deadline falls below
+the item's fallback estimate. The prompt asks the two questions activation needs: whether the work is
+available, and roughly how long it will take.
+
+Every known deadline inside the horizon stays visible whether or not it has been activated. A day
+holding an unbooked deadline is never presented as an unencumbered day.
+
+DoNext does not activate an item on the student's behalf, and it does not schedule against a prompt
+the student has not answered. Silence means the work is not yet placeable, not that it has gone
+away.
 
 ### Exam-material readiness
 
@@ -127,8 +178,12 @@ or expose artificial phases such as orient, draft, practice, or final review.
 
 ### Assignments
 
-Every assignment begins with a 2.5-hour effort estimate. DoNext does not interrupt the student during
-plan generation to request a custom assignment estimate.
+The student supplies an effort estimate when they activate an assignment. That figure is
+authoritative. It is the student's judgement about their own work in their own course, and it is
+better evidence than any default DoNext could compute.
+
+If the student skips the question, DoNext uses a clearly identified 2.5-hour fallback and shows it as
+a fallback rather than a stated figure, so a plan built on guesses is visibly a plan built on guesses.
 
 The estimate covers the complete assignment lifecycle, including final review and submission. DoNext
 must not add a separate percentage or extra review duration on top of it.
@@ -143,23 +198,29 @@ evidence is strong enough and the change is explained.
 Midterm and final preparation does not enter the exact plan until the exam is inside the rolling
 14-day horizon.
 
-When an exam first enters that horizon, DoNext asks the student for the approximate total preparation
-time required. If the student skips the question, DoNext uses a clearly identified eight-hour default.
-The value is an estimate, not a course requirement.
+When an exam first enters that horizon, it is prompted for activation on the intake surface like any
+other work, asking for the approximate total preparation time required. If the student skips the
+question, DoNext uses a clearly identified eight-hour default. The value is an estimate, not a course
+requirement.
 
 Final exams use the same 14-day activation rule as midterms.
 
 ### Quizzes
 
-Quizzes use a two-hour preparation default. They do not require the same preparation-hours prompt as
-midterms and finals.
+Quizzes are activated like any other academic work and use a two-hour preparation default when the
+student skips the estimate. They do not require the same preparation-hours prompt as midterms and
+finals.
 
 ## Assignment scheduling
 
-### Front-load actionable work
+### Front-load activated work
 
-Once an assignment becomes actionable, DoNext places it into the earliest reasonable openings. It
-does not spread work evenly merely to make the calendar look balanced.
+Once an assignment is activated, DoNext places it into the earliest reasonable openings. It does not
+spread work evenly merely to make the calendar look balanced.
+
+Front-loading is bounded by activation and by nothing else DoNext computes. There is no lead window,
+no minimum runway, and no rule holding work back until its deadline draws near: if the student says
+the work exists, the earliest useful opening is the right opening.
 
 Starting early is valuable because it:
 
@@ -173,14 +234,15 @@ capacity permits.
 
 ### Work beyond the current horizon
 
-An actionable assignment due more than 14 days away may use otherwise-unused focus capacity in the
+An activated assignment due more than 14 days away may use otherwise-unused focus capacity in the
 current plan. Distant work should not normally remove flexible personal goals from the current plan.
 It fills spare capacity after nearer academic priorities and the normal plan have been covered.
 
 The only exception is the proven deficit from the optimistic semester-pressure forecast. Only that
 many minutes are promoted into a required `strategic lead` portion that may displace a flexible
-goal. The assignment's remaining minutes stay opportunistic. If no actionable distant assignment
-can absorb a proven deficit, DoNext reports the future risk without displacing a goal.
+goal. The assignment's remaining minutes stay opportunistic. If no activated distant assignment can
+absorb a proven deficit, DoNext reports the future risk without displacing a goal, and prompts for
+the activation that would let it act.
 
 ### Multiple sessions
 
@@ -381,11 +443,28 @@ Every generated schedule is a proposal.
 
 The accepted Today, Week, and Semester views do not present a pending draft as active work.
 
+### Direct placement of newly activated work
+
+Requiring a full draft review for every activation would make intake expensive, and expensive intake
+does not happen. A design that depends on the student entering work as it arrives must make entering
+work cheap.
+
+Newly activated work is therefore placed directly into the accepted schedule when, and only when, it
+fits entirely in capacity the accepted plan is not already using. Such a placement adds blocks and
+moves or removes nothing. It is reported plainly and can be undone in a single action.
+
+Any activation that cannot be absorbed that way produces an ordinary reviewable proposal. If the new
+work would displace an accepted block, reduce a flexible goal, consume the rollover buffer, or draw on
+extra focus or reduced sleep, the student sees the trade-off and confirms it before anything changes.
+
+The boundary is what makes the shortcut honest: the direct path is add-only, so it can never quietly
+rewrite a decision the student already made. Every path that costs something keeps its confirmation.
+
 ## Explainability requirements
 
 Every generated academic block should be able to explain:
 
-- why the work is ready;
+- why the work is ready, including when the student activated it;
 - why it is being worked on now;
 - its deadline and remaining work;
 - whether an approaching exam affected its priority;
@@ -410,7 +489,7 @@ The behavioral rules in this document must work without an AI provider.
 
 Deterministic, validated application code owns:
 
-- readiness gates;
+- activation state and readiness gates;
 - deadline and grade-weight truth;
 - effort accounting;
 - priority guardrails;
@@ -447,21 +526,34 @@ replanning workflow require their own specification before implementation.
 
 The scheduling behavior is not complete until automated tests cover at least these scenarios:
 
-1. An assignment is not scheduled before the first lecture and is front-loaded afterward.
-2. A same-course assignment due before a midterm receives a boost when the midterm enters the
+1. A known item that has not been activated produces no calendar block, still contributes to the
+   semester-pressure forecast at its fallback estimate, and stays visible as an unbooked deadline.
+2. A known item is surfaced for activation when its deadline enters the horizon, and escalates once
+   remaining capacity before that deadline falls below its fallback estimate.
+3. An activated assignment is front-loaded from its activation instant and is never placed before it,
+   regardless of lecture dates or the previous assignment's deadline.
+4. An assignment activated without an estimate uses the identified 2.5-hour fallback and is shown as
+   a fallback rather than a stated figure.
+5. Deactivating an item removes its work from the next plan and retains its estimate.
+6. An activation that fits unused capacity lands directly in the accepted schedule and can be undone
+   in one action; one that would displace an accepted block, reduce a goal, or consume the rollover
+   buffer produces a reviewable proposal instead.
+7. A same-course assignment due before a midterm receives a boost when the midterm enters the
    horizon.
-3. An assignment due within 48 hours can override that exam-related boost.
-4. A long assignment starts early when delaying it would make its deadline infeasible.
-5. Higher grade weight breaks a similar-deadline tie; unknown weight falls back to deadline risk.
-6. An assignment due beyond 14 days uses spare capacity without displacing a flexible personal goal.
-7. Midterm and final preparation prompts for hours inside the horizon and falls back to eight hours.
-8. Quiz preparation uses the two-hour default.
-9. Two overlapping exams receive simultaneous preparation.
-10. Post-exam assignments from the same course wait until required prep is actually complete.
-11. Multiple same-day blocks retain normal session length and required breaks.
-12. The one-hour buffer remains unused under normal load and is consumed by overdue or 48-hour work.
-13. Flexible goals yield before required academics.
-14. Extra focus capacity is never used without permission and never silently reduces sleep.
-15. Preferred sleep may reduce to the configured minimum with a visible explanation.
-16. An impossible plan drops the least-important academic item and reports the exact shortfall.
-17. A generated or recalculated proposal never changes the accepted schedule before confirmation.
+8. An assignment due within 48 hours can override that exam-related boost.
+9. A long assignment starts early when delaying it would make its deadline infeasible.
+10. Higher grade weight breaks a similar-deadline tie; unknown weight falls back to deadline risk.
+11. An activated assignment due beyond 14 days uses spare capacity without displacing a flexible
+    personal goal.
+12. Midterm and final preparation is activated from the intake surface once the exam is inside the
+    horizon, and falls back to eight hours.
+13. Quiz preparation uses the two-hour default when the estimate is skipped.
+14. Two overlapping exams receive simultaneous preparation.
+15. Post-exam assignments from the same course wait until required prep is actually complete.
+16. Multiple same-day blocks retain normal session length and required breaks.
+17. The one-hour buffer remains unused under normal load and is consumed by overdue or 48-hour work.
+18. Flexible goals yield before required academics.
+19. Extra focus capacity is never used without permission and never silently reduces sleep.
+20. Preferred sleep may reduce to the configured minimum with a visible explanation.
+21. An impossible plan drops the least-important academic item and reports the exact shortfall.
+22. A generated or recalculated proposal never changes the accepted schedule before confirmation.
