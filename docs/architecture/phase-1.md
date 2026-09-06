@@ -71,7 +71,13 @@ Phase 1 exposes authentication, persistent planning preferences, and user-scoped
 - Every user-owned query is scoped by the authenticated user
 - Cross-user access returns `NOT_FOUND` to avoid confirming resource existence
 
-Password reset and email delivery are intentionally deferred until a local email-capture service and expiry workflow are implemented together.
+Password reset issues a single-use link over email:
+
+- Random 384-bit reset tokens, stored only as SHA-256 digests, like session tokens
+- One hour to use a link, and asking again inside a minute reuses the outstanding one
+- The request endpoint answers the same way for a registered and an unknown address, so it cannot be used to discover who has an account
+- Confirming a reset ends every session and voids every other outstanding link, because a reset is how someone recovers an account they may have lost control of
+- Delivery is plain SMTP, which a local capture service such as Mailpit stands in for during development; outside production an undeliverable message is logged rather than lost
 
 ## Data integrity
 

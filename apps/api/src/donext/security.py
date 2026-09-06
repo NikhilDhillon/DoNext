@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 
 from pwdlib import PasswordHash
 
+from donext.config import get_settings
+
 password_hash = PasswordHash.recommended()
 
 
@@ -18,6 +20,12 @@ def verify_password(password: str, encoded_password: str) -> bool:
 def create_session_token() -> tuple[str, str, datetime]:
     token = secrets.token_urlsafe(48)
     return token, digest_token(token), datetime.now(UTC) + timedelta(days=30)
+
+
+def create_password_reset_token() -> tuple[str, str, datetime]:
+    token = secrets.token_urlsafe(48)
+    ttl = timedelta(minutes=get_settings().password_reset_ttl_minutes)
+    return token, digest_token(token), datetime.now(UTC) + ttl
 
 
 def digest_token(token: str) -> str:

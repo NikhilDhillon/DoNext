@@ -187,6 +187,9 @@ class User(UuidTimestampMixin, Base):
     preferences: Mapped["UserPreference | None"] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
     )
+    password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class AuthSession(UuidTimestampMixin, Base):
@@ -199,6 +202,19 @@ class AuthSession(UuidTimestampMixin, Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
     user: Mapped[User] = relationship(back_populates="sessions")
+
+
+class PasswordResetToken(UuidTimestampMixin, Base):
+    __tablename__ = "password_reset_tokens"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="password_reset_tokens")
 
 
 class UserPreference(UuidTimestampMixin, Base):

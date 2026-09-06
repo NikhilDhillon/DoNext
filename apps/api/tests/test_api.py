@@ -1,10 +1,12 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from donext.database import Base
+from donext.models import AuthSession, PasswordResetToken
 
 
 def register(client: TestClient, email: str = "nikhil@example.com") -> dict[str, str]:
@@ -19,6 +21,11 @@ def register(client: TestClient, email: str = "nikhil@example.com") -> dict[str,
     )
     assert response.status_code == 201
     return response.json()
+
+
+def reset_token_from(body: str) -> str:
+    link = next(word for word in body.split() if "/reset-password?" in word)
+    return parse_qs(urlparse(link).query)["token"][0]
 
 
 def create_semester(client: TestClient) -> dict[str, str]:
@@ -64,6 +71,113 @@ def test_authentication_lifecycle(client: TestClient) -> None:
         json={"email": "nikhil@example.com", "password": "a-secure-local-password"},
     )
     assert login.status_code == 200
+
+
+def test_password_reset_lets_a_locked_out_student_back_in(
+    client: TestClient, db_session: Session, sent_email: list[tuple[str, str, str]]
+) -> None:
+    register(client)
+    client.post("/api/v1/auth/logout")
+
+    requested = client.post("/api/v1/auth/password-reset", json={"email": "NIKHIL@example.com"})
+    assert requested.status_code == 202
+    recipient, subject, body = sent_email[-1]
+    assert recipient == "nikhil@example.com"
+    assert subject == "Reset your DoNext password"
+    token = reset_token_from(body)
+
+    confirmed = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={"token": token, "password": "a-second-secure-password"},
+    )
+    assert confirmed.status_code == 200
+
+    stale = client.post(
+        "/api/v1/auth/login",
+        json={"email": "nikhil@example.com", "password": "a-secure-local-password"},
+    )
+    assert stale.status_code == 401
+
+    signed_in = client.post(
+        "/api/v1/auth/login",
+        json={"email": "nikhil@example.com", "password": "a-second-secure-password"},
+    )
+    assert signed_in.status_code == 200
+    assert client.get("/api/v1/auth/me").status_code == 200
+
+
+def test_password_reset_does_not_reveal_who_has_an_account(
+    client: TestClient, sent_email: list[tuple[str, str, str]]
+) -> None:
+    register(client)
+    known = client.post("/api/v1/auth/password-reset", json={"email": "nikhil@example.com"})
+    unknown = client.post("/api/v1/auth/password-reset", json={"email": "nobody@example.com"})
+
+    assert known.status_code == unknown.status_code == 202
+    assert known.json() == unknown.json()
+    assert [recipient for recipient, _, _ in sent_email] == ["nikhil@example.com"]
+
+
+def test_a_reset_link_works_once_and_ends_every_session(
+    client: TestClient, db_session: Session, sent_email: list[tuple[str, str, str]]
+) -> None:
+    register(client)
+    client.post("/api/v1/auth/password-reset", json={"email": "nikhil@example.com"})
+    token = reset_token_from(sent_email[-1][2])
+
+    # The student is still signed in on this client while the reset runs.
+    assert client.get("/api/v1/auth/me").status_code == 200
+    assert (
+        client.post(
+            "/api/v1/auth/password-reset/confirm",
+            json={"token": token, "password": "a-second-secure-password"},
+        ).status_code
+        == 200
+    )
+    assert client.get("/api/v1/auth/me").status_code == 401
+    assert db_session.scalar(select(func.count()).select_from(AuthSession)) == 0
+
+    replayed = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={"token": token, "password": "a-third-secure-password"},
+    )
+    assert replayed.status_code == 400
+    assert replayed.json()["error"]["code"] == "INVALID_TOKEN"
+
+
+def test_an_expired_reset_link_is_refused(
+    client: TestClient, db_session: Session, sent_email: list[tuple[str, str, str]]
+) -> None:
+    register(client)
+    client.post("/api/v1/auth/password-reset", json={"email": "nikhil@example.com"})
+    token = reset_token_from(sent_email[-1][2])
+
+    reset = db_session.scalar(select(PasswordResetToken))
+    assert reset is not None
+    reset.expires_at = datetime.now(UTC) - timedelta(minutes=1)
+    db_session.commit()
+
+    expired = client.post(
+        "/api/v1/auth/password-reset/confirm",
+        json={"token": token, "password": "a-second-secure-password"},
+    )
+    assert expired.status_code == 400
+    assert (
+        client.post(
+            "/api/v1/auth/login",
+            json={"email": "nikhil@example.com", "password": "a-secure-local-password"},
+        ).status_code
+        == 200
+    )
+
+
+def test_a_second_reset_request_is_held_back_by_the_cooldown(
+    client: TestClient, sent_email: list[tuple[str, str, str]]
+) -> None:
+    register(client)
+    client.post("/api/v1/auth/password-reset", json={"email": "nikhil@example.com"})
+    client.post("/api/v1/auth/password-reset", json={"email": "nikhil@example.com"})
+    assert len(sent_email) == 1
 
 
 def test_account_deletion_requires_password_and_removes_all_data(

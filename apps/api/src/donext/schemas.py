@@ -46,6 +46,15 @@ class UserLogin(ApiModel):
     password: str = Field(min_length=1, max_length=128)
 
 
+class PasswordResetRequest(ApiModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(ApiModel):
+    token: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=12, max_length=128)
+
+
 class AccountDelete(ApiModel):
     password: str = Field(min_length=1, max_length=128)
     confirmation: Literal["DELETE"]

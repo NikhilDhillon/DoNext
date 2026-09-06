@@ -49,6 +49,19 @@ def disable_live_openai_calls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
+def sent_email(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, str, str]]:
+    """Capture outbound mail rather than opening an SMTP connection."""
+    delivered: list[tuple[str, str, str]] = []
+
+    def capture(recipient: str, subject: str, body: str) -> bool:
+        delivered.append((recipient, subject, body))
+        return True
+
+    monkeypatch.setattr("donext.routers.auth.send_email", capture)
+    return delivered
+
+
+@pytest.fixture
 def client() -> Generator[TestClient]:
     Base.metadata.drop_all(test_engine)
     Base.metadata.create_all(test_engine)
