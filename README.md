@@ -75,11 +75,15 @@ source .venv/bin/activate
 python -m pip install -e 'apps/api[dev]'
 ```
 
-If Docker is installed, start PostgreSQL and Redis:
+If Docker is installed, start PostgreSQL, Redis, and Mailpit:
 
 ```bash
 docker compose --env-file .env -f infrastructure/docker-compose.yml up -d
 ```
+
+Mailpit catches the mail the API sends in development, including password
+reset links. Read them at http://localhost:8025. Without it, a reset link is
+written to the API log instead, so the flow still works outside Docker.
 
 If PostgreSQL is already running locally, Docker is unnecessary. Create the local application role and database from an administrator account:
 
