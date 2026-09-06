@@ -83,7 +83,7 @@ export function AuthForm({ mode }: { mode: AuthMode }) {
           </button>
         </span>
       </label>
-      {mode === "login" ? <p className="forgot-link">Password reset is coming after local authentication.</p> : null}
+      {mode === "login" ? <Link className="forgot-link" href="/forgot-password">Forgot your password?</Link> : null}
       {error && <p className="form-error" role="alert">{error}</p>}
       <button className="primary-button auth-submit" type="submit" disabled={submitting}>
         {submitting ? <LoaderCircle className="spin" size={18} /> : <ArrowRight size={18} />}
