@@ -1,5 +1,4 @@
 import { Check, MoonStar, ShieldCheck, Sparkles } from "lucide-react";
-import Link from "next/link";
 
 import { Brand } from "@/components/brand";
 
@@ -7,7 +6,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
   return (
     <main className="auth-layout">
       <section className="auth-story">
-        <div className="auth-story-top"><Brand /><Link href="/">Back to overview</Link></div>
+        <div className="auth-story-top"><Brand href="/login" /></div>
         <div className="auth-story-copy">
           <span className="story-kicker"><Sparkles size={15} /> A plan that tells the truth</span>
           <h1>Make progress without scheduling every minute.</h1>
