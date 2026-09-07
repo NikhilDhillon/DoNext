@@ -3,7 +3,9 @@
 import { LoaderCircle, Save, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { FormEvent } from "react";
+import "./schedule-block-editor.css";
 
+import { focusIntervalsForDate } from "@/components/draft-calendar/lib";
 import { FormDialog } from "@/components/form-dialog";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
@@ -134,11 +136,11 @@ export function ScheduleBlockEditor({
       description={duplicateOf
         ? "Choose a new time for this copy before adding it to the draft."
         : proposalId
-          ? "Adjust this draft before accepting it."
+          ? "Choose one day and a time within your saved focus hours. Saved to this draft until you accept it."
           : "Choose the exact time yourself."}
       onClose={close}
     >
-      <form className="onboarding-form planner-block-form" key={formKey} onSubmit={submit}>
+      <form className="onboarding-form planner-block-form" key={formKey} onSubmit={submit} onChange={() => setError(null)}>
         <label>
           <span>Title</span>
           <input name="title" defaultValue={title} placeholder="Focused work" required />
@@ -155,7 +157,15 @@ export function ScheduleBlockEditor({
             ))}
           </select>
         </label>
-        <div className="form-row">
+        {proposalId ? (
+          <DraftBlockTimes
+            key={formKey}
+            startValue={startValue}
+            endValue={endValue}
+            availability={availability.data}
+            availabilityError={availability.error}
+          />
+        ) : <div className="form-row">
           <label>
             <span>Starts</span>
             <input name="start_at" type="datetime-local" defaultValue={startValue} required />
@@ -164,7 +174,7 @@ export function ScheduleBlockEditor({
             <span>Ends</span>
             <input name="end_at" type="datetime-local" defaultValue={endValue} required />
           </label>
-        </div>
+        </div>}
         <div className="form-row">
           <label>
             <span>Type</span>
@@ -199,6 +209,88 @@ export function ScheduleBlockEditor({
   );
 }
 
+function DraftBlockTimes({ startValue, endValue, availability, availabilityError }: {
+  startValue: string;
+  endValue: string;
+  availability: AvailabilityWindow[] | null;
+  availabilityError: string | null;
+}) {
+  const [day, setDay] = useState(startValue.slice(0, 10));
+  const [start, setStart] = useState(startValue.slice(11, 16));
+  const [end, setEnd] = useState(endValue.slice(11, 16));
+  const intervals = day ? focusIntervalsForDate(day, availability ?? []) : [];
+  const startMinute = minutesOfDay(start);
+  const endMinute = end === "00:00" ? 1440 : minutesOfDay(end);
+  const duration = endMinute - startMinute;
+  const complete = Boolean(day && start && end);
+  const validation = availabilityError
+    ? "Focus hours could not load. Reopen this form to try again."
+    : !availability
+      ? "Wait for your focus hours to load."
+      : !complete
+        ? "Choose a date, start time, and end time."
+        : duration <= 0
+          ? "End time must be later than start time on this day."
+          : !intervals.some(([from, to]) => from <= startMinute && endMinute <= to)
+            ? intervals.length
+              ? "Choose a start and end within one of the focus windows above."
+              : "No focus hours on this day. Choose another date or update your focus hours in Settings."
+            : "";
+  const nextDay = day ? new Date(`${day}T12:00:00`) : null;
+  nextDay?.setDate(nextDay.getDate() + 1);
+  const endDay = end === "00:00" && nextDay ? localDateValue(nextDay) : day;
+
+  return (
+    <fieldset className="block-time-fields">
+      <legend>When</legend>
+      <label>
+        <span>Date <small>One day only</small></span>
+        <input name="block_date" type="date" value={day} onChange={(event) => setDay(event.target.value)} required aria-describedby="block-focus-hours" />
+      </label>
+      <p className="block-focus-hours" id="block-focus-hours" aria-live="polite">
+        {availabilityError ? "Saved focus hours are unavailable." : !availability ? "Loading saved focus hours…" : !day ? "Choose a date to see your focus hours." : intervals.length
+          ? `Focus hours: ${intervals.map(([from, to]) => `${formatClock(from)}–${formatClock(to)}`).join(" · ")}`
+          : "No saved focus hours for this day."}
+      </p>
+      <div className="form-row">
+        <label>
+          <span>Start time</span>
+          <input name="block_start_time" type="time" value={start} onChange={(event) => setStart(event.target.value)} required aria-describedby="block-focus-hours block-time-summary" />
+        </label>
+        <label>
+          <span>End time</span>
+          <input name="block_end_time" type="time" value={end} onChange={(event) => setEnd(event.target.value)} required
+            ref={(input) => { input?.setCustomValidity(validation); }}
+            aria-invalid={Boolean(validation && availability && complete)} aria-describedby="block-focus-hours block-time-summary" />
+        </label>
+      </div>
+      <p className={`block-time-summary${validation && availability ? " invalid" : ""}`} id="block-time-summary" aria-live="polite">
+        {validation || `${formatDuration(duration)} · ${end === "00:00" ? "Ends at midnight, at the end of this day." : "Starts and ends on the selected day."}`}
+      </p>
+      <input name="start_at" type="hidden" value={`${day}T${start}`} />
+      <input name="end_at" type="hidden" value={`${endDay}T${end}`} />
+    </fieldset>
+  );
+}
+
+function minutesOfDay(value: string) {
+  const [hours, minutes] = value.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function formatClock(minutes: number) {
+  if (minutes === 1440) return "midnight";
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return `${hours % 12 || 12}${remainder ? `:${String(remainder).padStart(2, "0")}` : ""} ${hours < 12 ? "AM" : "PM"}`;
+}
+
+function formatDuration(minutes: number) {
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return [hours ? `${hours} hr` : "", remainder ? `${remainder} min` : ""].filter(Boolean).join(" ");
+}
+
 function toDateTimeInput(value: string) {
   const date = new Date(value);
   const offset = date.getTimezoneOffset() * 60_000;
@@ -208,23 +300,22 @@ function toDateTimeInput(value: string) {
 function defaultTimes(dateValue: string, availability: AvailabilityWindow[]) {
   const now = new Date();
   const today = localDateValue(now);
-  const weekdayIndex = (new Date(`${dateValue}T12:00:00Z`).getUTCDay() + 6) % 7;
-  const firstWindow = availability
-    .filter((window) => window.day_of_week === weekdayIndex && window.type !== "unavailable")
-    .sort((first, second) => first.start_time.localeCompare(second.start_time))[0];
+  const firstWindow = focusIntervalsForDate(dateValue, availability)[0];
   const start = firstWindow
-    ? new Date(`${dateValue}T${firstWindow.start_time.slice(0, 5)}:00`)
+    ? new Date(`${dateValue}T00:00:00`)
     : dateValue === today
       ? new Date(now)
       : new Date(`${dateValue}T09:00:00`);
+  if (firstWindow) start.setMinutes(firstWindow[0]);
   if (!firstWindow && dateValue === today) {
     start.setSeconds(0, 0);
     start.setMinutes(Math.ceil(start.getMinutes() / 30) * 30);
   }
   const preferredEnd = new Date(start.getTime() + 50 * 60_000);
   const windowEnd = firstWindow
-    ? new Date(`${dateValue}T${firstWindow.end_time.slice(0, 5)}:00`)
+    ? new Date(`${dateValue}T00:00:00`)
     : null;
+  if (windowEnd && firstWindow) windowEnd.setMinutes(firstWindow[1]);
   const end = windowEnd && windowEnd < preferredEnd ? windowEnd : preferredEnd;
   return { start: toDateTimeInput(start.toISOString()), end: toDateTimeInput(end.toISOString()) };
 }

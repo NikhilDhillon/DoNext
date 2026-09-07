@@ -1,0 +1,34 @@
+.onboarding-form.planner-block-form {
+  border: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+.block-time-fields {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px;
+}
+
+.block-time-fields legend {
+  padding: 0 6px;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.block-time-fields .block-focus-hours,
+.block-time-fields .block-time-summary {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.block-focus-hours { color: var(--faint); }
+.block-time-summary { color: var(--ok-text); }
+.block-time-summary.invalid { color: var(--warn-text); }
