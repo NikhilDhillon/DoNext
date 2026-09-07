@@ -82,7 +82,7 @@ export function SemesterPlanner() {
           <div className="section-heading"><div><h2>Important dates</h2><p>Confirmed milestones shaping remaining demand</p></div><span className="muted-label">{data.deadlines.length} total</span></div>
           {data.deadlines.length ? (
             <div className="deadline-list">
-              {data.deadlines.slice(0, 8).map((deadline) => {
+              {data.deadlines.map((deadline) => {
                 return (
                   <article key={deadline.id}>
                     <time dateTime={deadline.due_at}><strong>{datePart(deadline.due_at, "day")}</strong><span>{datePart(deadline.due_at, "month")}</span></time>
