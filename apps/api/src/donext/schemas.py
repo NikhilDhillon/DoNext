@@ -421,7 +421,10 @@ class CourseGradingRead(ApiModel):
 
 class AcademicItemUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    item_type: AcademicItemType | None = None
     due_at: datetime | None = None
+    # Effort lives on the linked planning task, but it is edited beside the date it belongs to.
+    estimated_minutes: int | None = Field(default=None, ge=15, le=10080, multiple_of=5)
     direct_weight_percent: float | None = Field(default=None, ge=0, le=100)
     relative_weight_percent: float | None = Field(default=None, ge=0, le=100)
     points_possible: float | None = Field(default=None, gt=0)
@@ -911,12 +914,16 @@ class PlanningEntryRead(ApiModel):
 class PlanningTaskRead(ApiModel):
     id: uuid.UUID
     name: str
+    status: TaskStatus
     remaining_minutes: int
     deadline_at: datetime | None
     priority: Priority
     intensity: Intensity
     course_code: str | None
     goal_name: str | None
+    # Set only for work tied to a graded item, so the calendar can tell an exam's due date from
+    # an ordinary assignment's without a second request.
+    item_type: AcademicItemType | None = None
 
 
 class PlanningCapacityRead(ApiModel):
@@ -940,6 +947,7 @@ class PlanningViewRead(ApiModel):
     timezone: str
     entries: list[PlanningEntryRead]
     days: list[PlanningDayRead]
+    deadlines: list[PlanningTaskRead]
     unscheduled_tasks: list[PlanningTaskRead]
     next_entry_id: str | None
     warnings: list[str]
@@ -962,9 +970,14 @@ class SemesterWeekRead(ApiModel):
 
 class SemesterDeadlineRead(ApiModel):
     id: uuid.UUID
+    # The list mixes graded course work with plain dated tasks; each is edited on its own route.
+    kind: Literal["academic_item", "task"]
     name: str
     due_at: datetime
+    course_id: uuid.UUID | None
     course_code: str | None
+    item_type: AcademicItemType | None
+    estimated_minutes: int | None
     remaining_minutes: int | None
     weight_percent: float | None
 

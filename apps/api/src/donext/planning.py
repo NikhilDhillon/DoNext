@@ -296,6 +296,17 @@ def build_planning_view(
     course_codes = {course.id: course.code for course in courses}
     goals = list(db.scalars(select(Goal).where(Goal.user_id == user.id)))
     goal_names = {goal.id: goal.name for goal in goals}
+    # Only for telling an exam's deadline apart from an assignment's on the calendar; most tasks
+    # carry no academic item at all, so the lookup stays empty for them.
+    academic_item_ids = {task.academic_item_id for task in all_tasks if task.academic_item_id}
+    item_type_by_academic_item_id = {
+        item.id: item.item_type
+        for item in (
+            db.scalars(select(AcademicItem).where(AcademicItem.id.in_(academic_item_ids)))
+            if academic_item_ids
+            else []
+        )
+    }
     entries = planner_entries(occurrences, blocks, tasks, course_codes, timezone)
     windows = list(
         db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == user.id))
@@ -377,20 +388,28 @@ def build_planning_view(
             )
         )
     )
-    unscheduled = [
+    planning_tasks = [
         PlanningTaskRead(
             id=task.id,
             name=task.name,
+            status=task.status,
             remaining_minutes=task.remaining_minutes,
             deadline_at=aware(task.deadline_at).astimezone(timezone) if task.deadline_at else None,
             priority=task.priority,
             intensity=task.intensity,
             course_code=course_codes.get(task.course_id) if task.course_id else None,
             goal_name=goal_names.get(task.goal_id) if task.goal_id else None,
+            item_type=(
+                item_type_by_academic_item_id.get(task.academic_item_id)
+                if task.academic_item_id
+                else None
+            ),
         )
         for task in all_tasks
-        if task.id not in scheduled_task_ids
     ]
+    deadlines = [task for task in planning_tasks if task.deadline_at is not None]
+    unscheduled = [task for task in planning_tasks if task.id not in scheduled_task_ids]
+    deadlines.sort(key=lambda task: (task.deadline_at, task.name))
     unscheduled.sort(
         key=lambda task: (
             task.deadline_at is None,
@@ -406,6 +425,7 @@ def build_planning_view(
         timezone=user.timezone,
         entries=entries,
         days=days,
+        deadlines=deadlines,
         unscheduled_tasks=unscheduled,
         next_entry_id=next_entry.id if next_entry else None,
         warnings=list(dict.fromkeys(warnings)),
@@ -455,9 +475,13 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
         deadlines.append(
             SemesterDeadlineRead(
                 id=item.id,
+                kind="academic_item",
                 name=item.name,
                 due_at=item_due_at,
+                course_id=item.course_id,
                 course_code=course_codes.get(item.course_id),
+                item_type=item.item_type,
+                estimated_minutes=task.estimated_minutes if task else None,
                 remaining_minutes=task.remaining_minutes if task else None,
                 weight_percent=item.direct_weight_percent,
             )
@@ -471,9 +495,13 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
         deadlines.append(
             SemesterDeadlineRead(
                 id=task.id,
+                kind="task",
                 name=task.name,
                 due_at=task_due_at,
+                course_id=task.course_id,
                 course_code=course_codes.get(task.course_id) if task.course_id else None,
+                item_type=None,
+                estimated_minutes=task.estimated_minutes,
                 remaining_minutes=task.remaining_minutes,
                 weight_percent=None,
             )

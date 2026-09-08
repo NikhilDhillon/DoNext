@@ -416,3 +416,123 @@ def test_points_nested_extra_credit_and_unknown_weights(client: TestClient) -> N
     )
     assert by_name["Unconfirmed assessment"]["effective_weight_percent"] == 0
     assert by_name["Unconfirmed assessment"]["weight_origin"] == "unknown"
+
+
+def test_academic_item_edits_reach_the_linked_task(client: TestClient) -> None:
+    register(client)
+    course = create_course(client)
+    created = client.post(
+        f"/api/v1/courses/{course['id']}/academic-items",
+        json={
+            "item_type": "assignment",
+            "name": "Assignment 1",
+            "due_at": datetime(2026, 9, 10, 17, tzinfo=UTC).isoformat(),
+            "estimated_minutes": 180,
+        },
+    )
+    assert created.status_code == 201
+    item = created.json()
+
+    updated = client.patch(
+        f"/api/v1/academic-items/{item['id']}",
+        json={
+            "name": "Midterm 1",
+            "item_type": "midterm",
+            "due_at": datetime(2026, 10, 2, 12, tzinfo=UTC).isoformat(),
+            "direct_weight_percent": 15,
+            "estimated_minutes": 300,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["item_type"] == "midterm"
+    assert updated.json()["direct_weight_percent"] == 15
+
+    task = next(
+        value
+        for value in client.get("/api/v1/tasks").json()
+        if value["academic_item_id"] == item["id"]
+    )
+    assert task["name"] == "Midterm 1"
+    assert task["estimated_minutes"] == 300
+    assert task["remaining_minutes"] == 300
+    assert task["deadline_at"].startswith("2026-10-02")
+
+
+def test_academic_item_resize_keeps_finished_work(client: TestClient) -> None:
+    register(client)
+    course = create_course(client)
+    item = client.post(
+        f"/api/v1/courses/{course['id']}/academic-items",
+        json={
+            "item_type": "assignment",
+            "name": "Assignment 1",
+            "due_at": datetime(2026, 9, 10, 17, tzinfo=UTC).isoformat(),
+            "estimated_minutes": 240,
+        },
+    ).json()
+    task_id = item["task_id"]
+    progress = client.patch(f"/api/v1/tasks/{task_id}", json={"remaining_minutes": 90})
+    assert progress.status_code == 200
+
+    client.patch(f"/api/v1/academic-items/{item['id']}", json={"estimated_minutes": 300})
+
+    task = client.get(f"/api/v1/tasks/{task_id}").json()
+    assert task["estimated_minutes"] == 300
+    # 150 minutes were already done, so only the rest is resized.
+    assert task["remaining_minutes"] == 150
+
+
+def test_academic_item_deadline_must_stay_inside_the_semester(client: TestClient) -> None:
+    register(client)
+    course = create_course(client)
+    item = client.post(
+        f"/api/v1/courses/{course['id']}/academic-items",
+        json={
+            "item_type": "assignment",
+            "name": "Assignment 1",
+            "due_at": datetime(2026, 9, 10, 17, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+
+    rejected = client.patch(
+        f"/api/v1/academic-items/{item['id']}",
+        json={"due_at": datetime(2027, 3, 1, 17, tzinfo=UTC).isoformat()},
+    )
+    assert rejected.status_code == 422
+    assert "outside" in rejected.json()["error"]["message"]
+
+
+def test_deleting_an_academic_item_removes_its_task(client: TestClient) -> None:
+    register(client)
+    course = create_course(client)
+    item = client.post(
+        f"/api/v1/courses/{course['id']}/academic-items",
+        json={
+            "item_type": "assignment",
+            "name": "Assignment 1",
+            "due_at": datetime(2026, 9, 10, 17, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+
+    assert client.delete(f"/api/v1/academic-items/{item['id']}").status_code == 204
+    assert client.get(f"/api/v1/tasks/{item['task_id']}").status_code == 404
+    assert all(
+        value["academic_item_id"] != item["id"] for value in client.get("/api/v1/tasks").json()
+    )
+
+
+def test_academic_item_delete_is_user_scoped(client: TestClient) -> None:
+    register(client, "first-delete@example.com")
+    course = create_course(client)
+    item = client.post(
+        f"/api/v1/courses/{course['id']}/academic-items",
+        json={
+            "item_type": "assignment",
+            "name": "Assignment 1",
+            "due_at": datetime(2026, 9, 10, 17, tzinfo=UTC).isoformat(),
+        },
+    ).json()
+    client.post("/api/v1/auth/logout")
+    register(client, "second-delete@example.com")
+
+    assert client.delete(f"/api/v1/academic-items/{item['id']}").status_code == 404

@@ -554,6 +554,23 @@ def import_course_outline(
     )
 
 
+def _require_deadline_in_semester(
+    db: DbSession,
+    current_user: CurrentUser,
+    course_id: uuid.UUID,
+    due_at: datetime,
+) -> None:
+    course = owned_course(db, current_user.id, course_id)
+    semester = owned_semester(db, current_user.id, course.semester_id)
+    due_date = aware(due_at).astimezone(resolve_timezone(current_user.timezone)).date()
+    if not semester.start_date <= due_date <= semester.end_date:
+        raise ApiError(
+            "VALIDATION_ERROR",
+            f"The deadline {due_date.isoformat()} is outside {semester.name}.",
+            422,
+        )
+
+
 @router.patch("/academic-items/{item_id}", response_model=AcademicItemRead)
 def update_academic_item(
     item_id: uuid.UUID,
@@ -563,12 +580,15 @@ def update_academic_item(
 ) -> AcademicItemRead:
     item = owned_academic_item(db, current_user.id, item_id)
     values = payload.model_dump(exclude_unset=True)
+    estimated_minutes = values.pop("estimated_minutes", None)
     possible = values.get("points_possible", item.points_possible)
     earned = values.get("points_earned", item.points_earned)
     if earned is not None and possible is None:
         raise ApiError("VALIDATION_ERROR", "Possible points are required for a grade.", 422)
     if earned is not None and possible is not None and earned > possible:
         raise ApiError("VALIDATION_ERROR", "Earned points cannot exceed possible points.", 422)
+    if values.get("due_at") is not None:
+        _require_deadline_in_semester(db, current_user, item.course_id, values["due_at"])
     for field, value in values.items():
         setattr(item, field, value)
     task = db.scalar(select(Task).where(Task.academic_item_id == item.id))
@@ -576,6 +596,12 @@ def update_academic_item(
         task.name = item.name
         task.deadline_at = item.due_at
         task.required = not item.extra_credit
+        if estimated_minutes is not None:
+            # Work already done stays done: only what is left to do is resized.
+            done = max(task.estimated_minutes - task.remaining_minutes, 0)
+            task.estimated_minutes = estimated_minutes
+            task.remaining_minutes = max(estimated_minutes - done, 0)
+            task.estimate_origin = EstimateOrigin.student_provided
     db.commit()
     db.refresh(item)
     return AcademicItemRead(
@@ -611,15 +637,7 @@ def create_academic_item(
     current_user: CurrentUser,
 ) -> AcademicItemRead:
     course = owned_course(db, current_user.id, course_id)
-    semester = owned_semester(db, current_user.id, course.semester_id)
-    timezone = resolve_timezone(current_user.timezone)
-    due_date = aware(payload.due_at).astimezone(timezone).date()
-    if not semester.start_date <= due_date <= semester.end_date:
-        raise ApiError(
-            "VALIDATION_ERROR",
-            f"The deadline {due_date.isoformat()} is outside {semester.name}.",
-            422,
-        )
+    _require_deadline_in_semester(db, current_user, course.id, payload.due_at)
     item = AcademicItem(
         user_id=current_user.id,
         course_id=course.id,
@@ -692,6 +710,16 @@ def _activation_task(db: DbSession, user_id: uuid.UUID, item: AcademicItem) -> T
     if task is None:
         raise ApiError("NOT_FOUND", "The academic item has no planning task.", 404)
     return task
+
+
+@router.delete("/academic-items/{item_id}", status_code=204)
+def delete_academic_item(item_id: uuid.UUID, db: DbSession, current_user: CurrentUser) -> None:
+    item = owned_academic_item(db, current_user.id, item_id)
+    task = db.scalar(select(Task).where(Task.academic_item_id == item.id))
+    if task:
+        db.delete(task)
+    db.delete(item)
+    db.commit()
 
 
 @router.put("/academic-items/{item_id}/activation", response_model=TaskRead)
