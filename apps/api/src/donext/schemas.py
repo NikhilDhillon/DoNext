@@ -830,6 +830,8 @@ class ScheduleProposalRead(ScheduleRead):
     stale: bool
     generation_summary: ProposalSummaryRead
     revision_feedback: dict[str, object] | None = None
+    # Whether the draft this one revised is still on hand to be put back.
+    can_undo_revision: bool = False
 
 
 class ExtraFocusDecision(ApiModel):

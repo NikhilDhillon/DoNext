@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
-from test_proposals import proposal_fixture
+from test_proposals import local_start_hours, proposal_fixture
 
 from donext.schedule_revision import RevisionInterpretation, ScheduleRevisionPolicy
 
@@ -22,9 +22,11 @@ def test_forgotten_feedback_does_not_shape_new_drafts_for_the_same_dates(
     original = client.post(endpoint).json()
     assert original["generation_summary"]["scheduled_minutes"] == 100
 
-    # Make the feedback's effect unambiguous: it leaves no time for the task.
+    # Make the feedback's effect unambiguous: it covers the working hours the fixture makes
+    # available, so nothing it shapes can sit where this draft's blocks sit now. It has to leave
+    # the day some room - feedback that plans nothing at all is refused rather than applied.
     policy = ScheduleRevisionPolicy.model_validate(
-        {"avoid_time_ranges": [{"start": "00:00", "end": "23:59"}]}
+        {"avoid_time_ranges": [{"start": "08:00", "end": "17:00"}]}
     )
     with monkeypatch.context() as interpreter:
         interpreter.setattr(
@@ -39,7 +41,7 @@ def test_forgotten_feedback_does_not_shape_new_drafts_for_the_same_dates(
     affected = response.json()
     if regenerate_before_forgetting:
         affected = client.post(endpoint).json()
-    assert affected["generation_summary"]["scheduled_minutes"] == 0
+    assert min(local_start_hours(affected["blocks"])) >= 17
 
     assert client.delete("/api/v1/preferences/remembered-schedule-preferences").status_code == 204
     assert client.get("/api/v1/preferences").json()["remembered_schedule_preferences"] == []
@@ -55,6 +57,7 @@ def test_forgotten_feedback_does_not_shape_new_drafts_for_the_same_dates(
     assert fresh["horizon_start"] == affected["horizon_start"]
     assert fresh["horizon_end"] == affected["horizon_end"]
     assert fresh["generation_summary"]["scheduled_minutes"] == 100
+    assert min(local_start_hours(fresh["blocks"])) < 17
     assert fresh["revision_feedback"] is None
     assert fresh["revision_of_proposal_id"] is None
     assert fresh["stale"] is False

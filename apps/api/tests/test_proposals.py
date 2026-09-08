@@ -20,6 +20,17 @@ def test_solver_timeout_warning_distinguishes_complete_and_partial_drafts() -> N
     assert _solver_timeout_warning(has_unscheduled=True) == PARTIAL_TIMEOUT_WARNING
 
 
+def local_start_hours(blocks: list[dict[str, object]]) -> list[int]:
+    """The hour each block starts at in the student's own day, which is what a range is about."""
+    return [
+        datetime.fromisoformat(str(block["start_at"]))
+        .replace(tzinfo=ZoneInfo("UTC"))
+        .astimezone(ZoneInfo("America/Vancouver"))
+        .hour
+        for block in blocks
+    ]
+
+
 def proposal_fixture(client: TestClient) -> tuple[dict[str, str], dict[str, str]]:
     register(client)
     semester = create_semester(client)
@@ -65,6 +76,61 @@ def test_proposal_is_editable_and_acceptance_is_atomic(client: TestClient) -> No
     schedule = client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()
     assert schedule["id"] == proposal["id"]
     assert any(item["title"] == "Reviewed graph session" for item in schedule["blocks"])
+
+
+def test_generating_a_default_draft_discards_user_block_changes(client: TestClient) -> None:
+    semester, _ = proposal_fixture(client)
+    original = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    original_block = original["blocks"][0]
+    original_signature = sorted(
+        (
+            block["title"],
+            block["start_at"],
+            block["end_at"],
+            block["block_type"],
+            block["locked"],
+        )
+        for block in original["blocks"]
+    )
+
+    deleted = client.delete(
+        f"/api/v1/schedule-proposals/{original['id']}/blocks/{original_block['id']}"
+    )
+    assert deleted.status_code == 204
+    start_at = datetime.fromisoformat(original_block["start_at"]).replace(tzinfo=ZoneInfo("UTC"))
+    end_at = datetime.fromisoformat(original_block["end_at"]).replace(tzinfo=ZoneInfo("UTC"))
+    added = client.post(
+        f"/api/v1/schedule-proposals/{original['id']}/blocks",
+        json={
+            "title": "User-added study block",
+            "start_at": start_at.isoformat(),
+            "end_at": end_at.isoformat(),
+            "block_type": "focus",
+            "locked": True,
+        },
+    )
+    assert added.status_code == 201, added.text
+    assert added.json()["source"] == "proposal_edit"
+
+    reset = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals")
+
+    assert reset.status_code == 201
+    reset_body = reset.json()
+    assert reset_body["id"] != original["id"]
+    assert "User-added study block" not in {block["title"] for block in reset_body["blocks"]}
+    assert (
+        sorted(
+            (
+                block["title"],
+                block["start_at"],
+                block["end_at"],
+                block["block_type"],
+                block["locked"],
+            )
+            for block in reset_body["blocks"]
+        )
+        == original_signature
+    )
 
 
 def test_proposal_blocks_stay_inside_saved_focus_hours(client: TestClient) -> None:

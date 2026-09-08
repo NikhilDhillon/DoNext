@@ -184,6 +184,27 @@ def owned_proposal(db: DbSession, user_id: uuid.UUID, proposal_id: uuid.UUID) ->
     return proposal
 
 
+def undo_target_id(
+    db: DbSession, user_id: uuid.UUID, proposal: ScheduleVersion
+) -> uuid.UUID | None:
+    """The draft this revision replaced, while it can still be put back.
+
+    A revision rejects the draft it was built from rather than deleting it, so the pre-feedback
+    draft is normally still there. It is gone only once something else has claimed it - a fresh
+    generation superseding it, or an accept - and undo has to be honest about that before it is
+    offered.
+    """
+    if proposal.revision_of_proposal_id is None:
+        return None
+    return db.scalar(
+        select(ScheduleVersion.id).where(
+            ScheduleVersion.id == proposal.revision_of_proposal_id,
+            ScheduleVersion.user_id == user_id,
+            ScheduleVersion.status == ScheduleStatus.rejected,
+        )
+    )
+
+
 def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> ScheduleProposalRead:
     summary = ProposalSummaryRead.model_validate(proposal.generation_summary or {})
     return ScheduleProposalRead(
@@ -209,6 +230,10 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
         ),
         generation_summary=summary,
         revision_feedback=proposal.revision_feedback,
+        can_undo_revision=(
+            proposal.status == ScheduleStatus.proposed
+            and undo_target_id(db, user.id, proposal) is not None
+        ),
     )
 
 
@@ -1255,6 +1280,7 @@ def revise_proposal(
             "DoNext could not interpret that timing feedback. Your current draft is unchanged.",
             503,
         )
+    remembered_before = cast(dict[str, object] | None, preferences.schedule_revision_policy)
     if payload.remember:
         preferences.schedule_revision_policy = interpretation.policy.model_dump(mode="json")
         db.flush()
@@ -1265,12 +1291,78 @@ def revise_proposal(
         revision_of=previous,
         interpretation=interpretation,
     )
+    if _generated_blocks(previous) and not _generated_blocks(revised):
+        # A revision that plans nothing is a misread note, not a preference. Rolling back is what
+        # keeps it from sticking: it discards the empty draft, leaves the draft the student was
+        # looking at in place, and unwrites the remembered policy that would otherwise have gone
+        # on emptying every later draft with no obvious way back.
+        db.rollback()
+        raise ApiError(
+            "REVISION_LEFT_NO_ROOM",
+            "That feedback would leave nothing scheduled at all, so your current draft is "
+            "unchanged. Try saying it a different way.",
+            422,
+        )
     revised_feedback = dict(revised.revision_feedback or {})
     revised_feedback["changes"] = _revision_change_summary(previous, revised)
+    if payload.remember:
+        # What remembering overwrote, so undoing this revision can put it back. Without it the
+        # draft would return while the rule that reshaped it kept shaping every later draft.
+        revised_feedback["remembered"] = True
+        revised_feedback["remembered_before"] = remembered_before
     revised.revision_feedback = revised_feedback
     previous.status = ScheduleStatus.rejected
     db.commit()
     return proposal_read(db, current_user, owned_proposal(db, current_user.id, revised.id))
+
+
+@router.post(
+    "/schedule-proposals/{proposal_id}/undo-revision",
+    response_model=ScheduleProposalRead,
+)
+def undo_proposal_revision(
+    proposal_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> ScheduleProposalRead:
+    """Put back the draft that stood before this feedback was interpreted.
+
+    A revision keeps the draft it replaced, so undoing is a status swap rather than another solve:
+    the student gets back the placements they were already looking at, not a fresh interpretation
+    that could land somewhere else again. Anything they changed by hand after the revision belongs
+    to the revised draft and goes with it, which is what the confirmation on the way in is for.
+    """
+    revised = owned_proposal(db, current_user.id, proposal_id)
+    target_id = undo_target_id(db, current_user.id, revised)
+    if target_id is None:
+        raise ApiError(
+            "REVISION_NOT_UNDOABLE",
+            "The draft this feedback replaced is no longer available.",
+            409,
+        )
+    previous = db.get(ScheduleVersion, target_id)
+    if previous is None:  # pragma: no cover - the id was read back in this same session
+        raise ApiError("NOT_FOUND", "Schedule proposal not found.", 404)
+    _restore_remembered_policy(db, current_user.id, revised)
+    revised.status = ScheduleStatus.rejected
+    previous.status = ScheduleStatus.proposed
+    db.commit()
+    return proposal_read(db, current_user, previous)
+
+
+def _restore_remembered_policy(db: DbSession, user_id: uuid.UUID, revised: ScheduleVersion) -> None:
+    """Undo the "remember this" half of a revision, unless it has been changed again since.
+
+    The student may have forgotten that preference or remembered a different one in the meantime.
+    Those are later decisions of their own, and undoing a draft must not quietly reverse them.
+    """
+    feedback = revised.revision_feedback or {}
+    if not feedback.get("remembered"):
+        return
+    preferences = db.scalar(select(UserPreference).where(UserPreference.user_id == user_id))
+    if preferences is None or preferences.schedule_revision_policy != feedback.get("policy"):
+        return
+    preferences.schedule_revision_policy = cast(
+        dict[str, object] | None, feedback.get("remembered_before")
+    )
 
 
 def _revision_activities(
@@ -1331,9 +1423,14 @@ def _revision_activities(
     return sorted(activities.values(), key=lambda activity: str(activity["source_id"]))
 
 
+def _generated_blocks(proposal: ScheduleVersion) -> list[ScheduledBlock]:
+    """The blocks this draft planned, leaving out the ones carried over from an accepted week."""
+    return [block for block in proposal.blocks if block.source != "preserved"]
+
+
 def _revision_change_summary(previous: ScheduleVersion, revised: ScheduleVersion) -> dict[str, int]:
-    previous_generated = [block for block in previous.blocks if block.source != "preserved"]
-    revised_generated = [block for block in revised.blocks if block.source != "preserved"]
+    previous_generated = _generated_blocks(previous)
+    revised_generated = _generated_blocks(revised)
     previous_minutes = sum(
         round((aware(block.end_at) - aware(block.start_at)).total_seconds() / 60)
         for block in previous_generated
@@ -1762,7 +1859,11 @@ def _apply_avoid_time_ranges(
                 )
             )
         for start_at, end_at in subtract_intervals([(window.start_at, window.end_at)], exclusions):
-            if end_at > start_at:
+            # A remnant too short to hold anything is not availability, and keeping it made the
+            # day look open: a window running to midnight survived a whole-day avoid range as one
+            # second that still carried the day's declared capacity, so the generation log read
+            # full capacity beside zero blocks while nothing could be placed at all.
+            if end_at - start_at >= timedelta(minutes=1):
                 adjusted.append(
                     SchedulingWindow(
                         start_at,
