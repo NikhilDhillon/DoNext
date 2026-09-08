@@ -19,7 +19,7 @@ import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { WorkIntake } from "@/components/work-intake";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { PlannerTask, PlanningEntry, PlanningView, ScheduleProposal, Semester, User } from "@/lib/types";
+import type { PlannerTask, PlanningEntry, PlanningView, Schedule, ScheduleProposal, Semester, User } from "@/lib/types";
 
 export function TodayPlanner() {
   const user = useApiResource<User>("/auth/me");
@@ -31,6 +31,9 @@ export function TodayPlanner() {
   );
   const proposal = useApiResource<ScheduleProposal>(
     currentSemester ? `/semesters/${currentSemester.id}/schedule/proposal` : null,
+  );
+  const accepted = useApiResource<Schedule | null>(
+    currentSemester ? `/semesters/${currentSemester.id}/schedule` : null,
   );
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
@@ -100,11 +103,11 @@ export function TodayPlanner() {
         <Link className="proposal-pending-banner" href="/week"><Sparkles size={17} /><span><strong>A 14-day draft is waiting for review.</strong><small>Today still reflects your accepted schedule.</small></span><ArrowRight size={17} /></Link>
       ) : null}
 
-      {currentSemester ? (
+      {currentSemester && accepted.data && !proposal.data ? (
         <WorkIntake
           semester={currentSemester}
           onChanged={async () => {
-            await Promise.all([plan.reload(), proposal.reload()]);
+            await Promise.all([plan.reload(), proposal.reload(), accepted.reload()]);
           }}
         />
       ) : null}

@@ -1,83 +1,54 @@
 "use client";
 
-import {
-  AlertTriangle,
-  CalendarClock,
-  Check,
-  LoaderCircle,
-  RefreshCw,
-  Sparkles,
-  X,
-} from "lucide-react";
+import { Bookmark, Check, Info, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { DraftScheduleCalendar } from "@/components/draft-schedule-calendar";
-import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { ScheduleRevisionDialog } from "@/components/schedule-revision-dialog";
-import { useApiResource } from "@/hooks/use-api-resource";
+import { useApiResource, type ApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
 import { extraFocusDecisionMessage } from "@/lib/schedule-generation";
-import type {
-  AvailabilityWindow,
-  PlannerTask,
-  PlanningEntry,
-  ScheduleBlock,
-  ScheduleProposal,
-  ScheduleGenerationRequirements,
-  ScheduleRevisionReason,
-  Semester,
-} from "@/lib/types";
-
-const completeSolverTimeoutWarning = "Everything fits. Regenerate for a different arrangement.";
-const partialSolverTimeoutWarning =
-  "Some work did not fit — see unresolved items below. Regenerate for a different arrangement.";
-// Drafts generated before the copy was shortened still carry the long warnings, so they stay
-// recognizable here; only the wording shown to the student changes.
-const solverTimeoutWarnings = new Set([
-  "The solver reached its time limit; this feasible draft may not be optimal.",
-  "Everything fits: all requested work is scheduled and every hard constraint is satisfied. DoNext stopped after its optimization limit, so a different valid arrangement may match your preferences slightly better.",
-  "DoNext found a valid partial draft before its optimization limit, but some work remains unscheduled. Review the unresolved items below; a different valid arrangement may fit more work or match your preferences better.",
-  completeSolverTimeoutWarning,
-  partialSolverTimeoutWarning,
-]);
+import type { Preferences, ScheduleProposal, ScheduleGenerationRequirements, ScheduleRevisionReason, Semester } from "@/lib/types";
 
 type ScheduleProposalReviewProps = {
   semester: Semester;
-  tasks: PlannerTask[];
-  timezone: string;
+  proposal: ApiResource<ScheduleProposal>;
   onAccepted: () => Promise<void>;
 };
 
-export function ScheduleProposalReview({
-  semester,
-  tasks,
-  timezone,
-  onAccepted,
-}: ScheduleProposalReviewProps) {
-  const proposal = useApiResource<ScheduleProposal>(
-    `/semesters/${semester.id}/schedule/proposal`,
-  );
-  const availability = useApiResource<AvailabilityWindow[]>("/availability");
+/**
+ * The one decision on the Week page: accept this draft, ask for a different one, or say what is
+ * wrong with it. The draft's placements are drawn in the week calendar itself, so this card
+ * carries only what the calendar cannot say.
+ */
+export function ScheduleProposalReview({ semester, proposal, onAccepted }: ScheduleProposalReviewProps) {
   const [busy, setBusy] = useState(false);
-  const [generationState, setGenerationState] = useState<"idle" | "running" | "success">(
-    "idle",
-  );
+  const [generationState, setGenerationState] = useState<"idle" | "running" | "success">("idle");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [revisionError, setRevisionError] = useState<string | null>(null);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
-  const [duplicateEntry, setDuplicateEntry] = useState<PlanningEntry | null>(null);
-  const [editorDate, setEditorDate] = useState(semester.start_date);
-  const generationSuccessTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [forgetting, setForgetting] = useState(false);
+  const [forgotten, setForgotten] = useState(false);
+  const successTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A preference kept from an earlier revision shapes this draft and every later one, so the
+  // card that asks for the accept decision is where it has to be readable and revocable.
+  const preferences = useApiResource<Preferences>("/preferences");
 
   useEffect(() => () => {
-    if (generationSuccessTimer.current) clearTimeout(generationSuccessTimer.current);
+    if (successTimer.current) clearTimeout(successTimer.current);
   }, []);
 
+  function flashSuccess(delay: number) {
+    setGenerationState("success");
+    successTimer.current = setTimeout(() => {
+      setGenerationState("idle");
+      successTimer.current = null;
+    }, delay);
+  }
+
   async function generate() {
-    if (generationSuccessTimer.current) clearTimeout(generationSuccessTimer.current);
+    if (busy || forgetting) return;
+    if (successTimer.current) clearTimeout(successTimer.current);
     setBusy(true);
     setGenerationState("running");
     setError(null);
@@ -117,11 +88,8 @@ export function ScheduleProposalReview({
         }
       }
       proposal.setData(generated);
-      setGenerationState("success");
-      generationSuccessTimer.current = setTimeout(() => {
-        setGenerationState("idle");
-        generationSuccessTimer.current = null;
-      }, 1800);
+      setForgotten(false);
+      flashSuccess(1800);
     } catch (requestError) {
       setGenerationState("idle");
       setError(errorMessage(requestError, "DoNext could not generate a schedule draft."));
@@ -131,14 +99,11 @@ export function ScheduleProposalReview({
   }
 
   async function accept() {
-    if (!proposal.data) return;
+    if (!proposal.data || busy || forgetting) return;
     setBusy(true);
     setError(null);
     try {
-      await apiRequest<ScheduleProposal | void>(
-        `/schedule-proposals/${proposal.data.id}/accept`,
-        { method: "POST" },
-      );
+      await apiRequest<ScheduleProposal | void>(`/schedule-proposals/${proposal.data.id}/accept`, { method: "POST" });
       proposal.setData(null);
       setConfirming(false);
       await onAccepted();
@@ -149,12 +114,8 @@ export function ScheduleProposalReview({
     }
   }
 
-  async function revise(payload: {
-    reasons: ScheduleRevisionReason[];
-    note: string;
-    remember: boolean;
-  }) {
-    if (!proposal.data) return;
+  async function revise(payload: { reasons: ScheduleRevisionReason[]; note: string; remember: boolean }) {
+    if (!proposal.data || busy || forgetting) return;
     setBusy(true);
     setRevisionError(null);
     try {
@@ -163,12 +124,10 @@ export function ScheduleProposalReview({
         { method: "POST", body: JSON.stringify(payload) },
       );
       proposal.setData(revised);
+      setForgotten(false);
+      await preferences.reload();
       setRevisionOpen(false);
-      setGenerationState("success");
-      generationSuccessTimer.current = setTimeout(() => {
-        setGenerationState("idle");
-        generationSuccessTimer.current = null;
-      }, 2200);
+      flashSuccess(2200);
     } catch (requestError) {
       setRevisionError(
         errorMessage(requestError, "DoNext could not apply that feedback. The current draft is unchanged."),
@@ -178,50 +137,38 @@ export function ScheduleProposalReview({
     }
   }
 
-  function edit(block: ScheduleBlock) {
-    setDuplicateEntry(null);
-    setSelectedEntry(blockEntry(block));
-    setEditorDate(dateInTimezone(block.start_at, timezone));
-    setEditorOpen(true);
-  }
-
-  function addBlock(date?: string) {
-    setDuplicateEntry(null);
-    setSelectedEntry(null);
-    setEditorDate(
-      date
-      ?? firstFocusDate(
-        proposal.data?.horizon_start ?? semester.start_date,
-        proposal.data?.horizon_end ?? semester.end_date,
-        availability.data ?? [],
-      ),
-    );
-    setEditorOpen(true);
-  }
-
-  function duplicateBlock(block: ScheduleBlock) {
-    const entry = blockEntry(block);
-    setSelectedEntry(null);
-    setDuplicateEntry(entry);
-    setEditorDate(dateInTimezone(block.start_at, timezone));
-    setEditorOpen(true);
+  async function forget() {
+    if (!preferences.data || busy || forgetting) return;
+    setForgetting(true);
+    setError(null);
+    try {
+      await apiRequest<void>("/preferences/remembered-schedule-preferences", { method: "DELETE" });
+      preferences.setData({ ...preferences.data, remembered_schedule_preferences: [] });
+      // Its blocks still reflect the old inputs; only a new draft can be accepted now.
+      proposal.setData((current) => current ? { ...current, stale: true } : current);
+      setConfirming(false);
+      setForgotten(true);
+    } catch (requestError) {
+      setError(errorMessage(requestError, "DoNext could not forget that preference."));
+    } finally {
+      setForgetting(false);
+    }
   }
 
   if (proposal.loading && !proposal.data) {
-    return <section className="proposal-review loading"><LoaderCircle className="spin" size={20} /> Checking for a draft</section>;
+    return <section className="draft-decision loading"><LoaderCircle className="spin" size={18} /> Checking for a draft</section>;
   }
 
   if (!proposal.data) {
     return (
-      <section className="proposal-launch">
+      <section className="draft-prompt">
         <span><Sparkles size={22} /></span>
         <div>
-          <p className="eyebrow">Student-aware deterministic planning</p>
-          <h2>Build a reviewable 14-day draft.</h2>
-          <p>DoNext starts ready assignments early, protects urgent deadlines, and activates exam preparation inside the next 14 days. Your accepted plan remains untouched until you approve the draft.</p>
+          <strong>No draft is waiting.</strong>
+          <small>Build one to give your deadlines, goals and rest actual time.</small>
         </div>
-        <button className="primary-button" disabled={busy} type="button" onClick={() => void generate()}>
-          <CalendarClock size={17} /> Generate 14-day plan
+        <button className="primary-button" disabled={busy || forgetting} type="button" onClick={() => void generate()}>
+          {busy ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={17} />} Plan the next 14 days
         </button>
         {error ? <p className="planner-alert error" role="alert">{error}</p> : null}
       </section>
@@ -229,34 +176,66 @@ export function ScheduleProposalReview({
   }
 
   const draft = proposal.data;
-  return (
-    <section className="proposal-review">
-      <header>
-        <div>
-          <p className="eyebrow">Draft schedule · {formatRange(draft.horizon_start, draft.horizon_end)}</p>
-          <h2>Review every placement before it becomes active.</h2>
-        </div>
-        <button
-          className={`secondary-button regeneration-button ${generationState}`}
-          disabled={busy}
-          type="button"
-          onClick={() => void generate()}
-        >
-          {generationState === "success" ? (
-            <Check className="regeneration-success-icon" size={16} />
-          ) : (
-            <RefreshCw size={16} />
-          )}
-          <span aria-live="polite">
-            {generationState === "success" ? "Draft updated" : "Regenerate"}
-          </span>
-        </button>
-      </header>
+  const remembered = preferences.data?.remembered_schedule_preferences ?? [];
+  const summary = draft.generation_summary;
+  const unplaced = summary.unscheduled;
+  const covered = summary.requested_minutes
+    ? Math.min(Math.round((summary.scheduled_minutes / summary.requested_minutes) * 100), 100)
+    : 100;
 
-      <div className="proposal-metrics">
-        <div><strong>{formatMinutes(draft.generation_summary.scheduled_minutes)}</strong><span>scheduled</span></div>
-        <div><strong>{formatMinutes(draft.generation_summary.requested_minutes)}</strong><span>requested</span></div>
+  return (
+    <section className="draft-decision" aria-label="Draft">
+      <div className="draft-decision-top">
+        <div>
+          <p className="eyebrow">Draft · {formatRange(draft.horizon_start, draft.horizon_end)}</p>
+          <h2>{unplaced.length === 0 ? "All active work fits" : "Some work found no room"}</h2>
+        </div>
+        {confirming ? (
+          <div className="draft-actions confirm" role="alert">
+            <span>Replace the accepted schedule with this draft?</span>
+            <button className="ghost-button" type="button" onClick={() => setConfirming(false)}>Cancel</button>
+            <button className="primary-button" disabled={busy || forgetting || draft.stale} type="button" onClick={() => void accept()}>
+              {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} Confirm
+            </button>
+          </div>
+        ) : (
+          <div className="draft-actions">
+            <button className={`ghost-button regenerate ${generationState}`} disabled={busy || forgetting} type="button" onClick={() => void generate()}>
+              {generationState === "running" ? <LoaderCircle className="spin" size={15} /> : null}
+              {generationState === "success" ? <Check className="regeneration-success-icon" size={15} /> : null}
+              {generationState === "idle" ? <RefreshCw size={15} /> : null}
+              <span aria-live="polite">{regenerateLabel(generationState)}</span>
+            </button>
+            <button className="secondary-button" disabled={busy || forgetting} type="button" onClick={() => { setRevisionError(null); setRevisionOpen(true); }}>
+              Adjust
+            </button>
+            <button className="primary-button" disabled={busy || forgetting || draft.stale} type="button" onClick={() => setConfirming(true)}>
+              <Check size={16} /> Accept plan
+            </button>
+          </div>
+        )}
       </div>
+
+      {remembered.length > 0 ? (
+        <p className="draft-remembered">
+          <Bookmark size={15} />
+          <span><strong>Remembering</strong> {remembered.join(" · ")}</span>
+          <button disabled={busy || forgetting || revisionOpen} type="button" onClick={() => void forget()}>{forgetting ? "Forgetting…" : "Forget"}</button>
+        </p>
+      ) : null}
+
+      {forgotten && remembered.length === 0 ? (
+        <p className="draft-remembered forgotten" role="status">
+          <Bookmark size={15} />
+          <span>Feedback forgotten. Choose New draft to replan these same dates without it.</span>
+        </p>
+      ) : null}
+
+      {unplaced.length > 0 ? (
+        <div className="draft-meter">
+          <span><i style={{ width: `${covered}%` }} /></span>
+        </div>
+      ) : null}
 
       {draft.revision_feedback ? (
         <div className="revision-applied" role="status">
@@ -265,182 +244,46 @@ export function ScheduleProposalReview({
             <strong>Applied your feedback</strong>
             <small>
               {draft.revision_feedback.summary}
-              {draft.revision_feedback.changes
-                ? formatRevisionChanges(draft.revision_feedback.changes)
-                : ""}
+              {draft.revision_feedback.changes ? formatRevisionChanges(draft.revision_feedback.changes) : ""}
             </small>
           </span>
           <em>{draft.revision_feedback.interpreter === "openai" ? "AI interpreted" : "Quick preferences"}</em>
         </div>
       ) : null}
 
-      {draft.stale ? (
-        <p className="planner-alert error"><AlertTriangle size={15} /> Inputs changed. Regenerate before accepting.</p>
-      ) : null}
-      {draft.generation_summary.warnings.map((warning) => {
-        const display = proposalWarningDisplay(warning, draft.generation_summary);
-        return (
-          <p className={`planner-alert ${display.informational ? "info" : "warning"}`} key={warning}>
-            {display.informational ? <Check size={15} /> : <AlertTriangle size={15} />}
-            {display.message}
-          </p>
-        );
-      })}
-
-      <DraftScheduleCalendar
-        blocks={draft.blocks}
-        horizonEnd={draft.horizon_end}
-        horizonStart={draft.horizon_start}
-        proposalId={draft.id}
-        requestedMinutes={draft.generation_summary.requested_minutes}
-        scheduledMinutes={draft.generation_summary.scheduled_minutes}
-        timezone={timezone}
-        unscheduled={draft.generation_summary.unscheduled}
-        onAdd={addBlock}
-        onDuplicate={duplicateBlock}
-        onEdit={edit}
-        onMoved={proposal.reload}
-      />
-
-      <ProposalTradeoffs summary={draft.generation_summary} />
+      <div className="draft-notes">
+        <p className="draft-note rule">
+          <Info size={16} />
+          <span>{ACTIVATION_NOTE}</span>
+        </p>
+      </div>
 
       {error ? <p className="planner-alert error" role="alert">{error}</p> : null}
-      <footer>
-        {confirming ? (
-          <div className="proposal-confirm" role="alert">
-            <span>Replace the accepted schedule with this reviewed draft?</span>
-            <button type="button" onClick={() => setConfirming(false)}>Cancel</button>
-            <button className="primary-button" disabled={busy} type="button" onClick={() => void accept()}>
-              {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
-              Confirm acceptance
-            </button>
-          </div>
-        ) : (
-          <>
-            <button className="danger-button" disabled={busy} type="button" onClick={() => { setRevisionError(null); setRevisionOpen(true); }}><X size={16} /> Reject and revise</button>
-            <button className="primary-button" disabled={busy || draft.stale} type="button" onClick={() => setConfirming(true)}><Check size={16} /> Accept draft</button>
-          </>
-        )}
-      </footer>
 
-      <ScheduleBlockEditor
-        open={editorOpen}
-        semesterId={semester.id}
-        proposalId={draft.id}
-        date={editorDate}
-        tasks={tasks}
-        entry={selectedEntry}
-        duplicateOf={duplicateEntry}
-        suggestedTask={null}
-        onClose={() => { setEditorOpen(false); setDuplicateEntry(null); }}
-        onSaved={proposal.reload}
-      />
       {revisionOpen ? (
-        <ScheduleRevisionDialog
-          busy={busy}
-          error={revisionError}
-          open
-          onClose={() => setRevisionOpen(false)}
-          onSubmit={revise}
-        />
+        <ScheduleRevisionDialog busy={busy || forgetting} error={revisionError} open onClose={() => setRevisionOpen(false)} onSubmit={revise} />
       ) : null}
     </section>
   );
 }
 
-function blockEntry(block: ScheduleBlock): PlanningEntry {
-  return {
-    id: `proposal:${block.id}`,
-    kind: "scheduled_block",
-    source_id: block.id,
-    title: block.title,
-    start_at: block.start_at,
-    end_at: block.end_at,
-    block_type: block.block_type,
-    category: block.block_type,
-    location: null,
-    task_id: block.task_id,
-    task_status: null,
-    goal_id: block.goal_id,
-    course_code: null,
-    locked: block.locked,
-    recurring: false,
-    editable: true,
-  };
-}
+const ACTIVATION_NOTE = "Every assignment must be activated from Home before this plan will "
+  + "reserve time for it. Until then it is tracked as a deadline but holds no time.";
 
-function firstFocusDate(
-  startDate: string,
-  endDate: string,
-  availability: AvailabilityWindow[],
-) {
-  const availableDays = new Set(
-    availability
-      .filter((window) => window.type !== "unavailable")
-      .map((window) => window.day_of_week),
-  );
-  for (let offset = 0; offset <= dateDifference(startDate, endDate); offset += 1) {
-    const candidate = addDays(startDate, offset);
-    const weekdayIndex = (new Date(`${candidate}T12:00:00Z`).getUTCDay() + 6) % 7;
-    if (availableDays.has(weekdayIndex)) return candidate;
-  }
-  return startDate;
+function regenerateLabel(state: "idle" | "running" | "success") {
+  if (state === "running") return "Building";
+  return state === "success" ? "Updated" : "New draft";
 }
 
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
 }
 
-function proposalWarningDisplay(
-  warning: string,
-  summary: ScheduleProposal["generation_summary"],
-) {
-  if (!summary.timed_out || !solverTimeoutWarnings.has(warning)) {
-    return { informational: false, message: warning };
-  }
-  const complete = summary.coverage_status === "complete" && summary.unscheduled.length === 0;
-  return {
-    informational: complete,
-    message: complete ? completeSolverTimeoutWarning : partialSolverTimeoutWarning,
-  };
-}
-
-function ProposalTradeoffs({ summary }: { summary: ScheduleProposal["generation_summary"] }) {
-  const details = [
-    ...summary.exam_preparation.map(examPreparationTradeoff),
-    ...summary.flexible_adjustments.map((item) => `${String(item.name)} · reduced by ${formatMinutes(Number(item.reduced_minutes ?? 0))}`),
-    ...summary.rollover_by_day.filter((item) => Number(item.consumed_minutes ?? 0) > 0).map((item) => `${String(item.date)} · used ${formatMinutes(Number(item.consumed_minutes))} of rollover buffer`),
-    ...summary.extra_focus_by_day.map((item) => `${String(item.date)} · ${formatMinutes(Number(item.used_minutes ?? 0))} extra focus`),
-    ...summary.sleep_by_day.filter((item) => Number(item.reduction_minutes ?? 0) > 0).map((item) => `${String(item.date)} · sleep reduced by ${formatMinutes(Number(item.reduction_minutes))}, staying at or above the minimum`),
-    ...summary.semester_pressure.filter((item) => Number(item.required_lead_minutes ?? 0) > 0).map((item) => `${String(item.checkpoint)} · ${formatMinutes(Number(item.required_lead_minutes))} must start in this horizon to avoid a future capacity shortfall`),
-    ...summary.semester_pressure.flatMap((item) => Array.isArray(item.unknown_exam_estimates) && item.unknown_exam_estimates.length ? [`${item.unknown_exam_estimates.length} future exam ${item.unknown_exam_estimates.length === 1 ? "estimate is" : "estimates are"} still unknown and were not assigned invented preparation time`] : []),
-  ];
-  if (!details.length) return null;
-  return <div className="proposal-unresolved"><strong>How this draft made room</strong>{details.map((detail) => <p key={detail}>{detail}</p>)}</div>;
-}
-
-function examPreparationTradeoff(item: Record<string, unknown>) {
-  const base = `${String(item.name)} · ${formatMinutes(Number(item.scheduled_prep_minutes ?? 0))} of ${formatMinutes(Number(item.total_estimate_minutes ?? 0))} scheduled · ${String(item.estimate_source).replaceAll("_", " ")}`;
-  const release = item.material_release;
-  if (!release || typeof release !== "object") return base;
-  const details = release as Record<string, unknown>;
-  const unlocked = formatMinutes(Number(details.currently_unlocked_minutes ?? 0));
-  if (details.method === "content_available") {
-    return `${base} · ${unlocked} unlocked from the confirmed content-available time`;
-  }
-  const completed = Number(details.completed_checkpoints ?? 0);
-  const total = Number(details.total_checkpoints ?? 0);
-  const next = typeof details.next_release_at === "string"
-    ? ` · next release ${new Intl.DateTimeFormat("en-CA", { dateStyle: "medium", timeStyle: "short" }).format(new Date(details.next_release_at))}`
-    : "";
-  return `${base} · ${unlocked} unlocked after ${completed} of ${total} confirmed lectures${next}`;
-}
-
-function formatMinutes(minutes: number) {
+export function formatMinutes(minutes: number) {
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   const remainder = minutes % 60;
-  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+  return remainder ? `${hours} h ${remainder}m` : `${hours} h`;
 }
 
 function formatRevisionChanges(changes: NonNullable<ScheduleProposal["revision_feedback"]>["changes"]) {
@@ -456,24 +299,12 @@ function formatRevisionChanges(changes: NonNullable<ScheduleProposal["revision_f
 }
 
 function formatRange(start: string, end: string) {
-  const formatter = new Intl.DateTimeFormat("en-CA", { month: "short", day: "numeric", timeZone: "UTC" });
-  return `${formatter.format(new Date(`${start}T12:00:00Z`))}–${formatter.format(new Date(`${end}T12:00:00Z`))}`;
-}
-
-function dateInTimezone(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-CA", { year: "numeric", month: "2-digit", day: "2-digit", timeZone: timezone }).formatToParts(new Date(value));
-  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((item) => item.type === type)?.value;
-  return `${part("year")}-${part("month")}-${part("day")}`;
-}
-
-function dateDifference(start: string, end: string) {
-  return Math.round(
-    (Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000,
-  );
-}
-
-function addDays(value: string, days: number) {
-  const date = new Date(`${value}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + days);
-  return date.toISOString().slice(0, 10);
+  const month = new Intl.DateTimeFormat("en-CA", { month: "short", timeZone: "UTC" });
+  const day = new Intl.DateTimeFormat("en-CA", { day: "numeric", timeZone: "UTC" });
+  const from = new Date(`${start}T12:00:00Z`);
+  const to = new Date(`${end}T12:00:00Z`);
+  const tail = month.format(from) === month.format(to)
+    ? day.format(to)
+    : `${month.format(to)} ${day.format(to)}`;
+  return `${month.format(from)} ${day.format(from)}–${tail}`;
 }

@@ -5,6 +5,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import { apiRequest, ApiRequestError } from "@/lib/api";
 
+export type ApiResource<T> = ReturnType<typeof useApiResource<T>>;
+
 export function useApiResource<T>(path: string | null) {
   const router = useRouter();
   const [data, setData] = useState<T | null>(null);
