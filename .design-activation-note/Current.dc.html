@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;650;700;760&display=swap">
+  <style>
+    body { margin: 0; background: #f5efe2; color: #2a1d14; font-family: Geist, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+    a { color: #a8442a; } a:hover { color: #8f3a20; }
+    .board { position: relative; padding: 26px 30px 88px; }
+    .label { margin: 0 0 14px; color: #75634f; font-size: 10px; font-weight: 760; letter-spacing: .14em; text-transform: uppercase; }
+    .card { overflow: hidden; border: 1px solid #e6cdb4; border-radius: 18px; background: #fbf1e6; padding: 20px 22px 0; box-shadow: 0 12px 30px rgba(42,29,20,.035); }
+    .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+    .eyebrow { margin: 0 0 8px; color: #a8442a; font-size: 9px; font-weight: 760; letter-spacing: .14em; text-transform: uppercase; }
+    .card h2 { margin: 0; max-width: 690px; font-size: 19px; font-weight: 700; letter-spacing: -.03em; line-height: 1.25; }
+    .acts { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+    .acts button { min-height: 40px; border-radius: 11px; padding: 0 14px; font-family: inherit; font-size: 11px; cursor: pointer; }
+    .ghost { display: inline-flex; min-width: 124px; align-items: center; justify-content: center; gap: 6px; border: 0; background: transparent; color: #6d5b4b; font-weight: 650; }
+    .sec { border: 1px solid #e3d8c6; background: rgba(255,253,248,.78); color: #2a1d14; font-weight: 680; }
+    .pri { display: inline-flex; align-items: center; gap: 8px; border: 1px solid transparent; background: #2a1d14; color: #fffdf8; font-weight: 680; box-shadow: 0 8px 20px rgba(42,29,20,.16); }
+    .notes { margin: 11px -22px 0; border-top: 1px solid #e6cdb4; }
+    .warn { display: grid; min-height: 50px; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 9px; margin: 0; border-bottom: 1px solid #e6cdb4; padding: 9px 22px; color: #7a5312; font-size: 10px; }
+    .quiet { display: grid; min-height: 50px; grid-template-columns: 18px minmax(0,1fr) auto; align-items: center; gap: 9px; margin: 0; padding: 9px 22px; color: #6d5b4b; font-size: 9px; }
+    .quiet em { display: inline-flex; align-items: center; gap: 5px; color: #a8442a; font-style: normal; font-weight: 720; }
+    .why { position: absolute; right: 30px; bottom: 24px; left: 30px; margin: 0; color: #75634f; font-size: 11px; line-height: 1.55; }
+  </style>
+</helmet>
+<div class="board">
+  <p class="label">Today</p>
+  <div class="card">
+    <div class="top">
+      <div style="min-width: 0">
+        <p class="eyebrow">Draft &middot; Sep 6&ndash;19</p>
+        <h2>All active work fits</h2>
+        <p style="margin: 8px 0 0; max-width: 640px; color: #6d5b4b; font-size: 13px; line-height: 1.55">Every assignment must be activated before this plan will reserve time for it. Until then it is tracked as a deadline but holds no time.</p>
+      </div>
+      <div class="acts">
+        <button class="ghost"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>New draft</button>
+        <button class="sec">Adjust</button>
+        <button class="pri"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>Accept plan</button>
+      </div>
+    </div>
+    <div class="notes">
+      <p class="warn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#a1730f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span>2 assignments aren't included yet. Activate them from Home after accepting this plan.</span></p>
+    </div>
+  </div>
+  <p class="why">The rule runs about 95 characters to the line and sits in the slot that used to state the result, so it reads as an overlong subtitle &mdash; and says again what the strip below it already says.</p>
+</div>
+</x-dc>
+</body>
+</html>
