@@ -8,6 +8,7 @@ from donext.errors import install_error_handlers
 from donext.routers import (
     auth,
     availability,
+    block_placement,
     courses,
     documents,
     events,
@@ -70,6 +71,7 @@ app.include_router(preferences.router, prefix=api_prefix)
 app.include_router(documents.router, prefix=api_prefix)
 app.include_router(grading.router, prefix=api_prefix)
 app.include_router(schedules.router, prefix=api_prefix)
+app.include_router(block_placement.router, prefix=api_prefix)
 app.include_router(proposals.router, prefix=api_prefix)
 app.include_router(planning.router, prefix=api_prefix)
 
