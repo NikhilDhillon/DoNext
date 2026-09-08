@@ -214,7 +214,9 @@ export type ScheduleProposal = Schedule & {
       block_count_delta: number;
       scheduled_minutes_delta: number;
     };
+    remembered?: boolean;
   } | null;
+  can_undo_revision: boolean;
 };
 
 export type ScheduleGenerationRequirements = {

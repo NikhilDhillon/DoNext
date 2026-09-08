@@ -47,6 +47,52 @@ final result: passed
 
 ---
 
+# Design QA: reset-to-default draft action
+
+## Evidence
+
+- Source visual truth: `/var/folders/wf/j9x8hm7j7r7g6tffvr85bbbc0000gn/T/TemporaryItems/NSIRD_screencaptureui_Ft1fFu/Screenshot 2026-09-08 at 7.50.18 PM.png`, 712 x 218 pixels.
+- Implementation: `http://localhost:3000/week`, captured in the Codex in-app browser. The browser interface rendered the evidence inline and did not expose a filesystem path.
+- Desktop viewport: 1248 x 720 CSS pixels at the browser's default density.
+- Narrow viewport: 740 x 900 CSS pixels at the browser's default density.
+- State: authenticated Week view with an active draft, checked in the idle action state and the reset-confirmation state.
+- Full-view comparison: the draft action remains in the source's top-right action group beside Adjust and Accept plan.
+- Focused comparison: the source's refresh action was compared with the rendered `Reset to default` control and its inline confirmation. The control retains the same icon scale, quiet ghost treatment, spacing, and one-line desktop alignment.
+
+## Findings
+
+- P0: none.
+- P1: none.
+- P2: none.
+- P3: none for this scoped wording and behavior change.
+
+## Required fidelity surfaces
+
+- Fonts and typography: the existing button type scale, weight, line height, and compact sentence case are preserved; the longer label remains on one line at desktop width and centered on its own row at the narrow breakpoint.
+- Spacing and layout rhythm: the three-action desktop grouping is unchanged. On the narrow layout, reset remains a full-width first row above Adjust and Accept plan, matching the existing responsive hierarchy.
+- Colors and visual tokens: the idle action retains the muted ghost-button treatment; the destructive confirmation uses the existing warm danger-button tokens.
+- Image quality and assets: no raster assets were needed. The existing Lucide refresh, check, and loader icons remain visually consistent with the source and the rest of DoNext.
+- Copy and content: `New draft` is replaced by `Reset to default`. The confirmation states that added blocks and edits will be removed, and offers `Keep changes` before `Reset draft`.
+
+## Interaction and accessibility checks
+
+- Clicking `Reset to default` opens the inline confirmation without changing the proposal.
+- Clicking `Keep changes` restores the ordinary draft actions.
+- The confirmation is exposed as an alert and uses visible text rather than relying on icon or color.
+- A targeted API regression test removes a generated block, adds a user block in its place, creates the clean default draft, and confirms the original generated block set is restored.
+- Web lint, web TypeScript, and the targeted API regression test pass.
+- The browser console showed no warnings or errors.
+
+## Comparison history
+
+1. The first desktop pass confirmed that `Reset to default` fits the supplied action strip without shifting Adjust or Accept plan.
+2. The confirmation pass confirmed clear consequence copy and distinct keep/reset choices.
+3. The 740-pixel pass confirmed the longer label and confirmation remain readable with no horizontal overflow.
+
+final result: passed
+
+---
+
 # Design QA: per-day commitment times
 
 ## Evidence

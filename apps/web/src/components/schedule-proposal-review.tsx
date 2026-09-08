@@ -1,6 +1,6 @@
 "use client";
 
-import { Bookmark, Check, Info, LoaderCircle, RefreshCw, Sparkles } from "lucide-react";
+import { Bookmark, Check, Info, LoaderCircle, RefreshCw, Sparkles, Undo2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { ScheduleRevisionDialog } from "@/components/schedule-revision-dialog";
@@ -25,6 +25,9 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
   const [generationState, setGenerationState] = useState<"idle" | "running" | "success">("idle");
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [resetConfirming, setResetConfirming] = useState(false);
+  const [undoConfirming, setUndoConfirming] = useState(false);
+  const [undone, setUndone] = useState(false);
   const [revisionOpen, setRevisionOpen] = useState(false);
   const [revisionError, setRevisionError] = useState<string | null>(null);
   const [forgetting, setForgetting] = useState(false);
@@ -48,6 +51,7 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
 
   async function generate() {
     if (busy || forgetting) return;
+    const resettingDraft = proposal.data !== null;
     if (successTimer.current) clearTimeout(successTimer.current);
     setBusy(true);
     setGenerationState("running");
@@ -89,7 +93,14 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
       }
       proposal.setData(generated);
       setForgotten(false);
-      flashSuccess(1800);
+      setResetConfirming(false);
+      setUndoConfirming(false);
+      setUndone(false);
+      if (resettingDraft) {
+        flashSuccess(1800);
+      } else {
+        setGenerationState("idle");
+      }
     } catch (requestError) {
       setGenerationState("idle");
       setError(errorMessage(requestError, "DoNext could not generate a schedule draft."));
@@ -125,6 +136,8 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
       );
       proposal.setData(revised);
       setForgotten(false);
+      setUndoConfirming(false);
+      setUndone(false);
       await preferences.reload();
       setRevisionOpen(false);
       flashSuccess(2200);
@@ -137,6 +150,33 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
     }
   }
 
+  /**
+   * Take back the last piece of feedback. The draft it replaced is still on the server, so this
+   * puts back the exact plan the student was looking at rather than asking for another
+   * interpretation of the same words, which could land somewhere else again.
+   */
+  async function undoRevision() {
+    if (!proposal.data || busy || forgetting) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const restored = await apiRequest<ScheduleProposal>(
+        `/schedule-proposals/${proposal.data.id}/undo-revision`,
+        { method: "POST" },
+      );
+      proposal.setData(restored);
+      setUndoConfirming(false);
+      setForgotten(false);
+      setUndone(true);
+      // Undoing may have put back the preference the revision overwrote, or cleared one it saved.
+      await preferences.reload();
+    } catch (requestError) {
+      setError(errorMessage(requestError, "DoNext could not undo that feedback."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function forget() {
     if (!preferences.data || busy || forgetting) return;
     setForgetting(true);
@@ -144,9 +184,12 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
     try {
       await apiRequest<void>("/preferences/remembered-schedule-preferences", { method: "DELETE" });
       preferences.setData({ ...preferences.data, remembered_schedule_preferences: [] });
-      // Its blocks still reflect the old inputs; only a new draft can be accepted now.
+      // Its blocks still reflect the old inputs; only a reset draft can be accepted now.
       proposal.setData((current) => current ? { ...current, stale: true } : current);
       setConfirming(false);
+      setResetConfirming(false);
+      setUndoConfirming(false);
+      setUndone(false);
       setForgotten(true);
     } catch (requestError) {
       setError(errorMessage(requestError, "DoNext could not forget that preference."));
@@ -198,13 +241,21 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
               {busy ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />} Confirm
             </button>
           </div>
+        ) : resetConfirming ? (
+          <div className="draft-actions confirm" role="alert">
+            <span>Reset to DoNext&apos;s default plan? Added blocks and edits will be removed.</span>
+            <button className="ghost-button" type="button" onClick={() => setResetConfirming(false)}>Keep changes</button>
+            <button className="danger-button" disabled={busy || forgetting} type="button" onClick={() => void generate()}>
+              {busy ? <LoaderCircle className="spin" size={16} /> : <RefreshCw size={16} />} {busy ? "Resetting…" : "Reset draft"}
+            </button>
+          </div>
         ) : (
           <div className="draft-actions">
-            <button className={`ghost-button regenerate ${generationState}`} disabled={busy || forgetting} type="button" onClick={() => void generate()}>
+            <button className={`ghost-button regenerate ${generationState}`} disabled={busy || forgetting} type="button" onClick={() => setResetConfirming(true)}>
               {generationState === "running" ? <LoaderCircle className="spin" size={15} /> : null}
               {generationState === "success" ? <Check className="regeneration-success-icon" size={15} /> : null}
               {generationState === "idle" ? <RefreshCw size={15} /> : null}
-              <span aria-live="polite">{regenerateLabel(generationState)}</span>
+              <span aria-live="polite">{resetLabel(generationState)}</span>
             </button>
             <button className="secondary-button" disabled={busy || forgetting} type="button" onClick={() => { setRevisionError(null); setRevisionOpen(true); }}>
               Adjust
@@ -224,10 +275,17 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
         </p>
       ) : null}
 
+      {undone && !draft.revision_feedback ? (
+        <p className="draft-remembered undone" role="status">
+          <Undo2 size={15} />
+          <span>Feedback undone. This is the draft you had before it.</span>
+        </p>
+      ) : null}
+
       {forgotten && remembered.length === 0 ? (
         <p className="draft-remembered forgotten" role="status">
           <Bookmark size={15} />
-          <span>Feedback forgotten. Choose New draft to replan these same dates without it.</span>
+          <span>Feedback forgotten. Choose Reset to default to replan these same dates without it.</span>
         </p>
       ) : null}
 
@@ -237,7 +295,22 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
         </div>
       ) : null}
 
-      {draft.revision_feedback ? (
+      {draft.revision_feedback && undoConfirming ? (
+        <div className="revision-applied undoing" role="alert">
+          <Undo2 size={17} />
+          <span>
+            <strong>Undo this feedback?</strong>
+            <small>{undoConsequences(draft)}</small>
+          </span>
+          <button className="ghost-button" disabled={busy || forgetting} type="button" onClick={() => setUndoConfirming(false)}>
+            Keep it
+          </button>
+          <button className="danger-button" disabled={busy || forgetting} type="button" onClick={() => void undoRevision()}>
+            {busy ? <LoaderCircle className="spin" size={15} /> : <Undo2 size={15} />}
+            {busy ? "Undoing…" : "Undo feedback"}
+          </button>
+        </div>
+      ) : draft.revision_feedback ? (
         <div className="revision-applied" role="status">
           <Sparkles size={17} />
           <span>
@@ -248,6 +321,11 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
             </small>
           </span>
           <em>{draft.revision_feedback.interpreter === "openai" ? "AI interpreted" : "Quick preferences"}</em>
+          {draft.can_undo_revision ? (
+            <button className="revision-undo" disabled={busy || forgetting || revisionOpen} type="button" onClick={() => { setError(null); setUndoConfirming(true); }}>
+              <Undo2 size={14} /> Undo
+            </button>
+          ) : null}
         </div>
       ) : null}
 
@@ -270,9 +348,25 @@ export function ScheduleProposalReview({ semester, proposal, onAccepted }: Sched
 const ACTIVATION_NOTE = "Every assignment must be activated from Home before this plan will "
   + "reserve time for it. Until then it is tracked as a deadline but holds no time.";
 
-function regenerateLabel(state: "idle" | "running" | "success") {
-  if (state === "running") return "Building";
-  return state === "success" ? "Updated" : "New draft";
+/**
+ * What undoing costs, beyond the placements going back. Hand edits belong to the revised draft and
+ * leave with it, and a revision that was remembered is still shaping every later draft, so both
+ * have to be said before the student commits rather than discovered afterwards.
+ */
+function undoConsequences(draft: ScheduleProposal) {
+  const consequences = ["This draft goes back to the one you had before this feedback."];
+  if (draft.generation_summary.moved_blocks > 0) {
+    consequences.push("Blocks you moved since will go with it.");
+  }
+  if (draft.revision_feedback?.remembered) {
+    consequences.push("The preference it saved will be forgotten.");
+  }
+  return consequences.join(" ");
+}
+
+function resetLabel(state: "idle" | "running" | "success") {
+  if (state === "running") return "Resetting";
+  return state === "success" ? "Default restored" : "Reset to default";
 }
 
 function errorMessage(error: unknown, fallback: string) {

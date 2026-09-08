@@ -785,6 +785,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 760px) {
   .proposal-launch { grid-template-columns: 42px 1fr; padding: 16px; }.proposal-launch > button { grid-column: 1 / -1; justify-content: center; }.proposal-launch .planner-alert { grid-column: 1 / -1; }.proposal-review { padding: 16px; }.proposal-review > header { flex-direction: column; }.proposal-review > header > button { width: 100%; justify-content: center; }.proposal-metrics { grid-template-columns: repeat(2, 1fr); }.proposal-review > footer, .proposal-confirm { align-items: stretch; flex-direction: column; }.proposal-review > footer > button, .proposal-confirm > button { width: 100%; justify-content: center; }.proposal-confirm > span { margin: 0 0 4px; }.proposal-block-heading { align-items: flex-start; flex-direction: column; }
   .revision-reasons { grid-template-columns: 1fr; }.revision-applied { align-items: flex-start; }.revision-applied em { display: none; }
+  /* The interpreter badge can go on a narrow screen; the way back cannot. */
+  .revision-applied { flex-wrap: wrap; }.revision-undo { margin-left: auto; }.revision-applied.undoing > span { flex-basis: calc(100% - 27px); }.revision-applied.undoing .ghost-button { margin-left: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
@@ -1079,6 +1081,17 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .calendar-outside p { max-width: 330px; margin: 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .calendar-outside .secondary-button { margin-top: 13px; }
 .draft-decision .revision-applied { margin: 13px 0 0; }
+/* Feedback is the one place the plan moved because a model read a sentence, so the way back sits
+   in that same row rather than in a menu. Two steps: the row first says what leaves with the undo,
+   because the draft it restores cannot carry anything edited after the revision. */
+.revision-undo { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; border: 1px solid var(--accent-edge); border-radius: 9px; background: var(--surface); padding: 7px 10px; color: var(--accent); font: inherit; font-size: 10px; font-weight: 720; cursor: pointer; }
+.revision-undo:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-tint); }
+.revision-undo:disabled { border-color: var(--rule); color: var(--faint); cursor: not-allowed; }
+.revision-applied.undoing { align-items: center; border-color: var(--accent); }
+.revision-applied.undoing > svg { color: var(--accent); }
+.revision-applied.undoing .ghost-button { flex: 0 0 auto; border: 0; background: none; padding: 0 4px; color: var(--muted); font: inherit; font-size: 10px; font-weight: 680; cursor: pointer; }
+.revision-applied.undoing .ghost-button:hover:not(:disabled) { color: var(--ink); }
+.revision-applied.undoing .danger-button { flex: 0 0 auto; min-height: 36px; padding: 0 11px; font-size: 10px; }
 .draft-decision > .planner-alert { margin: 14px 0 20px; }
 
 .week-page .calendar-card { border-color: var(--line); border-radius: 17px; background: var(--surface); box-shadow: 0 10px 30px rgba(42,29,20,.035); }
