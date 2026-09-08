@@ -166,6 +166,16 @@ export function WeekPlanner() {
     flushPendingSaves();
     document.body.classList.remove("dragging-block");
   }, [flushPendingSaves]);
+  // A move toast is a passing remark, not something to leave parked on screen: it clears itself,
+  // and a fresh one restarts the clock rather than inheriting whatever was left of the last one.
+  useEffect(() => {
+    if (!moveStatus && !moveError) return;
+    const timer = setTimeout(() => {
+      setMoveStatus(null);
+      setMoveError(null);
+    }, moveError ? 5000 : 3200);
+    return () => clearTimeout(timer);
+  }, [moveStatus, moveError]);
 
   if ((plan.loading || semesters.loading) && !plan.data) return <WeekState loading message="Building your real week" />;
   if (openOn) return <WeekState loading message={`Opening the ${openOn < (plan.data?.start_date ?? "") ? "last" : "first"} week of your semester`} />;
