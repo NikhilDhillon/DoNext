@@ -1,9 +1,6 @@
-import type { Metadata } from "next";
+import { permanentRedirect } from "next/navigation";
 
-import { GoalManager } from "@/components/goal-manager";
-
-export const metadata: Metadata = { title: "Goals" };
-
+// Goals moved into My Life. Keep the old route working for bookmarks and in-app links.
 export default function GoalsPage() {
-  return <GoalManager />;
+  permanentRedirect("/my-life");
 }

@@ -3,14 +3,12 @@
 import {
   BookOpen,
   CalendarDays,
-  ChevronDown,
   CircleUserRound,
   Flag,
+  HeartPulse,
   LayoutDashboard,
   Plus,
   Settings,
-  Sparkles,
-  Target,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
@@ -26,7 +24,7 @@ const primaryNavigation = [
   { href: "/week", label: "Week", icon: CalendarDays },
   { href: "/semester", label: "Semester", icon: Flag },
   { href: "/courses", label: "Courses", icon: BookOpen },
-  { href: "/goals", label: "Goals", icon: Target },
+  { href: "/my-life", label: "My Life", icon: HeartPulse },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -36,6 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const semesters = useApiResource<Semester[]>("/semesters");
   const { data: planningData, reload: reloadPlanning } = useApiResource<PlanningView>("/planning/day");
   const currentSemester = semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null;
+  const term = currentSemester ? semesterTerm(currentSemester) : null;
   const displayName = user.data?.name || "Your workspace";
   const firstName = displayName.split(" ")[0];
   const initials = displayName === "Your workspace"
@@ -54,8 +53,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("donext:planning-updated", refreshPlanning);
   }, [reloadPlanning]);
 
-  const todayCapacity = planningData?.days[0]?.capacity;
-
   return (
     <div className="app-frame">
       <aside className="sidebar">
@@ -63,20 +60,28 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Brand />
         </div>
 
-        <Link className="semester-switcher" href="/semester">
-          <span className="semester-icon">{currentSemester ? semesterCode(currentSemester) : "NEW"}</span>
-          <span>
-            <small>{currentSemester ? "Current semester" : "First step"}</small>
-            {currentSemester?.name ?? "Set up semester"}
-          </span>
-          <ChevronDown size={16} aria-hidden="true" />
-        </Link>
+        <div className="semester-status">
+          <p className="semester-status-label">{currentSemester ? "Semester" : "First step"}</p>
+          <p className="semester-status-name">{currentSemester?.name ?? "No semester yet"}</p>
+          {term ? (
+            <div className="semester-term">
+              <div className="semester-term-rail">
+                <span style={{ width: `${term.percent}%` }} />
+              </div>
+              <p>{term.label}</p>
+            </div>
+          ) : (
+            <p className="semester-status-hint">
+              {currentSemester ? "Add term dates to track progress" : "Set one up in Semester"}
+            </p>
+          )}
+        </div>
 
         <nav className="side-nav" aria-label="Main navigation">
           <p>Plan</p>
           {primaryNavigation.map((item) => {
             const Icon = item.icon;
-            const active = pathname === item.href;
+            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
             return (
               <Link
                 href={item.href}
@@ -95,13 +100,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         </nav>
 
         <div className="sidebar-spacer" />
-        <div className="planner-note">
-          <Sparkles size={18} aria-hidden="true" />
-          <div>
-            <strong>{todayCapacity ? "Today reflects your saved plan" : "Capacity needs your input"}</strong>
-            <span>{todayCapacity ? `${formatMinutes(todayCapacity.remaining_focus_minutes)} focus time remains` : "Add availability in Settings"}</span>
-          </div>
-        </div>
         <Link href="/settings" className="sidebar-settings">
           <Settings size={18} aria-hidden="true" />
           Settings
@@ -147,15 +145,23 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function semesterCode(semester: Semester) {
-  const start = new Date(`${semester.start_date}T12:00:00`);
-  const season = start.getMonth() < 4 ? "W" : start.getMonth() < 8 ? "S" : "F";
-  return `${season}${String(start.getFullYear()).slice(-2)}`;
-}
+const DAY_MS = 86_400_000;
+const WEEK_MS = DAY_MS * 7;
 
-function formatMinutes(minutes: number) {
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+/** How far the active term has run, so the sidebar carries progress instead of a restated name. */
+function semesterTerm(semester: Semester) {
+  const start = new Date(`${semester.start_date}T00:00:00`).getTime();
+  const end = new Date(`${semester.end_date}T23:59:59`).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end) || end <= start) return null;
+
+  const now = Date.now();
+  if (now < start) {
+    const days = Math.ceil((start - now) / DAY_MS);
+    return { percent: 0, label: days === 1 ? "Starts tomorrow" : `Starts in ${days} days` };
+  }
+  if (now > end) return { percent: 100, label: "Term complete" };
+
+  const totalWeeks = Math.max(1, Math.ceil((end - start) / WEEK_MS));
+  const week = Math.min(totalWeeks, Math.floor((now - start) / WEEK_MS) + 1);
+  return { percent: Math.round(((now - start) / (end - start)) * 100), label: `Week ${week} of ${totalWeeks}` };
 }
