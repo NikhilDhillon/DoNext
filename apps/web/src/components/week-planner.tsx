@@ -5,8 +5,8 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
-  Copy,
-  GripVertical,
+  Flag,
+  GraduationCap,
   LoaderCircle,
   Plus,
 } from "lucide-react";
@@ -18,7 +18,9 @@ import {
   cachedDateFormat,
   calendarLaneLayout,
   clamp,
+  endMinuteForBlock,
   fixedEventLabel,
+  focusBounds,
   isDraftDay,
   resolveDragTarget,
   unavailableRuns,
@@ -31,6 +33,7 @@ import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest } from "@/lib/api";
 import type {
   AvailabilityWindow,
+  PlannerTask,
   PlanningEntry,
   PlanningView,
   ScheduleBlock,
@@ -123,7 +126,8 @@ export function WeekPlanner() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
   const [detailsEntry, setDetailsEntry] = useState<PlanningEntry | null>(null);
-  const [duplicateEntry, setDuplicateEntry] = useState<PlanningEntry | null>(null);
+  const [detailsTask, setDetailsTask] = useState<PlannerTask | null>(null);
+  const [suggestedTask, setSuggestedTask] = useState<PlannerTask | null>(null);
   const [editorDate, setEditorDate] = useState("");
   const [editingDraft, setEditingDraft] = useState(false);
   const [selectedDay, setSelectedDay] = useState("");
@@ -131,8 +135,8 @@ export function WeekPlanner() {
   // loop, so following the pointer costs no render at all and the tree re-renders at most once
   // per fifteen-minute step rather than once per frame.
   const [dragTarget, setDragTarget] = useState<DragTarget | null>(null);
-  const [moveStatus, setMoveStatus] = useState<string | null>(null);
-  const [moveError, setMoveError] = useState<string | null>(null);
+  const [moveToast, setMoveToast] = useState<{ text: string; tone: "status" | "error" } | null>(null);
+  const [toastClosing, setToastClosing] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
   const scrollerRef = useRef<HTMLDivElement>(null);
   const dragSessionRef = useRef<DragSession | null>(null);
@@ -169,16 +173,24 @@ export function WeekPlanner() {
     flushPendingSaves();
     document.body.classList.remove("dragging-block");
   }, [flushPendingSaves]);
-  // A move toast is a passing remark, not something to leave parked on screen: it clears itself,
-  // and a fresh one restarts the clock rather than inheriting whatever was left of the last one.
+  // A move toast is a passing remark, not something to leave parked on screen: it fades itself
+  // out, and a fresh toast (shown via showToast, which resets the closing flag) restarts the
+  // clock rather than inheriting what was left of the last one. An error sits a little longer —
+  // there is more to read, and it usually wants acting on.
   useEffect(() => {
-    if (!moveStatus && !moveError) return;
-    const timer = setTimeout(() => {
-      setMoveStatus(null);
-      setMoveError(null);
-    }, moveError ? 5000 : 3200);
-    return () => clearTimeout(timer);
-  }, [moveStatus, moveError]);
+    if (!moveToast) return;
+    const hide = setTimeout(() => setToastClosing(true), moveToast.tone === "error" ? 5200 : 3200);
+    return () => clearTimeout(hide);
+  }, [moveToast]);
+  useEffect(() => {
+    if (!toastClosing) return;
+    const clear = setTimeout(() => setMoveToast(null), 200);
+    return () => clearTimeout(clear);
+  }, [toastClosing]);
+  function showToast(text: string, tone: "status" | "error") {
+    setToastClosing(false);
+    setMoveToast({ text, tone });
+  }
 
   if ((plan.loading || semesters.loading) && !plan.data) return <WeekState loading message="Building your real week" />;
   if (openOn) return <WeekState loading message={`Opening the ${openOn < (plan.data?.start_date ?? "") ? "last" : "first"} week of your semester`} />;
@@ -198,7 +210,13 @@ export function WeekPlanner() {
         ? "after" as const
         : null
     : null;
-  const { startHour, endHour } = calendarBounds(items, data.timezone);
+  // The grid is also an editing surface, so its range has to include every saved focus window,
+  // not just the hours that already contain events. In particular, a 12:00 AM end is stored as
+  // 00:00 but represents the end of this day (24:00), not the top of the next day's grid.
+  const focusBoundary = availability.data?.length
+    ? focusBounds(availability.data)
+    : undefined;
+  const { startHour, endHour } = calendarBounds(items, data.timezone, focusBoundary);
   // Every label sits at the top of its own hour, so the closing hour needs a band to label. One
   // trailing hour gives it that, and leaves the last block room to breathe.
   const axisEnd = Math.min(endHour + 1, 24);
@@ -240,6 +258,18 @@ export function WeekPlanner() {
         : [{ column: index + 1, from: startHour * 60, to: axisEnd * 60, key: `${day.date}:all` }]
     ))
     : [];
+  // Deadlines remain visible until the work is completed, even after its time has been placed.
+  // Group them onto the visible days only; a task due next month says nothing about this week.
+  const deadlinesByDay = new Map<string, PlannerTask[]>();
+  for (const task of data.deadlines) {
+    if (!task.deadline_at) continue;
+    const due = dateInTimezone(task.deadline_at, data.timezone);
+    if (due < data.start_date || due > data.end_date) continue;
+    const bucket = deadlinesByDay.get(due);
+    if (bucket) bucket.push(task);
+    else deadlinesByDay.set(due, [task]);
+  }
+  const hasDeadlines = deadlinesByDay.size > 0;
   const activeDay = selectedDay && data.days.some((day) => day.date === selectedDay)
     ? selectedDay
     : data.days.some((day) => day.date === today)
@@ -249,33 +279,80 @@ export function WeekPlanner() {
     .filter((item) => dateInTimezone(item.startAt, data.timezone) === activeDay)
     .sort((first, second) => first.startAt.localeCompare(second.startAt));
 
-  function openNew(date: string) {
+  function openNew(date: string, task: PlannerTask | null = null) {
+    setDetailsTask(null);
     setSelectedEntry(null);
-    setDuplicateEntry(null);
+    setSuggestedTask(task);
     setEditingDraft(Boolean(draft));
     setEditorDate(date);
     setEditorOpen(true);
   }
 
   function openItem(item: CalendarItem) {
+    setDetailsTask(null);
     if (!item.entry.editable) {
       setDetailsEntry(item.entry);
       return;
     }
-    setDuplicateEntry(null);
+    setSuggestedTask(null);
     setSelectedEntry(item.entry);
     setEditingDraft(item.draft);
     setEditorDate(dateInTimezone(item.startAt, data.timezone));
     setEditorOpen(true);
   }
 
-  function duplicateItem(item: CalendarItem) {
-    if (!item.entry || !item.draft) return;
-    setSelectedEntry(null);
-    setDuplicateEntry(item.entry);
-    setEditingDraft(true);
-    setEditorDate(dateInTimezone(item.startAt, data.timezone));
-    setEditorOpen(true);
+  /** Duplicate drops a copy straight into the draft — the slot right after the original, or
+      right before it, or the original's own time — so it is one click, not a second form. */
+  async function duplicateSelectedItem() {
+    const entry = selectedEntry;
+    if (!entry || !editingDraft || !draft) return;
+    setEditorOpen(false);
+    const spanMs = new Date(entry.end_at).getTime() - new Date(entry.start_at).getTime();
+    const shiftedBy = (from: string, deltaMs: number) =>
+      new Date(new Date(from).getTime() + deltaMs).toISOString();
+    const slots = [
+      [entry.end_at, shiftedBy(entry.end_at, spanMs)],
+      [shiftedBy(entry.start_at, -spanMs), entry.start_at],
+      [entry.start_at, entry.end_at],
+    ];
+    let failure: unknown = null;
+    for (const [startAt, endAt] of slots) {
+      try {
+        const copy = await apiRequest<ScheduleBlock>(`/schedule-proposals/${draft.id}/blocks`, {
+          method: "POST",
+          body: JSON.stringify({
+            title: entry.title,
+            task_id: entry.task_id,
+            goal_id: entry.task_id ? null : entry.goal_id,
+            block_type: entry.block_type,
+            locked: false,
+            start_at: startAt,
+            end_at: endAt,
+          }),
+        });
+        proposal.setData((current) => current && ({ ...current, blocks: [...current.blocks, copy] }));
+        window.dispatchEvent(new Event("donext:planning-updated"));
+        showToast(`Added a copy of ${entry.title}.`, "status");
+        void refresh();
+        return;
+      } catch (error) {
+        failure = error;
+      }
+    }
+    showToast(
+      failure instanceof Error ? failure.message : "DoNext could not duplicate that block.",
+      "error",
+    );
+  }
+
+  /** A deadline is an assignment or exam, not a time block. Open its details first so merely
+      inspecting it cannot be mistaken for choosing when to work on it. */
+  function openDeadline(task: PlannerTask) {
+    setDetailsTask(task);
+  }
+
+  function planDeadline(task: PlannerTask) {
+    openNew(activeDay, task);
   }
 
   /** The days, geometry and rules a drag is resolved against. Read fresh on every frame. */
@@ -317,7 +394,7 @@ export function WeekPlanner() {
   }
 
   function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLElement>) {
-    // The grip is the only drag target, leaving the rest of every card as one reliable open action.
+    // A short press still opens the editor. Only pointer travel beyond the slop becomes a drag.
     if (!draft || event.button !== 0) return;
     const grid = gridRef.current;
     if (!grid) return;
@@ -356,18 +433,22 @@ export function WeekPlanner() {
       if (!session || moveEvent.pointerId !== session.pointerId) return;
       session.pointerX = moveEvent.clientX;
       session.pointerY = moveEvent.clientY;
-      if (session.active) return;
+      if (session.active) {
+        moveEvent.preventDefault();
+        return;
+      }
       if (Math.abs(moveEvent.clientX - session.originX) < slop
         && Math.abs(moveEvent.clientY - session.originY) < slop) return;
       session.active = true;
+      moveEvent.preventDefault();
       session.node.classList.add("lifted");
       // The press has already started a text selection and the browser tooltip is on its way.
       // Neither belongs on a card being dragged.
       session.node.removeAttribute("title");
       window.getSelection()?.removeAllRanges();
       document.body.classList.add("dragging-block");
-      setMoveStatus(null);
-      setMoveError(null);
+      setToastClosing(false);
+      setMoveToast(null);
       runDragFrames();
     };
     const onUp = (upEvent: PointerEvent) => {
@@ -535,7 +616,10 @@ export function WeekPlanner() {
     if (!target.allowed) {
       setDragTarget(null);
       endDragSession(session, false);
-      setMoveError(`${target.blockedReason ?? "That slot is not free"} — ${session.block.title} stayed put.`);
+      showToast(
+        `${target.blockedReason ?? "That slot is not free"} — ${session.block.title} stayed put.`,
+        "error",
+      );
       return;
     }
     // The card is sitting on the drop shadow already. Moving the block and dropping the transform
@@ -561,8 +645,7 @@ export function WeekPlanner() {
 
   async function saveMove(block: ScheduleBlock, startAt: string, endAt: string) {
     if (!draft) return;
-    setMoveError(null);
-    setMoveStatus(`Moved ${block.title} to ${formatMoveTime(startAt, data.timezone)}.`);
+    showToast(`Moved ${block.title} to ${formatMoveTime(startAt, data.timezone)}.`, "status");
     try {
       const saved = await apiRequest<ScheduleBlock>(
         `/schedule-proposals/${draft.id}/blocks/${block.id}`,
@@ -572,8 +655,10 @@ export function WeekPlanner() {
     } catch (error) {
       // The move was drawn before it was saved, so a refusal has to take it back off the grid.
       applyMove(block.id, block.start_at, block.end_at);
-      setMoveStatus(null);
-      setMoveError(error instanceof Error ? error.message : "DoNext could not move that draft block.");
+      showToast(
+        error instanceof Error ? error.message : "DoNext could not move that draft block.",
+        "error",
+      );
     }
   }
 
@@ -599,14 +684,15 @@ export function WeekPlanner() {
     );
     if (!target) return;
     if (!target.allowed) {
-      setMoveStatus(null);
-      setMoveError(`${target.blockedReason ?? "That slot is not free"} — ${block.title} stayed put.`);
+      showToast(
+        `${target.blockedReason ?? "That slot is not free"} — ${block.title} stayed put.`,
+        "error",
+      );
       return;
     }
     if (target.unchanged) return;
     applyMove(block.id, target.startAt, target.endAt);
-    setMoveError(null);
-    setMoveStatus(`Moved ${block.title} to ${formatMoveTime(target.startAt, data.timezone)}.`);
+    showToast(`Moved ${block.title} to ${formatMoveTime(target.startAt, data.timezone)}.`, "status");
     scheduleSave(block, target.startAt, target.endAt);
   }
 
@@ -691,6 +777,18 @@ export function WeekPlanner() {
             </div>
           ))}
         </div>
+        {hasDeadlines ? (
+          <div className="calendar-deadlines live-calendar-header" aria-label="Deadlines this week">
+            <span aria-hidden />
+            {data.days.map((day) => (
+              <div key={day.date}>
+                {(deadlinesByDay.get(day.date) ?? []).map((task) => (
+                  <DeadlineCard task={task} timezone={data.timezone} onOpen={() => openDeadline(task)} key={task.id} />
+                ))}
+              </div>
+            ))}
+          </div>
+        ) : null}
         {outside && currentSemester ? (
           <div className="calendar-outside">
             <span><CalendarRange size={21} /></span>
@@ -785,7 +883,6 @@ export function WeekPlanner() {
                 weekStart={data.start_date}
                 startHour={startHour}
                 onOpen={() => openItem(item)}
-                onDuplicate={() => duplicateItem(item)}
                 lane={laneLayout[item.block ? `draft:${item.block.id}` : `fixed:${item.sourceEntry?.id}`]}
                 onDragStart={item.block ? (event) => beginDrag(item.block!, event) : undefined}
                 onNudge={item.block ? (event) => nudgeBlock(item.block!, event) : undefined}
@@ -838,12 +935,18 @@ export function WeekPlanner() {
               <Plus size={18} />
             </button>
           </header>
+          {(deadlinesByDay.get(activeDay) ?? []).length > 0 ? (
+            <div className="mobile-week-deadlines">
+              {(deadlinesByDay.get(activeDay) ?? []).map((task) => (
+                <DeadlineCard task={task} timezone={data.timezone} onOpen={() => openDeadline(task)} key={task.id} />
+              ))}
+            </div>
+          ) : null}
           {agendaItems.length ? agendaItems.map((item) => (
             <MobileAgendaItem
               item={item}
               timezone={data.timezone}
               onOpen={() => openItem(item)}
-              onDuplicate={() => duplicateItem(item)}
               key={item.key}
             />
           )) : outside && currentSemester ? (
@@ -869,18 +972,22 @@ export function WeekPlanner() {
         </div>
       </section>
 
-      <div className="week-status" aria-live="polite">
+      <div className="week-toast-slot" aria-live="polite">
         {dragTarget ? (
-          <span>
+          <span className="week-toast">
             {!dragTarget.allowed
               ? dragTarget.blockedReason
               : dragTarget.clamped
                 ? `${formatMoveTime(dragTarget.startAt, data.timezone)} · nearest open slot`
                 : formatMoveTime(dragTarget.startAt, data.timezone)}
           </span>
+        ) : moveToast ? (
+          <span
+            className={`week-toast${moveToast.tone === "error" ? " error" : ""}${toastClosing ? " closing" : ""}`}
+          >
+            {moveToast.text}
+          </span>
         ) : null}
-        {!dragTarget && moveStatus ? <span>{moveStatus}</span> : null}
-        {!dragTarget && moveError ? <span className="error">{moveError}</span> : null}
       </div>
 
       {currentSemester && (
@@ -891,8 +998,8 @@ export function WeekPlanner() {
           date={editorDate || data.start_date}
           tasks={data.unscheduled_tasks}
           entry={selectedEntry}
-          duplicateOf={duplicateEntry}
-          suggestedTask={null}
+          suggestedTask={suggestedTask}
+          onDuplicate={selectedEntry && editingDraft ? duplicateSelectedItem : undefined}
           onClose={() => setEditorOpen(false)}
           onSaved={refresh}
         />
@@ -912,6 +1019,25 @@ export function WeekPlanner() {
           </dl>
           <div className="dialog-actions">
             <button className="primary-button" type="button" onClick={() => setDetailsEntry(null)}>Done</button>
+          </div>
+        </FormDialog>
+      ) : null}
+      {detailsTask ? (
+        <FormDialog
+          open
+          title={detailsTask.name}
+          description={`${academicItemLabel(detailsTask.item_type)} details`}
+          onClose={() => setDetailsTask(null)}
+        >
+          <dl className="calendar-block-details">
+            <div><dt>Course</dt><dd>{detailsTask.course_code ?? "No course"}</dd></div>
+            <div><dt>Deadline</dt><dd>{formatTaskDeadline(detailsTask.deadline_at, data.timezone)}</dd></div>
+            <div><dt>Remaining estimate</dt><dd>{formatMinutes(detailsTask.remaining_minutes)}</dd></div>
+            <div><dt>Status</dt><dd>{taskStatusLabel(detailsTask.status)}</dd></div>
+          </dl>
+          <div className="dialog-actions">
+            <button className="secondary-button" type="button" onClick={() => setDetailsTask(null)}>Done</button>
+            <button className="primary-button" type="button" onClick={() => planDeadline(detailsTask)}>Plan work</button>
           </div>
         </FormDialog>
       ) : null}
@@ -979,7 +1105,6 @@ function WeekBlock({
   startHour,
   lane,
   onOpen,
-  onDuplicate,
   onDragStart,
   onNudge,
 }: {
@@ -989,7 +1114,6 @@ function WeekBlock({
   startHour: number;
   lane?: { lane: number; laneCount: number };
   onOpen: () => void;
-  onDuplicate: () => void;
   onDragStart?: (event: ReactPointerEvent<HTMLElement>) => void;
   onNudge?: (event: ReactKeyboardEvent<HTMLElement>) => void;
 }) {
@@ -1024,47 +1148,57 @@ function WeekBlock({
       <button
         className="week-block-open"
         type="button"
-        aria-label={`${item.entry.editable ? "Edit" : "Open"} ${item.title}`}
+        aria-label={onDragStart
+          ? `Edit ${item.title}. Drag to move, or use the arrow keys.`
+          : `${item.entry.editable ? "Edit" : "Open"} ${item.title}`}
+        onPointerDown={onDragStart}
+        onKeyDown={onNudge}
         onClick={onOpen}
       >
         {copy}
       </button>
-      {item.draft ? (
-        <div className="week-block-tools">
-          <button
-            className="week-block-duplicate"
-            type="button"
-            aria-label={`Duplicate ${item.title}`}
-            onClick={onDuplicate}
-          >
-            <Copy size={12} />
-          </button>
-          <button
-            className="week-block-grab"
-            type="button"
-            aria-label={`Move ${item.title}. Drag it, or use the arrow keys.`}
-            onPointerDown={onDragStart}
-            onKeyDown={onNudge}
-          >
-            <GripVertical size={13} />
-          </button>
-        </div>
-      ) : null}
     </article>
   );
 }
 
+/**
+ * A due date, styled as the same kind of object as everything else on the calendar — a colored
+ * left edge, a bold title, a quiet detail line beneath it — rather than as a floating badge that
+ * reads as decoration instead of as a real thing happening on that day.
+ */
+function DeadlineCard({ task, timezone, onOpen }: {
+  task: PlannerTask;
+  timezone: string;
+  onOpen: () => void;
+}) {
+  const exam = isExamItem(task.item_type);
+  const due = `${exam ? "Exam" : "Due"} ${formatTime(task.deadline_at!, timezone)}`;
+  const detail = task.course_code ? `${task.course_code} · ${due}` : due;
+  return (
+    <button
+      className={`calendar-deadline${exam ? " exam" : ""}`}
+      type="button"
+      title={`${task.name} — ${detail}`}
+      aria-label={`View details for ${task.name}`}
+      onClick={onOpen}
+    >
+      {exam ? <GraduationCap size={13} /> : <Flag size={13} />}
+      <span>
+        <strong>{task.name}</strong>
+        <small>{detail}</small>
+      </span>
+    </button>
+  );
+}
 
 function MobileAgendaItem({
   item,
   timezone,
   onOpen,
-  onDuplicate,
 }: {
   item: CalendarItem;
   timezone: string;
   onOpen: () => void;
-  onDuplicate: () => void;
 }) {
   const content = (
     <>
@@ -1081,11 +1215,6 @@ function MobileAgendaItem({
       >
         {content}
       </button>
-      {item.draft ? (
-        <button className="mobile-week-copy" type="button" aria-label={`Duplicate ${item.title}`} onClick={onDuplicate}>
-          <Copy size={15} />
-        </button>
-      ) : null}
     </article>
   );
 }
@@ -1131,14 +1260,21 @@ function nowRowOffset(data: PlanningView, startHour: number, endHour: number, at
   return { column: index + 1, top: (minutes / 60) * 60 };
 }
 
-function calendarBounds(items: CalendarItem[], timezone: string) {
-  if (!items.length) return { startHour: 8, endHour: 18 };
+function calendarBounds(
+  items: CalendarItem[],
+  timezone: string,
+  baseline = { startHour: 8, endHour: 18 },
+) {
+  if (!items.length) return baseline;
   const starts = items.map((item) => timeParts(item.startAt, timezone).hour);
   const ends = items.map((item) => {
     const end = timeParts(item.endAt, timezone);
-    return end.hour + (end.minute ? 1 : 0);
+    return Math.ceil(endMinuteForBlock(item.startAt, item.endAt, timezone, end) / 60);
   });
-  return { startHour: Math.max(Math.min(8, ...starts), 0), endHour: Math.min(Math.max(18, ...ends), 24) };
+  return {
+    startHour: Math.max(Math.min(baseline.startHour, ...starts), 0),
+    endHour: Math.min(Math.max(baseline.endHour, ...ends), 24),
+  };
 }
 
 function timeParts(value: string, timezone: string) {
@@ -1154,6 +1290,41 @@ function dateInTimezone(value: string, timezone: string) {
 
 function dateDifference(start: string, end: string) {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86_400_000);
+}
+
+function isExamItem(itemType: PlannerTask["item_type"]) {
+  return itemType === "midterm" || itemType === "final_exam";
+}
+
+function academicItemLabel(itemType: PlannerTask["item_type"]) {
+  if (!itemType) return "Task";
+  return itemType.replaceAll("_", " ").replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+}
+
+function formatTaskDeadline(deadline: string | null, timezone: string) {
+  if (!deadline) return "No deadline";
+  return new Intl.DateTimeFormat("en-CA", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: timezone,
+  }).format(new Date(deadline));
+}
+
+function taskStatusLabel(status: PlannerTask["status"]) {
+  const labels: Record<PlannerTask["status"], string> = {
+    pending: "Not started",
+    in_progress: "In progress",
+    completed: "Completed",
+    skipped: "Skipped",
+  };
+  return labels[status];
+}
+
+function formatMinutes(minutes: number) {
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder ? `${hours} hr ${remainder} min` : `${hours} hr`;
 }
 
 function addDays(value: string, days: number) {

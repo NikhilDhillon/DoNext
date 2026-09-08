@@ -277,12 +277,15 @@ export type PlanningEntry = {
 export type PlannerTask = {
   id: string;
   name: string;
+  status: PlanningTask["status"];
   remaining_minutes: number;
   deadline_at: string | null;
   priority: PlanningTask["priority"];
   intensity: PlanningTask["intensity"];
   course_code: string | null;
   goal_name: string | null;
+  // Set only for work tied to a graded item, so a deadline can be told apart from an exam's.
+  item_type: AcademicItem["item_type"] | null;
 };
 
 export type PlanningCapacity = {
@@ -301,9 +304,24 @@ export type PlanningView = {
   timezone: string;
   entries: PlanningEntry[];
   days: { date: string; capacity: PlanningCapacity }[];
+  deadlines: PlannerTask[];
   unscheduled_tasks: PlannerTask[];
   next_entry_id: string | null;
   warnings: string[];
+};
+
+export type SemesterDeadline = {
+  id: string;
+  /** Course work is edited through its academic item; goal work is edited as a plain task. */
+  kind: "academic_item" | "task";
+  name: string;
+  due_at: string;
+  course_id: string | null;
+  course_code: string | null;
+  item_type: AcademicItem["item_type"] | null;
+  estimated_minutes: number | null;
+  remaining_minutes: number | null;
+  weight_percent: number | null;
 };
 
 export type SemesterPlanning = {
@@ -324,14 +342,7 @@ export type SemesterPlanning = {
     load_percent: number | null;
     risk: "low" | "medium" | "high" | "unknown";
   }[];
-  deadlines: {
-    id: string;
-    name: string;
-    due_at: string;
-    course_code: string | null;
-    remaining_minutes: number | null;
-    weight_percent: number | null;
-  }[];
+  deadlines: SemesterDeadline[];
 };
 
 export type OutlineItemProposal = {

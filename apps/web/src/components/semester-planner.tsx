@@ -2,10 +2,17 @@
 
 import { AlertTriangle, CalendarRange, CheckCircle2, LoaderCircle } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { DeadlineEditor } from "@/components/deadline-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
-import type { ScheduleProposal, Semester, SemesterPlanning } from "@/lib/types";
+import type {
+  Course,
+  ScheduleProposal,
+  Semester,
+  SemesterDeadline,
+  SemesterPlanning,
+} from "@/lib/types";
 
 export function SemesterPlanner() {
   const semesters = useApiResource<Semester[]>("/semesters");
@@ -19,6 +26,21 @@ export function SemesterPlanner() {
   const proposal = useApiResource<ScheduleProposal>(
     currentSemester ? `/semesters/${currentSemester.id}/schedule/proposal` : null,
   );
+  const courses = useApiResource<Course[]>(
+    currentSemester ? `/semesters/${currentSemester.id}/courses` : null,
+  );
+  const deadlineScroll = useRef<HTMLDivElement | null>(null);
+  // Null while the editor is closed; a wrapped deadline (or a null one, to add) while it is open.
+  const [editing, setEditing] = useState<{ deadline: SemesterDeadline | null } | null>(null);
+
+  // Mid-semester the list opens on dates that have already passed, so start it at the next one.
+  useEffect(() => {
+    const container = deadlineScroll.current;
+    const next = container?.querySelector(".deadline-row:not(.past)");
+    if (!container || !next) return;
+    const offset = next.getBoundingClientRect().top - container.getBoundingClientRect().top;
+    container.scrollTop = Math.max(container.scrollTop + offset - 42, 0);
+  }, [planning.data]);
 
   if ((semesters.loading || planning.loading) && !planning.data) {
     return <SemesterState loading message="Calculating your semester from saved work" />;
@@ -78,21 +100,77 @@ export function SemesterPlanner() {
       </section>
 
       <div className="semester-grid">
-        <section className="deadline-card">
-          <div className="section-heading"><div><h2>Important dates</h2><p>Confirmed milestones shaping remaining demand</p></div><span className="muted-label">{data.deadlines.length} total</span></div>
-          {data.deadlines.length ? (
-            <div className="deadline-list">
-              {data.deadlines.map((deadline) => {
-                return (
-                  <article key={deadline.id}>
-                    <time dateTime={deadline.due_at}><strong>{datePart(deadline.due_at, "day")}</strong><span>{datePart(deadline.due_at, "month")}</span></time>
-                    <div><h3>{deadline.name}</h3><p>{deadlineContext(deadline)}</p></div>
-                    <span className={`risk-badge ${deadline.remaining_minutes == null ? "medium" : "low"}`}>{deadline.remaining_minutes == null ? "Estimate missing" : `${formatMinutes(deadline.remaining_minutes)} left`}</span>
-                  </article>
-                );
-              })}
+        <section className="deadline-panel">
+          <div className="section-heading">
+            <div><h2>Important dates</h2><p>Confirmed milestones shaping remaining demand</p></div>
+            <div className="deadline-panel-actions">
+              <span className="muted-label">{data.deadlines.length} total</span>
+              <button
+                className="text-button"
+                disabled={!courses.data?.length}
+                title={courses.data?.length ? undefined : "Add a course before adding dates."}
+                type="button"
+                onClick={() => setEditing({ deadline: null })}
+              >
+                Add date
+              </button>
             </div>
-          ) : <div className="planner-empty compact"><CalendarRange size={23} /><h3>No confirmed deadlines yet.</h3><p>Import an outline or add dated course work to build this view.</p></div>}
+          </div>
+          {data.deadlines.length ? (
+            <div className="deadline-scroll" ref={deadlineScroll}>
+              {groupDeadlines(data.deadlines).map((group) => (
+                <section className="deadline-group" key={group.key}>
+                  <h3 className="deadline-month">{group.month}{group.year && <em>{group.year}</em>}</h3>
+                  <ul>
+                    {group.items.map((deadline) => {
+                      const urgency = deadlineUrgency(deadline.due_at);
+                      const heavy = (deadline.weight_percent ?? 0) >= 15;
+                      return (
+                        <li className={`deadline-row ${urgency.tone}`} key={deadline.id}>
+                          <button
+                            aria-label={`Edit ${deadline.name}`}
+                            type="button"
+                            onClick={() => setEditing({ deadline })}
+                          >
+                            <time dateTime={deadline.due_at}>
+                              <span>{datePart(deadline.due_at, "weekday")}</span>
+                              <strong>{datePart(deadline.due_at, "day")}</strong>
+                            </time>
+                            <div className="deadline-copy">
+                              <h4>{deadline.name}</h4>
+                              <p>
+                                <span className="deadline-course">{deadline.course_code || "Course work"}</span>
+                                {deadline.weight_percent != null && (
+                                  <span className={`deadline-weight${heavy ? " heavy" : ""}`}>{deadline.weight_percent}% of grade</span>
+                                )}
+                              </p>
+                            </div>
+                            <div className="deadline-meta">
+                              <span className={`deadline-effort${deadline.remaining_minutes == null ? " missing" : ""}`}>
+                                {deadline.remaining_minutes == null ? "Estimate missing" : `${formatMinutes(deadline.remaining_minutes)} left`}
+                              </span>
+                              <small>{urgency.label}</small>
+                            </div>
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          ) : (
+            <div className="planner-empty compact">
+              <CalendarRange size={23} />
+              <h3>No confirmed deadlines yet.</h3>
+              <p>Import an outline, or add a dated milestone to build this view.</p>
+              {courses.data?.length ? (
+                <button className="secondary-button" type="button" onClick={() => setEditing({ deadline: null })}>
+                  Add a date
+                </button>
+              ) : null}
+            </div>
+          )}
         </section>
         <aside className={`risk-card ${health.className}`}>
           <div className="risk-card-icon">{attentionWeek ? <AlertTriangle size={20} /> : <CheckCircle2 size={20} />}</div>
@@ -102,6 +180,16 @@ export function SemesterPlanner() {
           {attentionWeek && <small className="risk-calculation">{formatMinutes(attentionWeek.demand_minutes)} demand · {formatMinutes(attentionWeek.capacity_minutes)} capacity</small>}
         </aside>
       </div>
+
+      <DeadlineEditor
+        courses={courses.data ?? []}
+        deadline={editing?.deadline ?? null}
+        open={editing !== null}
+        onClose={() => setEditing(null)}
+        onSaved={async () => {
+          await planning.reload();
+        }}
+      />
     </main>
   );
 }
@@ -148,15 +236,47 @@ function weekTooltip(week: SemesterPlanning["weeks"][number]) {
   return `Week ${week.week_number}: ${week.load_percent}% load, ${formatMinutes(week.demand_minutes)} remaining work`;
 }
 
-function deadlineContext(deadline: SemesterPlanning["deadlines"][number]) {
-  const pieces = [deadline.course_code || "Course work"];
-  if (deadline.weight_percent != null) pieces.push(`${deadline.weight_percent}% of course grade`);
-  return pieces.join(" · ");
+function groupDeadlines(deadlines: SemesterDeadline[]) {
+  const groups: { key: string; month: string; year: string | null; items: SemesterDeadline[] }[] = [];
+  let previousYear: string | null = null;
+  for (const deadline of deadlines) {
+    const key = deadline.due_at.slice(0, 7);
+    const last = groups[groups.length - 1];
+    if (last?.key === key) {
+      last.items.push(deadline);
+      continue;
+    }
+    const year = deadline.due_at.slice(0, 4);
+    groups.push({ key, month: datePart(deadline.due_at, "month"), year: year === previousYear ? null : year, items: [deadline] });
+    previousYear = year;
+  }
+  return groups;
 }
 
-function datePart(value: string, part: "day" | "month") {
-  const calendarDate = value.slice(0, 10);
-  return new Intl.DateTimeFormat("en-CA", part === "day" ? { day: "2-digit", timeZone: "UTC" } : { month: "short", timeZone: "UTC" }).format(new Date(`${calendarDate}T12:00:00Z`)).toUpperCase();
+function deadlineUrgency(dueAt: string) {
+  const days = daysUntil(dueAt);
+  if (days < 0) return { tone: "past", label: days === -1 ? "Yesterday" : `${Math.abs(days)} days ago` };
+  if (days === 0) return { tone: "now", label: "Today" };
+  if (days === 1) return { tone: "now", label: "Tomorrow" };
+  if (days <= 7) return { tone: "soon", label: `In ${days} days` };
+  if (days <= 13) return { tone: "near", label: `In ${days} days` };
+  return { tone: days <= 28 ? "near" : "later", label: `In ${Math.round(days / 7)} weeks` };
+}
+
+function daysUntil(dueAt: string) {
+  const now = new Date();
+  const due = Date.parse(`${dueAt.slice(0, 10)}T00:00:00Z`);
+  return Math.round((due - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+}
+
+const dateParts: Record<"day" | "month" | "weekday", Intl.DateTimeFormatOptions> = {
+  day: { day: "numeric", timeZone: "UTC" },
+  month: { month: "long", timeZone: "UTC" },
+  weekday: { weekday: "short", timeZone: "UTC" },
+};
+
+function datePart(value: string, part: "day" | "month" | "weekday") {
+  return new Intl.DateTimeFormat("en-CA", dateParts[part]).format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
 }
 
 function formatMinutes(minutes: number) {

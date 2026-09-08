@@ -301,12 +301,14 @@ function NewWorkForm({
   const [courseId, setCourseId] = useState(courses[0]?.id ?? "");
   const [kind, setKind] = useState<NewWorkKind>("assignment");
   const [name, setName] = useState("");
-  const [dueAt, setDueAt] = useState("");
+  const [dueDate, setDueDate] = useState("");
+  // Course work is due at the end of its day unless the student says otherwise.
+  const [dueTime, setDueTime] = useState("23:59");
   const [hours, setHours] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function submit() {
-    if (!courseId || !name.trim() || !dueAt) {
+    if (!courseId || !name.trim() || !dueDate) {
       onError("A course, a name, and a deadline are needed.");
       return;
     }
@@ -324,7 +326,7 @@ function NewWorkForm({
           body: JSON.stringify({
             item_type: kind,
             name: name.trim(),
-            due_at: new Date(dueAt).toISOString(),
+            due_at: new Date(`${dueDate}T${dueTime || "23:59"}`).toISOString(),
             activate: true,
             estimated_minutes: minutes,
           }),
@@ -373,9 +375,17 @@ function NewWorkForm({
       <label>
         <span>Due</span>
         <input
-          type="datetime-local"
-          value={dueAt}
-          onChange={(event) => setDueAt(event.target.value)}
+          type="date"
+          value={dueDate}
+          onChange={(event) => setDueDate(event.target.value)}
+        />
+      </label>
+      <label>
+        <span>Time</span>
+        <input
+          type="time"
+          value={dueTime}
+          onChange={(event) => setDueTime(event.target.value)}
         />
       </label>
       <label>

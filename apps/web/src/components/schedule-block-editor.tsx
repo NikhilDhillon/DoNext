@@ -1,6 +1,6 @@
 "use client";
 
-import { LoaderCircle, Save, Trash2 } from "lucide-react";
+import { Copy, LoaderCircle, Save, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import "./schedule-block-editor.css";
@@ -22,9 +22,9 @@ type ScheduleBlockEditorProps = {
   date: string;
   tasks: PlannerTask[];
   entry: PlanningEntry | null;
-  duplicateOf?: PlanningEntry | null;
   suggestedTask: PlannerTask | null;
   proposalId?: string;
+  onDuplicate?: () => Promise<void> | void;
   onClose: () => void;
   onSaved: () => Promise<void> | void;
 };
@@ -35,9 +35,9 @@ export function ScheduleBlockEditor({
   date,
   tasks,
   entry,
-  duplicateOf = null,
   suggestedTask,
   proposalId,
+  onDuplicate,
   onClose,
   onSaved,
 }: ScheduleBlockEditorProps) {
@@ -66,7 +66,7 @@ export function ScheduleBlockEditor({
         title: String(form.get("title")),
         task_id: taskId,
         fixed_event_id: taskId ? null : entry?.kind === "scheduled_block" ? null : undefined,
-        goal_id: taskId ? null : (entry ?? duplicateOf)?.goal_id ?? null,
+        goal_id: taskId ? null : entry?.goal_id ?? null,
         start_at: new Date(String(form.get("start_at"))).toISOString(),
         end_at: new Date(String(form.get("end_at"))).toISOString(),
         block_type: String(form.get("block_type")),
@@ -130,21 +130,22 @@ export function ScheduleBlockEditor({
     }
   }
 
-  const source = entry ?? duplicateOf;
-  const startValue = source ? toDateTimeInput(source.start_at) : defaults.start;
-  const endValue = source ? toDateTimeInput(source.end_at) : defaults.end;
-  const selectedTaskId = source?.task_id ?? suggestedTask?.id ?? "";
-  const title = source?.title ?? suggestedTask?.name ?? "";
-  const formKey = `${entry?.id ?? duplicateOf?.id ?? "new"}:${suggestedTask?.id ?? "none"}:${date}:${defaults.start}:${open}`;
+  const startValue = entry ? toDateTimeInput(entry.start_at) : defaults.start;
+  const endValue = entry ? toDateTimeInput(entry.end_at) : defaults.end;
+  const selectedTaskId = entry?.task_id ?? suggestedTask?.id ?? "";
+  const title = entry?.title ?? suggestedTask?.name ?? "";
+  const linkableTasks = suggestedTask && !tasks.some((task) => task.id === suggestedTask.id)
+    ? [suggestedTask, ...tasks]
+    : tasks;
+  const formMode = entry ? `edit:${entry.id}` : "new";
+  const formKey = `${formMode}:${suggestedTask?.id ?? "none"}:${date}:${defaults.start}:${open}`;
 
   return (
     <FormDialog
       open={open}
-      title={entry ? "Adjust time block" : duplicateOf ? "Duplicate time block" : "Plan a time block"}
+      title={entry ? "Adjust time block" : "Plan a time block"}
       description={entry
         ? "Adjust this block’s date and times."
-        : duplicateOf
-        ? "Choose a new time for this copy before adding it to the draft."
         : proposalId
           ? "Set a duration or choose exact times. Saved to this draft until you accept it."
           : "Set a duration to find an open slot, or choose exact times."}
@@ -155,54 +156,37 @@ export function ScheduleBlockEditor({
           <span>Title</span>
           <input name="title" defaultValue={title} placeholder="Focused work" required />
         </label>
-        <label>
-          <span>Linked task <small>Optional</small></span>
-          <select name="task_id" defaultValue={selectedTaskId}>
-            <option value="">No linked task</option>
-            {entry?.task_id && !tasks.some((task) => task.id === entry.task_id) && (
-              <option value={entry.task_id}>{entry.course_code ? `${entry.course_code} · ` : ""}{entry.title}</option>
-            )}
-            {tasks.map((task) => (
-              <option value={task.id} key={task.id}>{task.course_code ? `${task.course_code} · ` : ""}{task.name}</option>
-            ))}
-          </select>
+        <BlockLinksAndType
+          key={formKey}
+          entry={entry}
+          tasks={linkableTasks}
+          initialTaskId={selectedTaskId}
+        >
+          <BlockTimingChoice key={formKey} allowDuration={!entry} semesterId={semesterId} proposalId={proposalId} startValue={startValue}>
+          {proposalId ? (
+            <DraftBlockTimes
+              key={formKey}
+              startValue={startValue}
+              endValue={endValue}
+              availability={availability.data}
+              availabilityError={availability.error}
+            />
+          ) : <div className="form-row">
+            <label>
+              <span>Starts</span>
+              <input name="start_at" type="datetime-local" defaultValue={startValue} required />
+            </label>
+            <label>
+              <span>Ends</span>
+              <input name="end_at" type="datetime-local" defaultValue={endValue} required />
+            </label>
+          </div>}
+          </BlockTimingChoice>
+        </BlockLinksAndType>
+        <label className="checkbox-field">
+          <input name="locked" type="checkbox" defaultChecked={entry?.locked ?? false} />
+          <span><strong>Keep this time fixed</strong><small>Future planning will work around it.</small></span>
         </label>
-        <BlockTimingChoice key={formKey} allowDuration={!entry} semesterId={semesterId} proposalId={proposalId} startValue={startValue}>
-        {proposalId ? (
-          <DraftBlockTimes
-            key={formKey}
-            startValue={startValue}
-            endValue={endValue}
-            availability={availability.data}
-            availabilityError={availability.error}
-          />
-        ) : <div className="form-row">
-          <label>
-            <span>Starts</span>
-            <input name="start_at" type="datetime-local" defaultValue={startValue} required />
-          </label>
-          <label>
-            <span>Ends</span>
-            <input name="end_at" type="datetime-local" defaultValue={endValue} required />
-          </label>
-        </div>}
-        </BlockTimingChoice>
-        <div className="form-row">
-          <label>
-            <span>Type</span>
-            <select name="block_type" defaultValue={source?.block_type ?? "focus"}>
-              <option value="focus">Focused work</option>
-              <option value="goal">Personal goal</option>
-              <option value="commitment">Commitment</option>
-              <option value="break">Break</option>
-              <option value="personal">Personal</option>
-            </select>
-          </label>
-          <label className="checkbox-field planner-lock-field">
-            <input name="locked" type="checkbox" defaultChecked={source?.locked ?? false} />
-            <span><strong>Keep this time fixed</strong><small>Future planning will work around it.</small></span>
-          </label>
-        </div>
         {error && <p className="form-error" role="alert">{error}</p>}
         <div className="dialog-actions planner-dialog-actions">
           {entry && (
@@ -210,14 +194,113 @@ export function ScheduleBlockEditor({
               <Trash2 size={16} /> Remove
             </button>
           )}
+          {entry && onDuplicate ? (
+            <button
+              className="secondary-button"
+              disabled={busy}
+              type="button"
+              onClick={() => {
+                setError(null);
+                onDuplicate();
+              }}
+            >
+              <Copy size={16} /> Duplicate
+            </button>
+          ) : null}
           <button className="secondary-button" disabled={busy} type="button" onClick={close}>Cancel</button>
           <button className="primary-button" disabled={busy} type="submit">
             {busy ? <LoaderCircle className="spin" size={17} /> : <Save size={17} />}
-            {busy ? "Saving" : duplicateOf ? "Add copy" : "Save block"}
+            {busy ? "Saving" : "Save block"}
           </button>
         </div>
       </form>
     </FormDialog>
+  );
+}
+
+function BlockLinksAndType({ entry, tasks, initialTaskId, children }: {
+  entry: PlanningEntry | null;
+  tasks: PlannerTask[];
+  initialTaskId: string;
+  children: ReactNode;
+}) {
+  const [taskId, setTaskId] = useState(initialTaskId);
+  const [taskSelectionChanged, setTaskSelectionChanged] = useState(false);
+  const [chosenType, setChosenType] = useState<"focus" | "commitment">(
+    entry?.block_type === "commitment" ? "commitment" : "focus",
+  );
+  const preservedType = entry?.block_type && !["focus", "commitment"].includes(entry.block_type)
+    ? entry.block_type
+    : null;
+  const originalLinkedType = initialTaskId && entry ? entry.block_type : null;
+  const keptLinkedType = taskId && !taskSelectionChanged ? originalLinkedType : null;
+  const blockType = taskId ? keptLinkedType ?? "focus" : preservedType ?? chosenType;
+  const showsPreservedLinkedType = Boolean(taskId && keptLinkedType && keptLinkedType !== "focus");
+  const typeLabels: Record<string, string> = {
+    focus: "Focus session",
+    commitment: "Busy time",
+    goal: "Personal goal",
+    break: "Break",
+    personal: "Personal",
+  };
+
+  return (
+    <>
+      <label>
+        <span>Linked task <small>Optional</small></span>
+        <select
+          name="task_id"
+          value={taskId}
+          onChange={(event) => {
+            const nextTaskId = event.target.value;
+            setTaskId(nextTaskId);
+            setTaskSelectionChanged(true);
+            if (nextTaskId) setChosenType("focus");
+          }}
+        >
+          <option value="">No linked task</option>
+          {entry?.task_id && !tasks.some((task) => task.id === entry.task_id) && (
+            <option value={entry.task_id}>{entry.course_code ? `${entry.course_code} · ` : ""}{entry.title}</option>
+          )}
+          {tasks.map((task) => (
+            <option value={task.id} key={task.id}>{task.course_code ? `${task.course_code} · ` : ""}{task.name}</option>
+          ))}
+        </select>
+        {taskId && !showsPreservedLinkedType ? <small>Linked tasks are saved as focus sessions.</small> : null}
+      </label>
+      {children}
+      <input name="block_type" type="hidden" value={blockType} />
+      {showsPreservedLinkedType ? (
+        <label>
+          <span>Type</span>
+          <select aria-label="Type" value={blockType} disabled>
+            <option value={blockType}>{typeLabels[blockType]}</option>
+          </select>
+          <small>This existing type is kept until you choose a different linked task.</small>
+        </label>
+      ) : !taskId && preservedType ? (
+        <label>
+          <span>Type</span>
+          <select aria-label="Type" value={preservedType} disabled>
+            <option value={preservedType}>{typeLabels[preservedType]}</option>
+          </select>
+          <small>This existing type is kept so its meaning does not change.</small>
+        </label>
+      ) : !taskId ? (
+        <label>
+          <span>Type</span>
+          <select
+            aria-label="Type"
+            value={chosenType}
+            onChange={(event) => setChosenType(event.target.value as "focus" | "commitment")}
+          >
+            <option value="focus">Focus session</option>
+            <option value="commitment">Busy time</option>
+          </select>
+          <small>Focus counts toward your daily capacity. Busy time is time DoNext plans around.</small>
+        </label>
+      ) : null}
+    </>
   );
 }
 
