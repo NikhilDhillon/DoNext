@@ -43,6 +43,7 @@ class SchedulingItem:
     review_cadence_days: int | None = None
     review_phase_end_at: datetime | None = None
     course_id: str | None = None
+    source_id: str | None = None
     material_release_schedule: tuple[tuple[datetime, int], ...] = ()
     material_release_method: str | None = None
     strategic_lead: bool = False
@@ -65,7 +66,8 @@ class SchedulingWindow:
 @dataclass(frozen=True)
 class SchedulingPolicy:
     max_blocks_per_day: int | None = None
-    preferred_time_ranges: tuple[tuple[int | None, clock_time, clock_time], ...] = ()
+    # (activity source_id or None for the whole plan, weekday or None, start, end)
+    preferred_time_ranges: tuple[tuple[str | None, int | None, clock_time, clock_time], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -156,29 +158,25 @@ def solve_schedule(
     baseline = _greedy_baseline(
         items, sessions, windows, capacity_by_day, minimum_break_minutes, policy
     )
-    optimizer_attempted = policy is None or not policy.preferred_time_ranges
-    if not optimizer_attempted:
-        improved = None
-    else:
-        remaining = max(time_limit_seconds - (time.monotonic() - started), 0.05)
-        improved = _optimize_sessions(
-            items,
-            sessions,
-            windows,
-            capacity_by_day,
-            minimum_break_minutes,
-            baseline,
-            remaining,
-            policy,
-            minimize_excess_over,
-        )
+    remaining = max(time_limit_seconds - (time.monotonic() - started), 0.05)
+    improved = _optimize_sessions(
+        items,
+        sessions,
+        windows,
+        capacity_by_day,
+        minimum_break_minutes,
+        baseline,
+        remaining,
+        policy,
+        minimize_excess_over,
+    )
     result = improved or baseline
     placements = attach_displacement(items, result.placements, result.scheduled_minutes)
     return SchedulingResult(
         status=result.status,
         placements=placements,
         scheduled_minutes=result.scheduled_minutes,
-        timed_out=(optimizer_attempted and improved is None) or result.timed_out,
+        timed_out=improved is None or result.timed_out,
         used_baseline=improved is None,
         eligible_capacity_minutes=sum(capacity_by_day.values()),
         protected_free_minutes=_protected_free_minutes(windows),
@@ -357,37 +355,37 @@ def _best_greedy_slot(
             session.release_at or segment.start_at,
             item_ready_at or segment.start_at,
         )
-        start_at = _round_up(earliest)
         latest_end = min(
             segment.end_at,
             session.item.latest_end_at or segment.end_at,
         )
-        if start_at + timedelta(minutes=session.duration_minutes) > latest_end:
-            continue
-        score: tuple[object, ...]
-        if session.item.kind == "exam_prep":
-            score = (
-                _review_spacing_penalty(session.item, day, placed_days),
-                item_dates[(session.item.id, day)],
-                _preferred_time_penalty(start_at, policy),
-                start_at,
-                0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
-            )
-        elif session.item.kind in {"task", "distant_task"}:
-            score = (
-                _preferred_time_penalty(start_at, policy),
-                start_at,
-                0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
-            )
-        else:
-            day_load = used_by_day[day] / max(capacity_by_day.get(day, 1), 1)
-            score = (
-                _preferred_time_penalty(start_at, policy),
-                item_dates[(session.item.id, day)],
-                day_load,
-                start_at,
-            )
-        choices.append((score, index, start_at))
+        for start_at in _candidate_starts(session, policy, day, earliest, latest_end):
+            if start_at + timedelta(minutes=session.duration_minutes) > latest_end:
+                continue
+            score: tuple[object, ...]
+            if session.item.kind == "exam_prep":
+                score = (
+                    _review_spacing_penalty(session.item, day, placed_days),
+                    item_dates[(session.item.id, day)],
+                    _preferred_time_penalty(session.item, start_at, policy),
+                    start_at,
+                    0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
+                )
+            elif session.item.kind in {"task", "distant_task"}:
+                score = (
+                    _preferred_time_penalty(session.item, start_at, policy),
+                    start_at,
+                    0 if _energy_matches(session.item.intensity, segment.energy_level) else 1,
+                )
+            else:
+                day_load = used_by_day[day] / max(capacity_by_day.get(day, 1), 1)
+                score = (
+                    _preferred_time_penalty(session.item, start_at, policy),
+                    item_dates[(session.item.id, day)],
+                    day_load,
+                    start_at,
+                )
+            choices.append((score, index, start_at))
     if not choices:
         return None
     _, index, start_at = min(choices, key=lambda value: value[0])
@@ -401,6 +399,32 @@ def _in_review_phase(item: SchedulingItem, day: date) -> bool:
 # Early review is a soft preference for one block roughly every `review_cadence_days`. Days
 # closer than that are ranked last rather than forbidden, so a block still lands when the
 # spaced-out days have no opening.
+def _candidate_starts(
+    session: _Session,
+    policy: SchedulingPolicy | None,
+    day: date,
+    earliest: datetime,
+    latest_end: datetime,
+) -> list[datetime]:
+    """The earliest fit, plus the opening of any window this item's activity asked for.
+
+    Offering only the earliest fit means a preference for a late window can never be chosen: in a
+    segment running 08:00 to 23:00 the sole candidate is 08:00, whatever the preference says.
+    """
+    starts = [_round_up(earliest)]
+    for weekday, window_start, window_end in _preferred_ranges_for(session.item, policy):
+        if weekday is not None and weekday != day.weekday():
+            continue
+        zone = earliest.tzinfo
+        opens = _round_up(max(earliest, datetime.combine(day, window_start, tzinfo=zone)))
+        closes = min(latest_end, datetime.combine(day, window_end, tzinfo=zone))
+        if opens in starts:
+            continue
+        if opens + timedelta(minutes=session.duration_minutes) <= closes:
+            starts.append(opens)
+    return starts
+
+
 def _review_spacing_penalty(item: SchedulingItem, day: date, placed_days: set[date]) -> int:
     cadence = item.review_cadence_days
     if not cadence or not placed_days or not _in_review_phase(item, day):
@@ -874,6 +898,9 @@ def _optimize_sessions(
 
     timing_terms: list[cp_model.LinearExpr] = []
     distant_earliness_terms: list[cp_model.LinearExpr] = []
+    # Landing in a requested window is worth more than any amount of earliness for that session,
+    # and no more: the preference competes inside the timing tier and never over coverage.
+    preference_bonus = 2 * (latest_tick + 30)
     for index, alternative in enumerate(alternatives):
         effective_start = model.new_int_var(0, latest_tick, f"effective_{index}")
         model.add_multiplication_equality(
@@ -884,7 +911,18 @@ def _optimize_sessions(
             if _energy_matches(alternative.session.item.intensity, alternative.energy_level)
             else 0
         )
-        timing_terms.append(alternative.selected * (latest_tick + energy_bonus) - effective_start)
+        timing = alternative.selected * (latest_tick + energy_bonus) - effective_start
+        bounds = _preferred_tick_bounds(alternative, policy, epoch, windows_by_day)
+        if bounds is not None:
+            low, high = bounds
+            # Only the reward is enforced: the solver raises the flag whenever it legally can,
+            # which is exactly when the start sits in the window.
+            inside = model.new_bool_var(f"preferred_{index}")
+            model.add_implication(inside, alternative.selected)
+            model.add(alternative.start >= low).only_enforce_if(inside)
+            model.add(alternative.start <= high).only_enforce_if(inside)
+            timing = timing + inside * preference_bonus
+        timing_terms.append(timing)
         if alternative.session.item.kind == "distant_task":
             distant_earliness_terms.append(
                 (alternative.selected * latest_tick - effective_start)
@@ -1293,11 +1331,59 @@ def _energy_matches(intensity: str, energy_level: str) -> bool:
     return energy_level == "medium"
 
 
-def _preferred_time_penalty(start_at: datetime, policy: SchedulingPolicy | None) -> int:
+def _preferred_tick_bounds(
+    alternative: _Alternative,
+    policy: SchedulingPolicy | None,
+    epoch: datetime,
+    windows_by_day: dict[date, list[SchedulingWindow]],
+) -> tuple[int, int] | None:
+    """The alternative's day expressed in ticks, clipped to what its activity asked for."""
+    ranges = _preferred_ranges_for(alternative.session.item, policy)
+    if not ranges:
+        return None
+    day_windows = windows_by_day.get(alternative.day)
+    if not day_windows:
+        return None
+    zone = day_windows[0].start_at.tzinfo
+    for weekday, start, end in ranges:
+        if weekday is not None and weekday != alternative.day.weekday():
+            continue
+        low = _ticks_from(epoch, datetime.combine(alternative.day, start, tzinfo=zone))
+        high = _ticks_from(epoch, datetime.combine(alternative.day, end, tzinfo=zone))
+        if high <= low:
+            continue
+        return low, high - 1
+    return None
+
+
+def _preferred_ranges_for(
+    item: SchedulingItem, policy: SchedulingPolicy | None
+) -> list[tuple[int | None, clock_time, clock_time]]:
+    """The ranges that speak about this item: its own, else the ones scoped to nothing."""
     if policy is None or not policy.preferred_time_ranges:
+        return []
+    own = [
+        (weekday, start, end)
+        for activity, weekday, start, end in policy.preferred_time_ranges
+        if activity is not None and activity == item.source_id
+    ]
+    if own:
+        return own
+    return [
+        (weekday, start, end)
+        for activity, weekday, start, end in policy.preferred_time_ranges
+        if activity is None
+    ]
+
+
+def _preferred_time_penalty(
+    item: SchedulingItem, start_at: datetime, policy: SchedulingPolicy | None
+) -> int:
+    ranges = _preferred_ranges_for(item, policy)
+    if not ranges:
         return 0
     local_time = start_at.timetz().replace(tzinfo=None)
-    for weekday, start, end in policy.preferred_time_ranges:
+    for weekday, start, end in ranges:
         if weekday is not None and weekday != start_at.weekday():
             continue
         if start <= local_time < end:

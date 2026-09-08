@@ -98,6 +98,9 @@ class UserPreferenceUpdate(ApiModel):
 
 class UserPreferenceRead(UserPreferenceBase):
     id: uuid.UUID
+    # What a "remember this" revision left standing, in the student's own terms. A rule that
+    # shapes every later draft has to be visible somewhere it can be read and dropped.
+    remembered_schedule_preferences: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

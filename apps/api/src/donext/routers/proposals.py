@@ -57,6 +57,7 @@ from donext.schedule_revision import (
     RevisionInterpretation,
     ScheduleRevisionPolicy,
     interpret_revision_feedback,
+    read_remembered_policy,
 )
 from donext.scheduler import (
     SchedulingItem,
@@ -487,6 +488,7 @@ def place_activated_work(
         course_code = course.code if course else None
     item = SchedulingItem(
         id=identifier,
+        source_id=f"task:{task.id}",
         title=f"{course_code} · {task.name}" if course_code else task.name,
         target_minutes=task.remaining_minutes,
         minimum_session_minutes=task.minimum_session_minutes,
@@ -707,7 +709,16 @@ def _build_proposal(
         if future_start <= semester.end_date
         else []
     )
-    policy = interpretation.policy if interpretation is not None else None
+    # A remembered preference is a standing rule, so it shapes a draft generated from scratch
+    # too, not only the revision that saved it. A revision's own interpretation already carries
+    # the remembered policy as its base, so it is read here only when there is no interpretation.
+    policy = (
+        interpretation.policy
+        if interpretation is not None
+        else read_remembered_policy(
+            cast(dict[str, object] | None, preferences.schedule_revision_policy)
+        )
+    )
     if policy is not None:
         windows = _apply_avoid_time_ranges(windows, policy, timezone)
     preferred_session_minutes = _preferred_session_minutes(
@@ -1227,7 +1238,9 @@ def revise_proposal(
     interpretation = interpret_revision_feedback(
         payload,
         _revision_activities(db, current_user.id, previous),
-        cast(dict[str, object] | None, preferences.schedule_revision_policy),
+        read_remembered_policy(
+            cast(dict[str, object] | None, preferences.schedule_revision_policy)
+        ),
     )
     fallback_reasons = {
         "too_packed",
@@ -1775,7 +1788,8 @@ def _scheduler_policy(policy: ScheduleRevisionPolicy | None) -> SchedulingPolicy
     return SchedulingPolicy(
         max_blocks_per_day=policy.max_blocks_per_day,
         preferred_time_ranges=tuple(
-            (value.weekday, value.start, value.end) for value in policy.preferred_time_ranges
+            (value.activity, value.weekday, value.start, value.end)
+            for value in policy.preferred_time_ranges
         ),
     )
 
@@ -2650,6 +2664,7 @@ def _scheduling_items(
                 material_release_schedule = tuple(releases)
         scheduling_item = SchedulingItem(
             id=identifier,
+            source_id=f"task:{task.id}",
             title=title,
             target_minutes=target,
             minimum_session_minutes=task.minimum_session_minutes,
@@ -2798,6 +2813,7 @@ def _scheduling_items(
                         "moderate",
                         "flexible_commitment",
                         eligible_dates,
+                        source_id=f"goal:{goal.id}",
                     )
                 )
                 links[identifier] = (None, goal.id, "commitment")
@@ -2826,6 +2842,7 @@ def _scheduling_items(
                     "moderate",
                     "goal",
                     eligible_dates,
+                    source_id=f"goal:{goal.id}",
                 )
             )
             links[identifier] = (None, goal.id, "goal")

@@ -1,5 +1,6 @@
 import time
 from datetime import UTC, date, datetime, timedelta
+from datetime import time as clock_time
 from typing import cast
 
 import pytest
@@ -1102,3 +1103,69 @@ def test_ranking_distant_work_does_not_take_capacity_from_a_flexible_goal() -> N
     assert result.scheduled_minutes["goal:gym"] == 180
     assert result.scheduled_minutes["task:november"] == 0
     assert result.scheduled_minutes["task:october"] > 0
+
+
+def _flexible(identifier: str, source_id: str, minutes: int) -> SchedulingItem:
+    return SchedulingItem(
+        id=identifier,
+        source_id=source_id,
+        title=identifier,
+        target_minutes=minutes,
+        minimum_session_minutes=30,
+        preferred_session_minutes=60,
+        maximum_session_minutes=60,
+        priority_rank=3,
+        intensity="moderate",
+        kind="flexible_commitment",
+    )
+
+
+def test_a_preferred_range_moves_only_the_activity_it_names() -> None:
+    """A range scoped to one activity moves that activity, and nothing else.
+
+    "leetcode before bed" used to arrive as a plan-wide preference, so whichever item the solver
+    reached first took the evening and the named one could miss it entirely. The greedy also only
+    ever offered the earliest fit in a segment, so a late window could not be chosen at all.
+    """
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, day, 8, 0, tzinfo=UTC),
+            datetime(2026, 9, day, 23, 0, tzinfo=UTC),
+        )
+        for day in range(7, 21)
+    ]
+    # Sized to fit the requested window comfortably, so any block outside it is a real miss
+    # rather than the window simply running out of room.
+    items = [
+        _flexible("flex:leet", "goal:leet", 300),
+        _flexible("flex:french", "goal:french", 840),
+    ]
+    policy = scheduler.SchedulingPolicy(
+        preferred_time_ranges=(("goal:leet", None, clock_time(21, 0), clock_time(23, 0)),),
+    )
+
+    result = solve_schedule(items, windows, minimum_break_minutes=10, policy=policy)
+
+    leetcode = [p for p in result.placements if p.item_id == "flex:leet"]
+    french = [p for p in result.placements if p.item_id == "flex:french"]
+    assert leetcode and french
+    assert all(p.start_at.hour >= 21 for p in leetcode), [str(p.start_at) for p in leetcode]
+    # The unnamed activity keeps the rest of the day rather than being dragged along.
+    assert all(p.start_at.hour < 21 for p in french), [str(p.start_at) for p in french]
+
+
+def test_an_unscoped_preferred_range_still_applies_to_everything() -> None:
+    windows = [
+        SchedulingWindow(
+            datetime(2026, 9, 7, 9, 0, tzinfo=UTC),
+            datetime(2026, 9, 7, 23, 0, tzinfo=UTC),
+        )
+    ]
+    items = [_flexible("flex:leet:2026-09-07", "goal:leet", 60)]
+    policy = scheduler.SchedulingPolicy(
+        preferred_time_ranges=((None, None, clock_time(21, 0), clock_time(23, 0)),),
+    )
+
+    result = solve_schedule(items, windows, minimum_break_minutes=10, policy=policy)
+
+    assert result.placements[0].start_at.hour >= 21

@@ -75,6 +75,7 @@ export type Preferences = {
   preferred_session_minutes: number;
   minimum_break_minutes: number;
   freeze_window_minutes: number;
+  remembered_schedule_preferences: string[];
   created_at: string;
   updated_at: string;
 };

@@ -26,8 +26,8 @@ class Settings(BaseSettings):
     smtp_timeout_seconds: float = Field(default=5.0, ge=0.5, le=30.0)
     mail_from: str = "DoNext <no-reply@donext.local>"
     openai_api_key: str | None = None
-    openai_revision_model: str = "gpt-5.6-luna"
-    openai_revision_timeout_seconds: float = Field(default=2.0, ge=0.5, le=5.0)
+    openai_revision_model: str = "gpt-5.4-mini"
+    openai_revision_timeout_seconds: float = Field(default=8.0, ge=0.5, le=30.0)
 
 
 @lru_cache
