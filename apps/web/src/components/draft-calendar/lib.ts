@@ -4,6 +4,20 @@ import type { AvailabilityWindow, PlanningEntry, ScheduleBlock } from "@/lib/typ
 // verbatim from the calendar component so the scheduling rules stay in one place while the
 // presentation is rebuilt around them.
 
+// Building an Intl formatter costs ~30x what using one does, and the calendar formats every
+// block on every render — including every frame of a drag. They are immutable, so keep them.
+const dateFormatters = new Map<string, Intl.DateTimeFormat>();
+
+export function cachedDateFormat(locale: string, options: Intl.DateTimeFormatOptions) {
+  const key = `${locale}|${JSON.stringify(options)}`;
+  let formatter = dateFormatters.get(key);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, options);
+    dateFormatters.set(key, formatter);
+  }
+  return formatter;
+}
+
 export type UnscheduledItem = {
   id: string;
   name: string;
@@ -120,6 +134,181 @@ export function blockPayload(block: ScheduleBlock) {
   };
 }
 
+/** Where a drag currently points, whether or not the block may actually land there. */
+export type DragTarget = {
+  blockId: string;
+  /** Column the block would land in, as an index into the visible days. */
+  dayIndex: number;
+  /** Snapped start, in minutes from midnight in the calendar's timezone. */
+  minuteOfDay: number;
+  durationMinutes: number;
+  startAt: string;
+  endAt: string;
+  /** Whether a drop here would be accepted. */
+  allowed: boolean;
+  /** True when the landing was held back from where the pointer asked for it. */
+  clamped: boolean;
+  /** Why it would not be, short enough to sit on the drop shadow. */
+  blockedReason: string | null;
+  /** True when the target is where the block already sits, so dropping is a no-op. */
+  unchanged: boolean;
+};
+
+export type DragGeometry = {
+  /** Width of one day column in pixels. */
+  columnWidth: number;
+  /** Height of one minute of the day in pixels. */
+  pixelsPerMinute: number;
+};
+
+/**
+ * Resolve a pointer delta into the slot the block would land in.
+ *
+ * The target is always clamped into the grid rather than refused: a drag that wanders past the
+ * last day, above the first hour, or over an evening with no focus time still tracks the pointer
+ * and reports the nearest legal slot, with `allowed` saying whether the drop would be taken. A
+ * mid-drag null — which an earlier version returned for each of those cases — reads on screen as
+ * the card snapping home on every stray pixel.
+ */
+export function resolveDragTarget(
+  block: ScheduleBlock,
+  deltaX: number,
+  deltaY: number,
+  geometry: DragGeometry,
+  days: string[],
+  startHour: number,
+  endHour: number,
+  timezone: string,
+  availability: AvailabilityWindow[],
+  horizonStart: string,
+  horizonEnd: string,
+  lockedBlocks: ScheduleBlock[] = [],
+  snapMinutes = 15,
+): DragTarget | null {
+  if (!days.length || geometry.columnWidth <= 0 || geometry.pixelsPerMinute <= 0) return null;
+  const originalDayIndex = clamp(
+    dateDifference(days[0], dateInTimezone(block.start_at, timezone)),
+    0,
+    days.length - 1,
+  );
+  const dayIndex = clamp(
+    originalDayIndex + Math.round(deltaX / geometry.columnWidth),
+    0,
+    days.length - 1,
+  );
+  const targetDate = days[dayIndex];
+  const durationMinutes = Math.max(
+    Math.round((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000),
+    15,
+  );
+  const calendarMinutes = (endHour - startHour) * 60;
+  const originalStart = timeParts(block.start_at, timezone);
+  const originalMinutes = originalStart.hour * 60 + originalStart.minute - startHour * 60;
+  const snapped = Math.round(
+    (originalMinutes + deltaY / geometry.pixelsPerMinute) / snapMinutes,
+  ) * snapMinutes;
+  const requested = startHour * 60
+    + clamp(snapped, 0, Math.max(calendarMinutes - durationMinutes, 0));
+
+  // Rather than refuse a drop over an evening or a locked block, hold the landing at the nearest
+  // slot that would take it. Paired with the shading the calendar draws over unavailable time, a
+  // drag that reaches for 8am reads as being held at the start of the day, not as a rejection —
+  // and the only refusals left are days that could not hold the block anywhere.
+  const withinHorizon = isDraftDay(targetDate, horizonStart, horizonEnd);
+  const openRuns = withinHorizon
+    ? droppableRuns(
+      targetDate,
+      availability,
+      lockedBlocks.filter((locked) => locked.id !== block.id),
+      timezone,
+      startHour * 60,
+      endHour * 60,
+    )
+    : [];
+  const landings = openRuns.flatMap(([from, to]) => {
+    const earliest = Math.ceil(from / snapMinutes) * snapMinutes;
+    const latest = Math.floor((to - durationMinutes) / snapMinutes) * snapMinutes;
+    return latest >= earliest ? [clamp(requested, earliest, latest)] : [];
+  });
+  const landing = landings.length
+    ? landings.reduce((best, candidate) => (
+      Math.abs(candidate - requested) < Math.abs(best - requested) ? candidate : best
+    ))
+    : null;
+  const minuteOfDay = landing ?? requested;
+  const startAt = zonedDateTimeToIso(
+    targetDate,
+    Math.floor(minuteOfDay / 60),
+    minuteOfDay % 60,
+    timezone,
+  );
+  return {
+    blockId: block.id,
+    dayIndex,
+    minuteOfDay,
+    durationMinutes,
+    startAt,
+    endAt: new Date(new Date(startAt).getTime() + durationMinutes * 60_000).toISOString(),
+    allowed: landing !== null,
+    clamped: landing !== null && landing !== requested,
+    blockedReason: landing === null
+      ? dayBlockedReason(targetDate, withinHorizon, openRuns.length > 0)
+      : null,
+    unchanged: new Date(startAt).getTime() === new Date(block.start_at).getTime(),
+  };
+}
+
+// Only whole days are refused now, so the reason names the day rather than the rule: a student
+// reading "No focus hours on Saturday" learns something "Outside your focus hours" never told them.
+function dayBlockedReason(date: string, withinHorizon: boolean, hasOpenTime: boolean) {
+  if (!withinHorizon) return `${weekdayLong(date)} is outside this draft`;
+  return hasOpenTime ? `No room left on ${weekdayLong(date)}` : `No focus hours on ${weekdayLong(date)}`;
+}
+
+/** Focus time on a date with the locked blocks taken out of it, clipped to the drawn calendar. */
+export function droppableRuns(
+  date: string,
+  availability: AvailabilityWindow[],
+  lockedBlocks: ScheduleBlock[],
+  timezone: string,
+  axisStart: number,
+  axisEnd: number,
+) {
+  const taken = mergeMinuteIntervals(
+    lockedBlocks
+      .filter((locked) => dateInTimezone(locked.start_at, timezone) === date)
+      .map((locked) => blockMinuteRange(locked, timezone)),
+  );
+  const drawn = focusIntervalsForDate(date, availability)
+    .map(([from, to]) => [Math.max(from, axisStart), Math.min(to, axisEnd)])
+    .filter(([from, to]) => to > from);
+  return taken.reduce(
+    (remaining, interval) => remaining.flatMap((run) => subtractMinuteInterval(run, interval)),
+    drawn,
+  );
+}
+
+function blockMinuteRange(block: ScheduleBlock, timezone: string) {
+  const start = timeParts(block.start_at, timezone);
+  return [
+    start.hour * 60 + start.minute,
+    endMinuteForBlock(block.start_at, block.end_at, timezone, timeParts(block.end_at, timezone)),
+  ];
+}
+
+/** The stretches of a drawn day that no draft block may be dropped on. */
+export function unavailableRuns(
+  date: string,
+  availability: AvailabilityWindow[],
+  axisStart: number,
+  axisEnd: number,
+) {
+  return focusIntervalsForDate(date, availability).reduce(
+    (remaining, focus) => remaining.flatMap((run) => subtractMinuteInterval(run, focus)),
+    [[axisStart, axisEnd]] as number[][],
+  );
+}
+
 export function placementFromPointer(
   block: ScheduleBlock,
   clientX: number,
@@ -139,46 +328,24 @@ export function placementFromPointer(
   if (!grid || !days.length) return null;
   const bounds = grid.getBoundingClientRect();
   if (!bounds.width || !bounds.height) return null;
-  const originalDayIndex = clamp(
-    dateDifference(days[0], dateInTimezone(block.start_at, timezone)),
-    0,
-    days.length - 1,
+  const target = resolveDragTarget(
+    block,
+    clientX - originX,
+    clientY - originY,
+    {
+      columnWidth: Math.max((bounds.width - gutterWidth) / days.length, 1),
+      pixelsPerMinute: bounds.height / Math.max((endHour - startHour) * 60, 1),
+    },
+    days,
+    startHour,
+    endHour,
+    timezone,
+    availability,
+    horizonStart,
+    horizonEnd,
   );
-  const columnWidth = Math.max((bounds.width - gutterWidth) / days.length, 1);
-  const dayIndex = originalDayIndex + Math.round((clientX - originX) / columnWidth);
-  if (dayIndex < 0 || dayIndex >= days.length) return null;
-  const targetDate = days[dayIndex];
-  if (!isDraftDay(targetDate, horizonStart, horizonEnd)) return null;
-  const durationMinutes = Math.max(
-    Math.round((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60_000),
-    15,
-  );
-  const calendarMinutes = (endHour - startHour) * 60;
-  const originalStart = timeParts(block.start_at, timezone);
-  const originalMinutes = originalStart.hour * 60 + originalStart.minute - startHour * 60;
-  const minuteDelta = Math.round(
-    ((clientY - originY) / (bounds.height / calendarMinutes)) / 15,
-  ) * 15;
-  const requestedMinutesFromStart = originalMinutes + minuteDelta;
-  if (requestedMinutesFromStart < 0
-    || requestedMinutesFromStart > calendarMinutes - durationMinutes) return null;
-  const requestedMinuteOfDay = startHour * 60 + requestedMinutesFromStart;
-  const fitsFocusHours = focusIntervalsForDate(targetDate, availability).some(
-    ([windowStart, windowEnd]) => (
-      windowStart <= requestedMinuteOfDay
-      && requestedMinuteOfDay + durationMinutes <= windowEnd
-    ),
-  );
-  if (!fitsFocusHours) return null;
-  const targetMinuteOfDay = requestedMinuteOfDay;
-  const targetHour = Math.floor(targetMinuteOfDay / 60);
-  const targetMinute = targetMinuteOfDay % 60;
-  const startAt = zonedDateTimeToIso(targetDate, targetHour, targetMinute, timezone);
-  return {
-    blockId: block.id,
-    startAt,
-    endAt: new Date(new Date(startAt).getTime() + durationMinutes * 60_000).toISOString(),
-  };
+  if (!target || !target.allowed) return null;
+  return { blockId: target.blockId, startAt: target.startAt, endAt: target.endAt };
 }
 
 export function zonedDateTimeToIso(dateValue: string, hour: number, minute: number, timezone: string) {
@@ -186,7 +353,7 @@ export function zonedDateTimeToIso(dateValue: string, hour: number, minute: numb
   const desiredUtc = Date.UTC(year, month - 1, day, hour, minute);
   let candidate = desiredUtc;
   for (let iteration = 0; iteration < 3; iteration += 1) {
-    const parts = new Intl.DateTimeFormat("en-CA", {
+    const parts = cachedDateFormat("en-CA", {
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -215,7 +382,7 @@ export function clamp(value: number, minimum: number, maximum: number) {
 }
 
 export function formatMoveTime(value: string, timezone: string) {
-  return new Intl.DateTimeFormat("en-CA", {
+  return cachedDateFormat("en-CA", {
     weekday: "short",
     month: "short",
     day: "numeric",
@@ -435,7 +602,7 @@ export function blockColor(block: ScheduleBlock) {
 }
 
 export function clockParts(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
+  const parts = cachedDateFormat("en-US", {
     hour: "numeric",
     minute: "2-digit",
     hour12: true,
@@ -484,7 +651,7 @@ export function cardDensity(duration: number) {
 }
 
 export function timeParts(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  const parts = cachedDateFormat("en-CA", {
     hour: "numeric",
     minute: "2-digit",
     hourCycle: "h23",
@@ -497,7 +664,7 @@ export function timeParts(value: string, timezone: string) {
 }
 
 export function dateInTimezone(value: string, timezone: string) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
+  const parts = cachedDateFormat("en-CA", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -528,8 +695,14 @@ export function isDraftDay(value: string, horizonStart: string, horizonEnd: stri
   return value >= horizonStart && value <= horizonEnd;
 }
 
+export function weekdayLong(value: string) {
+  return cachedDateFormat("en-CA", { weekday: "long", timeZone: "UTC" }).format(
+    new Date(`${value}T12:00:00Z`),
+  );
+}
+
 export function weekday(value: string) {
-  return new Intl.DateTimeFormat("en-CA", { weekday: "short", timeZone: "UTC" }).format(
+  return cachedDateFormat("en-CA", { weekday: "short", timeZone: "UTC" }).format(
     new Date(`${value}T12:00:00Z`),
   );
 }
@@ -539,7 +712,7 @@ export function dayNumber(value: string) {
 }
 
 export function formatCalendarDate(value: string) {
-  return new Intl.DateTimeFormat("en-CA", {
+  return cachedDateFormat("en-CA", {
     weekday: "long",
     month: "long",
     day: "numeric",
@@ -551,12 +724,12 @@ export function formatRange(start: string, end: string) {
   const startDate = new Date(`${start}T12:00:00Z`);
   const endDate = new Date(`${end}T12:00:00Z`);
   const sameMonth = startDate.getUTCMonth() === endDate.getUTCMonth();
-  const startFormatter = new Intl.DateTimeFormat("en-CA", {
+  const startFormatter = cachedDateFormat("en-CA", {
     month: "short",
     day: "numeric",
     timeZone: "UTC",
   });
-  const endFormatter = new Intl.DateTimeFormat("en-CA", {
+  const endFormatter = cachedDateFormat("en-CA", {
     month: sameMonth ? undefined : "short",
     day: "numeric",
     timeZone: "UTC",
@@ -565,7 +738,7 @@ export function formatRange(start: string, end: string) {
 }
 
 export function timezoneName(timezone: string, date: string) {
-  return new Intl.DateTimeFormat("en-CA", {
+  return cachedDateFormat("en-CA", {
     timeZone: timezone,
     timeZoneName: "short",
   }).formatToParts(new Date(`${date}T12:00:00Z`))
