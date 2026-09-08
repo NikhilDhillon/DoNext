@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     app_name: str = "DoNext API"
     environment: str = "development"
+    log_level: str = "INFO"
     database_url: str = "postgresql+psycopg://donext:donext_local@localhost:5432/donext"
     redis_url: str = "redis://localhost:6379/0"
     session_secret: str = Field(default="local-development-secret-change-me", min_length=24)

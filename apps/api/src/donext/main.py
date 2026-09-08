@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -20,6 +22,26 @@ from donext.routers import (
 )
 
 settings = get_settings()
+
+
+def configure_logging() -> None:
+    """Give the application's own loggers an outlet.
+
+    Uvicorn configures only its own loggers and leaves the root logger without a handler, so
+    anything donext logs below WARNING would otherwise go nowhere. Only this package is
+    configured, to keep third-party INFO chatter out of the server output.
+    """
+    app_logger = logging.getLogger("donext")
+    if app_logger.handlers:
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)-8s %(name)s: %(message)s"))
+    app_logger.addHandler(handler)
+    app_logger.setLevel(settings.log_level.upper())
+    app_logger.propagate = False
+
+
+configure_logging()
 
 app = FastAPI(
     title=settings.app_name,
