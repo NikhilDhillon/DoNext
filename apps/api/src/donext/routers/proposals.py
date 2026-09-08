@@ -725,7 +725,7 @@ def _build_proposal(
         preferences.preferred_session_minutes, policy
     )
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
-    items, item_links, warnings, semester_pressure = _scheduling_items(
+    items, item_links, warnings, semester_pressure, awaiting_activation = _scheduling_items(
         db,
         current_user.id,
         semester,
@@ -1037,6 +1037,7 @@ def _build_proposal(
         generated_blocks=len(result.placements),
         warnings=warnings,
         unscheduled=unscheduled,
+        awaiting_activation=awaiting_activation,
     ).model_dump(mode="json")
     logger.info(
         "schedule proposal generated requested=%s scheduled=%s capacity=%s blocks=%s "
@@ -2377,6 +2378,7 @@ def _scheduling_items(
     dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]],
     list[str],
     list[dict[str, object]],
+    int,
 ]:
     courses = list(db.scalars(select(Course).where(Course.semester_id == semester.id)))
     course_ids = {course.id for course in courses}
@@ -2846,7 +2848,7 @@ def _scheduling_items(
                 )
             )
             links[identifier] = (None, goal.id, "goal")
-    return items, links, warnings, semester_pressure
+    return items, links, warnings, semester_pressure, len(awaiting_activation)
 
 
 def _weekly_target_date_sets(horizon_start: date, horizon_end: date) -> list[frozenset[date]]:

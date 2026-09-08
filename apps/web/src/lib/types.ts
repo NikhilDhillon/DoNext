@@ -202,6 +202,7 @@ export type ScheduleProposal = Schedule & {
       reason_code?: string;
       reason: string;
     }[];
+    awaiting_activation: number;
   };
   revision_feedback: {
     interpreter: "openai" | "fallback";

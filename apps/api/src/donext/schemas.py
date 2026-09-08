@@ -816,6 +816,7 @@ class ProposalSummaryRead(ApiModel):
     moved_blocks: int = 0
     warnings: list[str] = Field(default_factory=list)
     unscheduled: list[dict[str, object]] = Field(default_factory=list)
+    awaiting_activation: int = 0
 
 
 class ScheduleProposalRead(ScheduleRead):
