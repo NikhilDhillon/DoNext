@@ -32,3 +32,30 @@
 .block-focus-hours { color: var(--faint); }
 .block-time-summary { color: var(--ok-text); }
 .block-time-summary.invalid { color: var(--warn-text); }
+
+.block-timing-choice, .block-timing-panel { min-width: 0; margin: 0; border: 0; padding: 0; }
+.block-timing-choice legend { margin-bottom: 8px; font-size: 13px; font-weight: 700; }
+.block-timing-choice > div { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.block-timing-choice label { position: relative; }
+.block-timing-choice input[type="radio"] { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.block-timing-choice label > span {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px;
+  cursor: pointer;
+}
+.block-timing-choice input:checked + span { border-color: var(--mint-deep); background: #e9f4ee; color: var(--ok-text); }
+.block-timing-choice input:focus-visible + span { outline: 2px solid var(--mint-deep); outline-offset: 3px; }
+
+.planner-block-form .planner-dialog-actions {
+  position: sticky;
+  bottom: -24px;
+  z-index: 1;
+  margin-bottom: -12px;
+  padding: 12px 0;
+  background: #fffdf8;
+}

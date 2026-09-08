@@ -1,8 +1,8 @@
 "use client";
 
 import { LoaderCircle, Save, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { FormEvent, ReactNode } from "react";
 import "./schedule-block-editor.css";
 
 import { focusIntervalsForDate } from "@/components/draft-calendar/lib";
@@ -58,6 +58,7 @@ export function ScheduleBlockEditor({
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     const taskId = String(form.get("task_id") || "") || null;
+    const durationOnly = form.get("timing_mode") === "duration";
     setBusy(true);
     setError(null);
     try {
@@ -70,8 +71,15 @@ export function ScheduleBlockEditor({
         end_at: new Date(String(form.get("end_at"))).toISOString(),
         block_type: String(form.get("block_type")),
         locked: form.get("locked") === "on",
+        ...(durationOnly ? {
+          day: String(form.get("placement_day")),
+          duration_minutes: Number(form.get("duration_minutes")),
+          proposal_id: proposalId ?? null,
+        } : {}),
       };
-      const path = proposalId
+      const path = durationOnly
+        ? `/semesters/${semesterId}/schedule/duration-blocks`
+        : proposalId
         ? entry
           ? `/schedule-proposals/${proposalId}/blocks/${entry.source_id}`
           : `/schedule-proposals/${proposalId}/blocks`
@@ -133,11 +141,13 @@ export function ScheduleBlockEditor({
     <FormDialog
       open={open}
       title={entry ? "Adjust time block" : duplicateOf ? "Duplicate time block" : "Plan a time block"}
-      description={duplicateOf
+      description={entry
+        ? "Adjust this block’s date and times."
+        : duplicateOf
         ? "Choose a new time for this copy before adding it to the draft."
         : proposalId
-          ? "Choose one day and a time within your saved focus hours. Saved to this draft until you accept it."
-          : "Choose the exact time yourself."}
+          ? "Set a duration or choose exact times. Saved to this draft until you accept it."
+          : "Set a duration to find an open slot, or choose exact times."}
       onClose={close}
     >
       <form className="onboarding-form planner-block-form" key={formKey} onSubmit={submit} onChange={() => setError(null)}>
@@ -157,6 +167,7 @@ export function ScheduleBlockEditor({
             ))}
           </select>
         </label>
+        <BlockTimingChoice key={formKey} allowDuration={!entry} semesterId={semesterId} proposalId={proposalId} startValue={startValue}>
         {proposalId ? (
           <DraftBlockTimes
             key={formKey}
@@ -175,6 +186,7 @@ export function ScheduleBlockEditor({
             <input name="end_at" type="datetime-local" defaultValue={endValue} required />
           </label>
         </div>}
+        </BlockTimingChoice>
         <div className="form-row">
           <label>
             <span>Type</span>
@@ -206,6 +218,103 @@ export function ScheduleBlockEditor({
         </div>
       </form>
     </FormDialog>
+  );
+}
+
+function BlockTimingChoice({ allowDuration, semesterId, proposalId, startValue, children }: {
+  allowDuration: boolean;
+  semesterId: string;
+  proposalId?: string;
+  startValue: string;
+  children: ReactNode;
+}) {
+  const [mode, setMode] = useState("specific");
+  if (!allowDuration) return children;
+  return (
+    <>
+      <fieldset className="block-timing-choice">
+        <legend>How would you like to plan it?</legend>
+        <div>
+          <label><input type="radio" name="timing_mode" value="duration" checked={mode === "duration"} onChange={() => setMode("duration")} /><span>Duration only</span></label>
+          <label><input type="radio" name="timing_mode" value="specific" checked={mode === "specific"} onChange={() => setMode("specific")} /><span>Specific times</span></label>
+        </div>
+      </fieldset>
+      <div hidden={mode !== "duration"}>
+        <fieldset disabled={mode !== "duration"} className="block-timing-panel">
+          <DurationBlockTimes active={mode === "duration"} semesterId={semesterId} proposalId={proposalId} initialDay={startValue.slice(0, 10)} />
+        </fieldset>
+      </div>
+      <div hidden={mode !== "specific"}>
+        <fieldset disabled={mode !== "specific"} className="block-timing-panel">{children}</fieldset>
+      </div>
+    </>
+  );
+}
+
+type BlockPlacement = { start_at: string; end_at: string; timezone: string };
+
+function DurationBlockTimes({ active, semesterId, proposalId, initialDay }: {
+  active: boolean;
+  semesterId: string;
+  proposalId?: string;
+  initialDay: string;
+}) {
+  const [day, setDay] = useState(initialDay);
+  const [hours, setHours] = useState("0");
+  const [minutes, setMinutes] = useState("50");
+  const [result, setResult] = useState<{ key: string; placement?: BlockPlacement; error?: string } | null>(null);
+  const duration = Number(hours) * 60 + Number(minutes);
+  const valid = Boolean(day) && Number.isInteger(duration) && duration > 0 && duration <= 1440
+    && Number(hours) >= 0 && Number(minutes) >= 0 && Number(minutes) < 60;
+  const requestKey = JSON.stringify([day, duration, semesterId, proposalId]);
+  const placement = result?.key === requestKey ? result.placement : undefined;
+  const error = result?.key === requestKey ? result.error : undefined;
+
+  useEffect(() => {
+    if (!active || !valid) return;
+    let ignore = false;
+    const timer = setTimeout(() => {
+      apiRequest<BlockPlacement>(`/semesters/${semesterId}/schedule/block-placement`, {
+        method: "POST",
+        body: JSON.stringify({ day, duration_minutes: duration, proposal_id: proposalId ?? null }),
+      }).then((placement) => {
+        if (!ignore) setResult({ key: requestKey, placement });
+      }).catch((error: unknown) => {
+        if (!ignore) setResult({ key: requestKey, error: error instanceof Error ? error.message : "Could not find an open slot. Try again." });
+      });
+    }, 250);
+    return () => { ignore = true; clearTimeout(timer); };
+  }, [active, valid, day, duration, semesterId, proposalId, requestKey]);
+
+  const validation = !valid ? "Enter a duration between 1 minute and 24 hours."
+    : error ?? (!placement ? "Wait for an available time before saving." : "");
+  const timeFormat = placement ? new Intl.DateTimeFormat("en-CA", {
+    hour: "numeric", minute: "2-digit", timeZone: placement.timezone,
+  }) : null;
+  const zoneLabel = placement ? new Intl.DateTimeFormat("en-CA", {
+    timeZone: placement.timezone, timeZoneName: "short",
+  }).formatToParts(new Date(placement.start_at)).find((part) => part.type === "timeZoneName")?.value : "";
+
+  return (
+    <fieldset className="block-time-fields">
+      <legend>Time needed</legend>
+      <label><span>Date</span><input type="date" name="placement_day" value={day} onChange={(event) => setDay(event.target.value)} required /></label>
+      <div className="form-row">
+        <label><span>Hours</span><input type="number" value={hours} min="0" max="24" step="1" onChange={(event) => setHours(event.target.value)} aria-describedby="block-placement-summary" /></label>
+        <label><span>Minutes</span><input type="number" value={minutes} min="0" max="59" step="1" onChange={(event) => setMinutes(event.target.value)}
+          ref={(input) => { input?.setCustomValidity(active ? validation : ""); }}
+          aria-describedby="block-placement-summary" /></label>
+      </div>
+      <p className="block-focus-hours">DoNext finds one open slot on this day. Existing blocks stay in place.</p>
+      <p className={`block-time-summary${error || !valid ? " invalid" : ""}`} id="block-placement-summary" aria-live="polite">
+        {!valid ? validation : error ?? (placement && timeFormat
+          ? `Suggested: ${timeFormat.format(new Date(placement.start_at))}–${timeFormat.format(new Date(placement.end_at))} · ${formatDuration(duration)} (${zoneLabel})`
+          : "Finding an open slot…")}
+      </p>
+      <input type="hidden" name="duration_minutes" value={duration || ""} />
+      <input type="hidden" name="start_at" value={placement?.start_at ?? ""} />
+      <input type="hidden" name="end_at" value={placement?.end_at ?? ""} />
+    </fieldset>
   );
 }
 
