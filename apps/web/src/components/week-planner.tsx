@@ -18,11 +18,13 @@ import {
   cachedDateFormat,
   calendarLaneLayout,
   clamp,
+  fixedEventLabel,
   isDraftDay,
   resolveDragTarget,
   unavailableRuns,
 } from "@/components/draft-calendar/lib";
 import type { DragTarget } from "@/components/draft-calendar/lib";
+import { FormDialog } from "@/components/form-dialog";
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
 import { ScheduleProposalReview } from "@/components/schedule-proposal-review";
 import { useApiResource } from "@/hooks/use-api-resource";
@@ -45,7 +47,7 @@ type CalendarItem = {
   tone: string;
   location: string | null;
   draft: boolean;
-  entry: PlanningEntry | null;
+  entry: PlanningEntry;
   sourceEntry: PlanningEntry | null;
   block: ScheduleBlock | null;
 };
@@ -120,6 +122,7 @@ export function WeekPlanner() {
   }
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
+  const [detailsEntry, setDetailsEntry] = useState<PlanningEntry | null>(null);
   const [duplicateEntry, setDuplicateEntry] = useState<PlanningEntry | null>(null);
   const [editorDate, setEditorDate] = useState("");
   const [editingDraft, setEditingDraft] = useState(false);
@@ -255,7 +258,10 @@ export function WeekPlanner() {
   }
 
   function openItem(item: CalendarItem) {
-    if (!item.entry) return;
+    if (!item.entry.editable) {
+      setDetailsEntry(item.entry);
+      return;
+    }
     setDuplicateEntry(null);
     setSelectedEntry(item.entry);
     setEditingDraft(item.draft);
@@ -311,14 +317,14 @@ export function WeekPlanner() {
   }
 
   function beginDrag(block: ScheduleBlock, event: ReactPointerEvent<HTMLElement>) {
-    // A press on the duplicate button is that button's business, and a right-click is the menu.
+    // The grip is the only drag target, leaving the rest of every card as one reliable open action.
     if (!draft || event.button !== 0) return;
-    if ((event.target as HTMLElement).closest(".week-block-duplicate")) return;
     const grid = gridRef.current;
     if (!grid) return;
     releaseDragRef.current?.();
     const bounds = grid.getBoundingClientRect();
-    const node = event.currentTarget;
+    const node = event.currentTarget.closest<HTMLElement>(".week-block");
+    if (!node) return;
     // A card still walking home from the last drag carries a transform, which would be measured
     // into this drag's travel limits. Put it back on its slot before taking the measurement.
     node.classList.remove("returning");
@@ -891,6 +897,24 @@ export function WeekPlanner() {
           onSaved={refresh}
         />
       )}
+      {detailsEntry ? (
+        <FormDialog
+          open
+          title={detailsEntry.title}
+          description="This is a fixed event that DoNext plans around."
+          onClose={() => setDetailsEntry(null)}
+        >
+          <dl className="calendar-block-details">
+            <div><dt>When</dt><dd>{formatEventRange(detailsEntry, data.timezone)}</dd></div>
+            <div><dt>Type</dt><dd>{fixedEventLabel(detailsEntry)}</dd></div>
+            {detailsEntry.location ? <div><dt>Location</dt><dd>{detailsEntry.location}</dd></div> : null}
+            <div><dt>Schedule</dt><dd>{detailsEntry.recurring ? "Recurring" : "One time"}</dd></div>
+          </dl>
+          <div className="dialog-actions">
+            <button className="primary-button" type="button" onClick={() => setDetailsEntry(null)}>Done</button>
+          </div>
+        </FormDialog>
+      ) : null}
     </main>
   );
 }
@@ -915,7 +939,7 @@ function mergeWeek(data: PlanningView, draft: ScheduleProposal | null): Calendar
       tone: entryColor(entry),
       location: entry.location,
       draft: false,
-      entry: entry.editable ? entry : null,
+      entry,
       sourceEntry: entry,
       block: null,
     }));
@@ -978,7 +1002,7 @@ function WeekBlock({
   const column = Math.min(Math.max(dateDifference(weekStart, dateInTimezone(item.startAt, timezone)) + 1, 1), 7);
   // The class list is held still for the length of a drag: React rewrites the attribute whole, so
   // a change here would wipe the "lifted" class the drag adds to this same node by hand.
-  const className = `week-block ${item.tone}${item.draft ? " draft" : ""}${item.entry ? " editable" : ""}${onDragStart ? " draggable" : ""}`;
+  const className = `week-block ${item.tone}${item.draft ? " draft" : ""}${item.entry.editable ? " editable" : ""}${onDragStart ? " draggable" : ""}`;
   const style = {
     gridColumn: column,
     gridRow: `${row} / span ${duration}`,
@@ -996,13 +1020,15 @@ function WeekBlock({
       className={className}
       style={style}
       title={`${item.title}, ${formatTime(item.startAt, timezone)}`}
-      onPointerDown={onDragStart}
     >
-      {item.entry ? (
-        <button className="week-block-open" type="button" onClick={onOpen}>{copy}</button>
-      ) : (
-        <div className="week-block-open">{copy}</div>
-      )}
+      <button
+        className="week-block-open"
+        type="button"
+        aria-label={`${item.entry.editable ? "Edit" : "Open"} ${item.title}`}
+        onClick={onOpen}
+      >
+        {copy}
+      </button>
       {item.draft ? (
         <div className="week-block-tools">
           <button
@@ -1017,6 +1043,7 @@ function WeekBlock({
             className="week-block-grab"
             type="button"
             aria-label={`Move ${item.title}. Drag it, or use the arrow keys.`}
+            onPointerDown={onDragStart}
             onKeyDown={onNudge}
           >
             <GripVertical size={13} />
@@ -1047,7 +1074,13 @@ function MobileAgendaItem({
   );
   return (
     <article className={`mobile-week-item ${item.tone}${item.draft ? " draft" : ""}`}>
-      {item.entry ? <button type="button" onClick={onOpen}>{content}</button> : <div>{content}</div>}
+      <button
+        type="button"
+        aria-label={`${item.entry.editable ? "Edit" : "Open"} ${item.title}`}
+        onClick={onOpen}
+      >
+        {content}
+      </button>
       {item.draft ? (
         <button className="mobile-week-copy" type="button" aria-label={`Duplicate ${item.title}`} onClick={onDuplicate}>
           <Copy size={15} />
@@ -1180,6 +1213,16 @@ function formatHour(hour: number) {
 
 function formatTime(value: string, timezone: string) {
   return cachedDateFormat("en-CA", { hour: "numeric", minute: "2-digit", timeZone: timezone }).format(new Date(value));
+}
+
+function formatEventRange(entry: PlanningEntry, timezone: string) {
+  const day = cachedDateFormat("en-CA", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: timezone,
+  }).format(new Date(entry.start_at));
+  return `${day}, ${formatTime(entry.start_at, timezone)}–${formatTime(entry.end_at, timezone)}`;
 }
 
 function formatMoveTime(value: string, timezone: string) {

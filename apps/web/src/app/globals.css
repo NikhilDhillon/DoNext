@@ -1017,9 +1017,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .week-block:hover .week-block-tools, .week-block:focus-within .week-block-tools { opacity: 1; }
 .week-block-tools button { display: grid; width: 23px; height: 23px; place-items: center; border: 1px solid rgba(255,255,255,.34); border-radius: 7px; background: rgba(42,29,20,.25); color: inherit; cursor: pointer; }
 .week-block-grab { cursor: grab; touch-action: none; }
-.week-page .week-block.draggable, .week-page .week-block.draggable button.week-block-open { cursor: grab; }
-/* A block is its own drag handle, so the browser must not read a press on one as a scroll. */
-.week-page .live-calendar-grid .week-block.draggable { touch-action: none; }
 /* Lifted by hand during a drag, so nothing here may depend on a React render landing first. */
 .week-block.lifted { z-index: 30; opacity: .93; box-shadow: 0 16px 34px rgba(42,29,20,.26); cursor: grabbing; transition: box-shadow .14s ease, opacity .14s ease; will-change: transform; }
 .week-block.lifted .week-block-tools { opacity: 1; }
@@ -1055,6 +1052,10 @@ body.dragging-block.no-drop, body.dragging-block.no-drop .day-column { cursor: n
 .week-status { position: fixed; z-index: 40; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 7px; pointer-events: none; }
 .week-status span { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 9px 11px; color: var(--muted); box-shadow: var(--shadow); font-size: 10px; }
 .week-status span.error { border-color: var(--error-edge); background: var(--error-bg); color: var(--error-text); }
+.calendar-block-details { display: grid; gap: 0; margin: 4px 0 20px; }
+.calendar-block-details > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 14px; border-bottom: 1px solid var(--rule); padding: 12px 0; }
+.calendar-block-details dt { color: var(--faint); font-size: 11px; font-weight: 720; }
+.calendar-block-details dd { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
 .mobile-week-agenda { display: none; }
 
 @media (max-width: 920px) {
