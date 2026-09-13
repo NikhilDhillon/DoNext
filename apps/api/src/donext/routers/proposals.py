@@ -15,7 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from donext import clock
 from donext.academic_impact import calculate_weights
-from donext.completion import logged_minutes
+from donext.completion import block_fingerprint, logged_minutes
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
@@ -41,6 +41,7 @@ from donext.models import (
     TaskStatus,
     User,
     UserPreference,
+    WorkSession,
 )
 from donext.planning import (
     ROLLOVER_BUFFER_MINUTES,
@@ -78,6 +79,8 @@ from donext.schemas import (
     ExtraFocusDecision,
     GenerationBlockingInput,
     ProposalSummaryRead,
+    RolloverRead,
+    RolloverRequest,
     ScheduleBlockCreate,
     ScheduleBlockRead,
     ScheduleBlockUpdate,
@@ -110,6 +113,25 @@ class CourseReadiness:
     ready_at: datetime | None
     source: Literal["lecture", "asynchronous", "missing"]
     material_release_times: tuple[datetime, ...] = ()
+
+
+@dataclass(frozen=True)
+class FreeCapacityPlan:
+    accepted: ScheduleVersion | None
+    result: SchedulingResult | None
+    tasks_by_item_id: dict[str, Task]
+    target_minutes: int
+    reason: str
+    source: str
+    reason_code: str | None
+    message: str
+
+    @property
+    def fits(self) -> bool:
+        return (
+            self.result is not None
+            and sum(self.result.scheduled_minutes.values()) >= self.target_minutes
+        )
 
 
 def _course_readiness(
@@ -243,7 +265,7 @@ def proposal_read(db: DbSession, user: User, proposal: ScheduleVersion) -> Sched
 def _horizon(
     semester: Semester, timezone: ZoneInfo, planning_now: datetime | None = None
 ) -> tuple[date, date]:
-    today = (planning_now or datetime.now(UTC)).astimezone(timezone).date()
+    today = (planning_now or clock.now()).astimezone(timezone).date()
     start = max(today, semester.start_date)
     return start, min(start + timedelta(days=13), semester.end_date)
 
@@ -427,76 +449,72 @@ def activation_queue(
     return prompts
 
 
-@router.post(
-    "/semesters/{semester_id}/schedule/direct-placement",
-    response_model=DirectPlacementRead,
-)
-def place_activated_work(
-    semester_id: uuid.UUID,
-    payload: DirectPlacementRequest,
+def _place_into_free_capacity(
     db: DbSession,
-    current_user: CurrentUser,
-) -> DirectPlacementRead:
-    """Absorb newly activated work into the accepted plan when it costs nothing to do so.
+    user: User,
+    semester: Semester,
+    tasks: list[Task],
+    *,
+    source: str,
+    reason_code: str | None,
+    message: str,
+    target_minutes: dict[uuid.UUID, int] | None = None,
+) -> FreeCapacityPlan:
+    """Solve several tasks together against capacity outside the accepted plan.
 
-    The placement is add-only: it uses capacity the accepted schedule is not already using and
-    moves or removes nothing. Work that will not fit that way returns unplaced, and the student
-    reviews an ordinary proposal instead of having a decision rewritten underneath them.
+    This function does not write. Its callers can preserve an all-or-nothing boundary, preview a
+    result, or materialize every returned placement in one transaction.
     """
-
-    semester = owned_semester(db, current_user.id, semester_id)
-    timezone = resolve_timezone(current_user.timezone)
+    timezone = resolve_timezone(user.timezone)
     planning_now = _planning_now()
     horizon_start, horizon_end = _horizon(semester, timezone, planning_now)
-    task = db.scalar(
-        select(Task).where(Task.id == payload.task_id, Task.user_id == current_user.id)
-    )
-    if task is None:
-        raise ApiError("NOT_FOUND", "Task not found.", 404)
-    if task.activated_at is None:
-        raise ApiError("VALIDATION_ERROR", "Activate the work before placing it.", 422)
-    accepted = _accepted_schedule(db, current_user.id, semester_id, for_update=True)
+    accepted = _accepted_schedule(db, user.id, semester.id, for_update=True)
+    targets = {
+        task.id: (target_minutes or {}).get(task.id, task.remaining_minutes) for task in tasks
+    }
+    total_target = sum(targets.values())
     if accepted is None:
-        return DirectPlacementRead(
-            placed=False,
-            remaining_minutes=task.remaining_minutes,
+        return FreeCapacityPlan(
+            accepted=None,
+            result=None,
+            tasks_by_item_id={},
+            target_minutes=total_target,
             reason="There is no accepted schedule to add this to yet.",
+            source=source,
+            reason_code=reason_code,
+            message=message,
         )
-    if task.deadline_at is None:
-        return DirectPlacementRead(
-            placed=False,
-            remaining_minutes=task.remaining_minutes,
-            reason="Work without a deadline is placed through a reviewed proposal.",
-        )
-    due_at = aware(task.deadline_at).astimezone(timezone)
-    if due_at.date() > horizon_end or due_at <= planning_now:
-        return DirectPlacementRead(
-            placed=False,
-            remaining_minutes=task.remaining_minutes,
-            reason="This deadline sits outside the current plan; regenerate to place it.",
-        )
-
     availability = list(
-        db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == current_user.id))
+        db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == user.id))
     )
     preferences = db.scalar(
-        select(UserPreference).where(UserPreference.user_id == current_user.id)
-    ) or UserPreference(user_id=current_user.id)
+        select(UserPreference).where(UserPreference.user_id == user.id)
+    ) or UserPreference(user_id=user.id)
     if not availability:
-        return DirectPlacementRead(
-            placed=False,
-            remaining_minutes=task.remaining_minutes,
+        return FreeCapacityPlan(
+            accepted=accepted,
+            result=None,
+            tasks_by_item_id={},
+            target_minutes=total_target,
             reason="Add availability before work can be placed.",
+            source=source,
+            reason_code=reason_code,
+            message=message,
         )
-    events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == current_user.id)))
+    events = list(db.scalars(select(FixedEvent).where(FixedEvent.user_id == user.id)))
     occurrences, recurrence_warnings = expand_events(
         events, horizon_start, horizon_end + timedelta(days=1), timezone
     )
     if recurrence_warnings:
-        return DirectPlacementRead(
-            placed=False,
-            remaining_minutes=task.remaining_minutes,
+        return FreeCapacityPlan(
+            accepted=accepted,
+            result=None,
+            tasks_by_item_id={},
+            target_minutes=total_target,
             reason="Recurring commitments need attention before work can be placed.",
+            source=source,
+            reason_code=reason_code,
+            message=message,
         )
     # Every accepted block is immovable here, so the solver only ever sees genuinely free time.
     windows = _scheduling_windows(
@@ -509,83 +527,313 @@ def place_activated_work(
         timezone,
         planning_now.astimezone(timezone),
     )
-    identifier = f"task:{task.id}"
-    course_code = None
-    if task.course_id is not None:
-        course = db.scalar(select(Course).where(Course.id == task.course_id))
-        course_code = course.code if course else None
-    item = SchedulingItem(
-        id=identifier,
-        source_id=f"task:{task.id}",
-        title=f"{course_code} · {task.name}" if course_code else task.name,
-        target_minutes=task.remaining_minutes,
-        minimum_session_minutes=task.minimum_session_minutes,
-        preferred_session_minutes=task.preferred_session_minutes,
-        maximum_session_minutes=task.maximum_session_minutes,
-        priority_rank=PRIORITY_RANK[task.priority.value],
-        intensity=task.intensity.value,
-        kind="task",
-        importance_rank=0,
-        due_at=due_at,
-        earliest_start_at=max(
-            planning_now.astimezone(timezone),
-            datetime.combine(horizon_start, time.min, tzinfo=timezone),
-        ),
-        latest_end_at=due_at,
-        required=task.required,
-        risk_tier=1,
-        slack_minutes=0,
-        weight_percent=None,
-        exam_relationship=None,
-        readiness_at=None,
-        preferred_completion_at=due_at,
-        course_id=str(task.course_id) if task.course_id is not None else None,
-    )
-    result = solve_schedule([item], windows, preferences.minimum_break_minutes)
-    placed_minutes = sum(
-        round((placement.end_at - placement.start_at).total_seconds() / 60)
-        for placement in result.placements
-        if placement.item_id == identifier
-    )
-    if placed_minutes < task.remaining_minutes:
-        return DirectPlacementRead(
-            placed=False,
-            placed_minutes=placed_minutes,
-            remaining_minutes=task.remaining_minutes,
-            reason=(
-                "This does not fit the time your plan is not already using. Regenerate to see "
-                "the trade-off before anything moves."
-            ),
+    course_ids = {task.course_id for task in tasks if task.course_id is not None}
+    course_codes = {
+        course.id: course.code
+        for course in (
+            db.scalars(select(Course).where(Course.id.in_(course_ids))) if course_ids else []
         )
-    blocks: list[ScheduledBlock] = []
-    for placement in result.placements:
-        if placement.item_id != identifier:
+    }
+    local_now = planning_now.astimezone(timezone)
+    fallback_due = datetime.combine(horizon_end, time.max, tzinfo=timezone)
+    items: list[SchedulingItem] = []
+    tasks_by_item_id: dict[str, Task] = {}
+    for task in tasks:
+        minutes = targets[task.id]
+        if minutes <= 0:
             continue
+        identifier = f"task:{task.id}"
+        tasks_by_item_id[identifier] = task
+        due_at = aware(task.deadline_at).astimezone(timezone) if task.deadline_at else fallback_due
+        overdue = due_at <= local_now
+        course_code = course_codes.get(task.course_id) if task.course_id else None
+        items.append(
+            SchedulingItem(
+                id=identifier,
+                source_id=identifier,
+                title=f"{course_code} · {task.name}" if course_code else task.name,
+                target_minutes=minutes,
+                minimum_session_minutes=task.minimum_session_minutes,
+                preferred_session_minutes=task.preferred_session_minutes,
+                maximum_session_minutes=task.maximum_session_minutes,
+                priority_rank=PRIORITY_RANK[task.priority.value],
+                intensity=task.intensity.value,
+                kind="task",
+                importance_rank=0,
+                due_at=due_at,
+                earliest_start_at=max(
+                    local_now, datetime.combine(horizon_start, time.min, tzinfo=timezone)
+                ),
+                latest_end_at=None if overdue else due_at,
+                required=task.required,
+                risk_tier=3 if overdue else 1,
+                slack_minutes=0,
+                weight_percent=None,
+                exam_relationship=None,
+                readiness_at=None,
+                preferred_completion_at=due_at,
+                course_id=str(task.course_id) if task.course_id is not None else None,
+            )
+        )
+    result = solve_schedule(items, windows, preferences.minimum_break_minutes)
+    return FreeCapacityPlan(
+        accepted=accepted,
+        result=result,
+        tasks_by_item_id=tasks_by_item_id,
+        target_minutes=total_target,
+        reason=(
+            "Added to your schedule without moving anything."
+            if sum(result.scheduled_minutes.values()) >= total_target
+            else "This does not fit the time your plan is not already using. Regenerate to see "
+            "the trade-off before anything moves."
+        ),
+        source=source,
+        reason_code=reason_code,
+        message=message,
+    )
+
+
+def _commit_free_capacity_plan(
+    db: DbSession,
+    user: User,
+    plan: FreeCapacityPlan,
+) -> list[ScheduledBlock]:
+    assert plan.accepted is not None and plan.result is not None and plan.fits
+    blocks: list[ScheduledBlock] = []
+    for placement in plan.result.placements:
+        task = plan.tasks_by_item_id[placement.item_id]
         block = ScheduledBlock(
-            schedule_version_id=accepted.id,
-            user_id=current_user.id,
+            schedule_version_id=plan.accepted.id,
+            user_id=user.id,
             task_id=task.id,
             title=placement.title,
             start_at=placement.start_at,
             end_at=placement.end_at,
             block_type="focus",
             locked=False,
-            source="direct_placement",
+            source=plan.source,
             stability_weight=1.0,
-            reason_code=placement.reason_code,
-            reason_details={"message": "Added when you activated this work."},
+            reason_code=plan.reason_code or placement.reason_code,
+            reason_details={"message": plan.message},
         )
         db.add(block)
         blocks.append(block)
     db.commit()
     for block in blocks:
         db.refresh(block)
+    return blocks
+
+
+@router.post(
+    "/semesters/{semester_id}/schedule/direct-placement",
+    response_model=DirectPlacementRead,
+)
+def place_activated_work(
+    semester_id: uuid.UUID,
+    payload: DirectPlacementRequest,
+    db: DbSession,
+    current_user: CurrentUser,
+) -> DirectPlacementRead:
+    """Absorb newly activated work into the accepted plan when it costs nothing to do so."""
+
+    semester = owned_semester(db, current_user.id, semester_id)
+    timezone = resolve_timezone(current_user.timezone)
+    task = db.scalar(
+        select(Task).where(Task.id == payload.task_id, Task.user_id == current_user.id)
+    )
+    if task is None:
+        raise ApiError("NOT_FOUND", "Task not found.", 404)
+    if task.activated_at is None:
+        raise ApiError("VALIDATION_ERROR", "Activate the work before placing it.", 422)
+    if task.deadline_at is None:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="Work without a deadline is placed through a reviewed proposal.",
+        )
+    due_at = aware(task.deadline_at).astimezone(timezone)
+    planning_now = _planning_now()
+    _horizon_start, horizon_end = _horizon(semester, timezone, planning_now)
+    if due_at.date() > horizon_end or due_at <= planning_now:
+        return DirectPlacementRead(
+            placed=False,
+            remaining_minutes=task.remaining_minutes,
+            reason="This deadline sits outside the current plan; regenerate to place it.",
+        )
+    plan = _place_into_free_capacity(
+        db,
+        current_user,
+        semester,
+        [task],
+        source="direct_placement",
+        reason_code=None,
+        message="Added when you activated this work.",
+    )
+    placed_minutes = sum(plan.result.scheduled_minutes.values()) if plan.result else 0
+    if not plan.fits:
+        return DirectPlacementRead(
+            placed=False,
+            placed_minutes=placed_minutes,
+            remaining_minutes=task.remaining_minutes,
+            reason=plan.reason,
+        )
+    blocks = _commit_free_capacity_plan(db, current_user, plan)
     return DirectPlacementRead(
         placed=True,
         blocks=[ScheduleBlockRead.model_validate(block) for block in blocks],
         placed_minutes=placed_minutes,
         remaining_minutes=0,
-        reason="Added to your schedule without moving anything.",
+        reason=plan.reason,
+    )
+
+
+@router.post(
+    "/semesters/{semester_id}/schedule/rollover",
+    response_model=RolloverRead,
+)
+def rollover_work(
+    semester_id: uuid.UUID,
+    db: DbSession,
+    current_user: CurrentUser,
+    payload: RolloverRequest | None = None,
+) -> RolloverRead:
+    """Place the uncovered remainder from ended focus blocks, or create a reviewable draft."""
+
+    payload = payload or RolloverRequest()
+    semester = owned_semester(db, current_user.id, semester_id)
+    timezone = resolve_timezone(current_user.timezone)
+    planning_now = _planning_now()
+    today = planning_now.astimezone(timezone).date()
+    local_date = payload.local_date or today
+    if local_date > today:
+        raise ApiError("VALIDATION_ERROR", "A future day cannot be closed out.", 422)
+    if not semester.start_date <= local_date <= semester.end_date:
+        raise ApiError("VALIDATION_ERROR", "The rollover day must fall in this semester.", 422)
+
+    accepted = _accepted_schedule(db, current_user.id, semester_id, for_update=True)
+    if accepted is None:
+        return RolloverRead(
+            outcome="nothing_to_roll",
+            reason="There is no accepted schedule to close out.",
+        )
+    ended_blocks = [
+        block
+        for block in accepted.blocks
+        if block.task_id is not None
+        and block.block_type == "focus"
+        and aware(block.start_at).astimezone(timezone).date() == local_date
+        and aware(block.end_at) <= planning_now
+    ]
+    if not ended_blocks:
+        return RolloverRead(
+            outcome="nothing_to_roll",
+            reason="No ended focus blocks have outstanding work for that day.",
+        )
+
+    fingerprints = {
+        block_fingerprint(block.task_id, block.start_at, block.end_at): block
+        for block in ended_blocks
+        if block.task_id is not None
+    }
+    answered = set(
+        db.scalars(
+            select(WorkSession.block_fingerprint).where(
+                WorkSession.user_id == current_user.id,
+                WorkSession.block_fingerprint.in_(fingerprints),
+            )
+        )
+    )
+    unanswered_blocks = sum(fingerprint not in answered for fingerprint in fingerprints)
+    task_ids = {block.task_id for block in ended_blocks if block.task_id is not None}
+    tasks = list(
+        db.scalars(
+            select(Task).where(
+                Task.user_id == current_user.id,
+                Task.id.in_(task_ids),
+                Task.status.in_((TaskStatus.pending, TaskStatus.in_progress)),
+                Task.remaining_minutes > 0,
+            )
+        )
+    )
+
+    future_minutes: dict[uuid.UUID, int] = {}
+    for block in accepted.blocks:
+        if block.task_id not in task_ids or aware(block.start_at) <= planning_now:
+            continue
+        future_minutes[block.task_id] = future_minutes.get(block.task_id, 0) + round(
+            (aware(block.end_at) - aware(block.start_at)).total_seconds() / 60
+        )
+    targets = {
+        task.id: max(task.remaining_minutes - future_minutes.get(task.id, 0), 0) for task in tasks
+    }
+    tasks = [task for task in tasks if targets[task.id] > 0]
+    rolled_minutes = sum(targets[task.id] for task in tasks)
+    if not tasks:
+        return RolloverRead(
+            outcome="nothing_to_roll",
+            unanswered_blocks=unanswered_blocks,
+            reason="The remaining work is already covered by future accepted blocks.",
+        )
+
+    plan = _place_into_free_capacity(
+        db,
+        current_user,
+        semester,
+        tasks,
+        source="generated",
+        reason_code="ROLLOVER",
+        message="Rolled forward after the daily check-in.",
+        target_minutes=targets,
+    )
+    if plan.fits:
+        if payload.dry_run:
+            return RolloverRead(
+                outcome="placed",
+                rolled_minutes=rolled_minutes,
+                unanswered_blocks=unanswered_blocks,
+                reason="This work fits without moving anything in the accepted schedule.",
+            )
+        blocks = _commit_free_capacity_plan(db, current_user, plan)
+        return RolloverRead(
+            outcome="placed",
+            rolled_minutes=rolled_minutes,
+            blocks=[ScheduleBlockRead.model_validate(block) for block in blocks],
+            unanswered_blocks=unanswered_blocks,
+            reason="Added to your schedule without moving anything.",
+        )
+
+    requirements = _generation_requirements(db, current_user, semester)
+    if requirements.blocking_inputs:
+        raise ApiError(
+            "SCHEDULER_INPUT_INCOMPLETE",
+            "Confirm course readiness before generating this schedule.",
+            422,
+            {
+                "blocking_inputs": [
+                    item.model_dump(mode="json") for item in requirements.blocking_inputs
+                ]
+            },
+        )
+    if payload.dry_run:
+        return RolloverRead(
+            outcome="draft_required",
+            rolled_minutes=rolled_minutes,
+            unanswered_blocks=unanswered_blocks,
+            reason="This work needs a reviewable draft because it does not fit free capacity.",
+        )
+    proposal = _build_proposal(
+        db,
+        current_user,
+        semester_id,
+        extra_focus_decision=payload.extra_focus_decision,
+    )
+    db.commit()
+    return RolloverRead(
+        outcome="draft_created",
+        rolled_minutes=rolled_minutes,
+        proposal=proposal_read(db, current_user, owned_proposal(db, current_user.id, proposal.id)),
+        unanswered_blocks=unanswered_blocks,
+        reason="Review the new draft before changing the accepted schedule.",
     )
 
 

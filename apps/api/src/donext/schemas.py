@@ -857,6 +857,25 @@ class ScheduleProposalGenerate(ApiModel):
     extra_focus_decision: ExtraFocusDecision | None = None
 
 
+class RolloverRequest(ApiModel):
+    local_date: date | None = None
+    dry_run: bool = False
+    extra_focus_decision: ExtraFocusDecision | None = None
+
+
+RolloverOutcome = Literal["nothing_to_roll", "placed", "draft_required", "draft_created"]
+
+
+class RolloverRead(ApiModel):
+    outcome: RolloverOutcome
+    rolled_minutes: int = 0
+    blocks: list[ScheduleBlockRead] = Field(default_factory=list)
+    proposal: ScheduleProposalRead | None = None
+    unanswered_blocks: int = 0
+    released_minutes: int = 0
+    reason: str
+
+
 class GenerationBlockingInput(ApiModel):
     code: str
     message: str

@@ -19,6 +19,22 @@ The full API run has 178 passing tests and 14 failures, all present in the captu
 by those pre-existing proposal and student-scheduling failures; the older two-failure count below
 is not the current baseline.
 
+Phase 3 implemented on 2026-09-14: `POST /semesters/{id}/schedule/rollover` finds unfinished tasks
+from ended focus blocks on a requested local day, subtracts work already covered by future accepted
+blocks, and solves every uncovered remainder together. Work that fits becomes add-only, undoable
+blocks with `source="generated"` and `reason_code="ROLLOVER"`; work that cannot fit returns
+`draft_required` during a dry run or creates a proposed schedule for explicit review. Neither path
+moves accepted history. A successful add-only rollover invalidates an older open draft through the
+existing input fingerprint. The direct-placement route now shares this free-capacity solver.
+
+Six rollover tests cover add-only placement, atomic multi-task solving, future accepted coverage,
+dry runs, draft creation, undo, stale-draft protection, unanswered versus `not_started` blocks,
+timezone defaults, and future-date rejection. The focused rollover, completion, and planning run
+passes all 46 tests. The full API run now has 185 passing tests and 13 failures, with no new failures;
+the direct-placement regression guard was made independent of the wall clock and now passes. Web
+lint/typecheck and API lint/typecheck pass. The production web build also passes with network access
+for the existing Geist Google font.
+
 ## Document boundary
 
 This document plans work that is not yet implemented. The canonical product policy remains

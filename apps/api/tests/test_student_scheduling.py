@@ -211,8 +211,9 @@ def test_the_activation_queue_surfaces_known_deadlines_inside_the_horizon(
 
 
 def test_activated_work_lands_directly_when_it_costs_the_plan_nothing(
-    client: TestClient,
+    client: TestClient, monkeypatch
 ) -> None:
+    monkeypatch.setattr(proposals, "_planning_now", lambda: datetime(2026, 9, 7, 15, tzinfo=UTC))
     register(client)
     semester = create_semester(client)
     replace_weekday_availability(client)
