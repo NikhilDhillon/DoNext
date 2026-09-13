@@ -1,18 +1,14 @@
 "use client";
 
-import { AlertTriangle, CalendarRange, CheckCircle2, LoaderCircle } from "lucide-react";
+import { ArrowRight, CalendarRange, ChevronDown, LoaderCircle, Pencil, Plus } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { DeadlineEditor } from "@/components/deadline-editor";
 import { useApiResource } from "@/hooks/use-api-resource";
-import type {
-  Course,
-  ScheduleProposal,
-  Semester,
-  SemesterDeadline,
-  SemesterPlanning,
-} from "@/lib/types";
+import type { Course, Semester, SemesterDeadline, SemesterPlanning } from "@/lib/types";
+
+type DateScope = "upcoming" | "all";
 
 export function SemesterPlanner() {
   const semesters = useApiResource<Semester[]>("/semesters");
@@ -23,265 +19,190 @@ export function SemesterPlanner() {
   const planning = useApiResource<SemesterPlanning>(
     currentSemester ? `/planning/semesters/${currentSemester.id}` : null,
   );
-  const proposal = useApiResource<ScheduleProposal>(
-    currentSemester ? `/semesters/${currentSemester.id}/schedule/proposal` : null,
-  );
   const courses = useApiResource<Course[]>(
     currentSemester ? `/semesters/${currentSemester.id}/courses` : null,
   );
-  const deadlineScroll = useRef<HTMLDivElement | null>(null);
-  // Null while the editor is closed; a wrapped deadline (or a null one, to add) while it is open.
   const [editing, setEditing] = useState<{ deadline: SemesterDeadline | null } | null>(null);
+  const [scope, setScope] = useState<DateScope>("upcoming");
+  const [courseId, setCourseId] = useState("all");
+  const [month, setMonth] = useState("all");
+  const [now, setNow] = useState(() => Date.now());
 
-  // Mid-semester the list opens on dates that have already passed, so start it at the next one.
+  // Keep the upcoming view accurate when the page stays open across a deadline.
   useEffect(() => {
-    const container = deadlineScroll.current;
-    const next = container?.querySelector(".deadline-row:not(.past)");
-    if (!container || !next) return;
-    const offset = next.getBoundingClientRect().top - container.getBoundingClientRect().top;
-    container.scrollTop = Math.max(container.scrollTop + offset - 42, 0);
-  }, [planning.data]);
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   if ((semesters.loading || planning.loading) && !planning.data) {
-    return <SemesterState loading message="Calculating your semester from saved work" />;
+    return <SemesterState loading message="Loading your semester dates" />;
   }
   if (semesters.error || planning.error) {
     return <SemesterState message={semesters.error || planning.error || "The semester could not load."} onRetry={async () => { await semesters.reload(); await planning.reload(); }} />;
   }
   if (!currentSemester) {
-    return <main className="page-shell planner-state"><CalendarRange size={28} /><h1>Start with a semester.</h1><p>Add semester dates in onboarding before reviewing long-range capacity.</p><Link className="primary-button" href="/onboarding">Set up semester</Link></main>;
+    return <main className="page-shell planner-state"><CalendarRange size={28} /><h1>Start with a semester.</h1><p>Add semester dates to keep your deadlines and milestones together.</p><Link className="primary-button" href="/onboarding">Set up semester</Link></main>;
   }
-  if (!planning.data) return <SemesterState loading message="Loading your semester" />;
+  if (!planning.data) return <SemesterState loading message="Loading your semester dates" />;
 
   const data = planning.data;
-  const health = semesterHealth(data);
-  const attentionWeek = data.weeks.find((week) => week.risk === "high")
-    ?? data.weeks.find((week) => week.risk === "medium")
-    ?? null;
+  const deadlines = [...data.deadlines].sort((a, b) => Date.parse(a.due_at) - Date.parse(b.due_at));
+  const courseDates = deadlines.filter((deadline) => courseId === "all" || deadline.course_id === courseId);
+  const upcoming = courseDates.filter((deadline) => Date.parse(deadline.due_at) >= now);
+  const scopedDates = scope === "upcoming" ? upcoming : courseDates;
+  const groups = groupDeadlines(scopedDates);
+  // An edited date can move out of the selected month; keep the result reachable.
+  const activeMonth = groups.some((group) => group.key === month) ? month : "all";
+  const visibleGroups = groups.filter((group) => activeMonth === "all" || group.key === activeMonth);
+  const visibleCount = visibleGroups.reduce((count, group) => count + group.items.length, 0);
+  const nextId = upcoming[0]?.id;
+  const canAdd = Boolean(courses.data?.length);
+
+  function resetFilters() {
+    setScope("all");
+    setCourseId("all");
+    setMonth("all");
+  }
 
   return (
     <main className="page-shell semester-page">
-      <header className="page-heading">
+      <header className="page-heading semester-heading">
         <div>
-          <p className="eyebrow">{data.semester.name} · {data.weeks.length} weeks</p>
-          <h1>See the semester before it gets busy.</h1>
-          <p>{semesterSummary(data, health.label)}</p>
+          <p className="eyebrow">{data.semester.name}</p>
+          <h1>Important dates.</h1>
+          <p>Your deadlines, exams, and milestones. All in one place.</p>
         </div>
-        <Link className="secondary-button" href="/courses"><CalendarRange size={18} /> Review courses</Link>
+        <div className="semester-heading-actions">
+          <Link className="secondary-button" href="/courses">Review courses</Link>
+          <button className="primary-button" disabled={!canAdd} title={canAdd ? undefined : "Add a course before adding dates."} type="button" onClick={() => setEditing({ deadline: null })}>
+            <Plus size={17} aria-hidden="true" /> Add date
+          </button>
+        </div>
       </header>
 
-      {proposal.data ? (
-        <Link className="proposal-pending-banner" href="/week"><CalendarRange size={17} /><span><strong>Draft projection available</strong><small>{formatMinutes(proposal.data.generation_summary.scheduled_minutes)} is proposed, not yet accepted.</small></span></Link>
-      ) : null}
+      {courses.error && (
+        <p className="planner-alert warning">Courses could not load. <button className="text-button" type="button" onClick={() => void courses.reload()}>Try again</button></p>
+      )}
 
-      <section className="semester-metrics">
-        <article><span>Remaining work</span><strong>{formatMinutes(data.total_demand_minutes)}</strong><small>From unfinished task estimates</small></article>
-        <article><span>Open capacity</span><strong>{formatMinutes(data.open_capacity_minutes)}</strong><small>After commitments and protected buffer</small></article>
-        <article><span>Upcoming deadlines</span><strong>{data.upcoming_deadlines}</strong><small>Across confirmed course dates</small></article>
-        <article className={health.className}><span>Plan health</span><strong>{health.label}</strong><small>{health.icon}{health.detail}</small></article>
-      </section>
-
-      {data.incomplete_data && <p className="planner-alert warning">This forecast is intentionally incomplete: add weekly availability and deadlines for every unfinished task to improve it.</p>}
-
-      <section className="load-card">
-        <div className="section-heading">
-          <div><h2>Weekly workload</h2><p>Remaining task demand as a share of usable focus capacity</p></div>
-          <div className="load-legend"><span><i /> Demand</span><span><i /> Capacity limit</span></div>
+      <div className="semester-toolbar">
+        <div className="semester-scope" role="group" aria-label="Dates to show">
+          <button type="button" aria-pressed={scope === "upcoming"} onClick={() => { setScope("upcoming"); setMonth("all"); }}>
+            Upcoming <span>{upcoming.length}</span>
+          </button>
+          <button type="button" aria-pressed={scope === "all"} onClick={() => { setScope("all"); setMonth("all"); }}>
+            All dates <span>{courseDates.length}</span>
+          </button>
         </div>
-        <div className="load-chart live-load-chart" style={{ gridTemplateColumns: `repeat(${data.weeks.length}, minmax(28px, 1fr))`, minWidth: `${Math.max(data.weeks.length * 44, 620)}px` }} aria-label="Semester weekly workload chart">
-          <div className="risk-line"><span>100% capacity</span></div>
-          {data.weeks.map((week) => (
-            <div className="load-week" key={week.week_number} title={weekTooltip(week)}>
-              <span className={week.risk === "high" ? "risk" : week.risk === "unknown" ? "unknown" : undefined} style={{ height: `${barHeight(week.load_percent)}%` }} />
-              <small>W{week.week_number}</small>
-            </div>
-          ))}
-        </div>
-      </section>
+        <label className={`semester-course-filter${courseId === "all" ? "" : " filtered"}`}>
+          <span>Course</span>
+          <select value={courseId} onChange={(event) => { setCourseId(event.target.value); setMonth("all"); }}>
+            <option value="all">All courses</option>
+            {(courses.data ?? []).map((course) => <option key={course.id} value={course.id}>{course.code}</option>)}
+          </select>
+          <ChevronDown size={18} aria-hidden="true" />
+        </label>
+      </div>
 
-      <div className="semester-grid">
-        <section className="deadline-panel">
-          <div className="section-heading">
-            <div><h2>Important dates</h2><p>Confirmed milestones shaping remaining demand</p></div>
-            <div className="deadline-panel-actions">
-              <span className="muted-label">{data.deadlines.length} total</span>
-              <button
-                className="text-button"
-                disabled={!courses.data?.length}
-                title={courses.data?.length ? undefined : "Add a course before adding dates."}
-                type="button"
-                onClick={() => setEditing({ deadline: null })}
-              >
-                Add date
+      <div className="semester-timeline-layout">
+        <aside className="semester-months">
+          <p className="eyebrow">Browse semester</p>
+          <nav aria-label="Filter dates by month">
+            <button type="button" aria-pressed={activeMonth === "all"} onClick={() => setMonth("all")}>
+              <span>All months</span><span>{scopedDates.length}</span>
+            </button>
+            {groups.map((group) => (
+              <button key={group.key} type="button" aria-pressed={activeMonth === group.key} onClick={() => setMonth(group.key)}>
+                <span>{group.month} <small>{group.year}</small></span><span>{group.items.length}</span>
               </button>
-            </div>
+            ))}
+          </nav>
+        </aside>
+
+        <section className="semester-timeline" aria-label="Important dates timeline">
+          <div className="semester-list-heading">
+            <p role="status">{visibleCount} {visibleCount === 1 ? "date" : "dates"}{scope === "upcoming" ? " ahead" : " in view"}</p>
+            <span>Select a date to edit</span>
           </div>
-          {data.deadlines.length ? (
-            <div className="deadline-scroll" ref={deadlineScroll}>
-              {groupDeadlines(data.deadlines).map((group) => (
-                <section className="deadline-group" key={group.key}>
-                  <h3 className="deadline-month">{group.month}{group.year && <em>{group.year}</em>}</h3>
-                  <ul>
-                    {group.items.map((deadline) => {
-                      const urgency = deadlineUrgency(deadline.due_at);
-                      const heavy = (deadline.weight_percent ?? 0) >= 15;
-                      return (
-                        <li className={`deadline-row ${urgency.tone}`} key={deadline.id}>
-                          <button
-                            aria-label={`Edit ${deadline.name}`}
-                            type="button"
-                            onClick={() => setEditing({ deadline })}
-                          >
-                            <time dateTime={deadline.due_at}>
-                              <span>{datePart(deadline.due_at, "weekday")}</span>
-                              <strong>{datePart(deadline.due_at, "day")}</strong>
-                            </time>
-                            <div className="deadline-copy">
-                              <h4>{deadline.name}</h4>
-                              <p>
-                                <span className="deadline-course">{deadline.course_code || "Course work"}</span>
-                                {deadline.weight_percent != null && (
-                                  <span className={`deadline-weight${heavy ? " heavy" : ""}`}>{deadline.weight_percent}% of grade</span>
-                                )}
-                              </p>
-                            </div>
-                            <div className="deadline-meta">
-                              <span className={`deadline-effort${deadline.remaining_minutes == null ? " missing" : ""}`}>
-                                {deadline.remaining_minutes == null ? "Estimate missing" : `${formatMinutes(deadline.remaining_minutes)} left`}
-                              </span>
-                              <small>{urgency.label}</small>
-                            </div>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </section>
-              ))}
-            </div>
-          ) : (
-            <div className="planner-empty compact">
-              <CalendarRange size={23} />
-              <h3>No confirmed deadlines yet.</h3>
-              <p>Import an outline, or add a dated milestone to build this view.</p>
-              {courses.data?.length ? (
-                <button className="secondary-button" type="button" onClick={() => setEditing({ deadline: null })}>
-                  Add a date
-                </button>
-              ) : null}
+          {visibleGroups.length ? visibleGroups.map((group) => (
+            <section className="deadline-group" key={group.key} aria-labelledby={`month-${group.key}`}>
+              <h2 className="deadline-month" id={`month-${group.key}`}>{group.month} <span>{group.year}</span></h2>
+              <ul>
+                {group.items.map((deadline) => {
+                  const due = new Date(deadline.due_at);
+                  const urgency = deadlineUrgency(due, now);
+                  return (
+                    <li className={`deadline-row ${urgency.tone}`} key={`${deadline.kind}-${deadline.id}`}>
+                      <button type="button" aria-label={`Edit ${deadline.name}, ${deadline.course_code ?? "Personal work"}, ${due.toLocaleDateString("en-CA", { month: "long", day: "numeric", year: "numeric" })}`} onClick={() => setEditing({ deadline })}>
+                        <time dateTime={deadline.due_at}>
+                          <span>{due.toLocaleDateString("en-CA", { weekday: "short" })}</span>
+                          <strong>{due.getDate()}</strong>
+                        </time>
+                        <div className="deadline-copy">
+                          <div className="deadline-title"><h3>{deadline.name}</h3>{deadline.id === nextId && <span className="deadline-next">Next up</span>}</div>
+                          <p>
+                            <span className="deadline-course">{deadline.course_code || "Personal work"}</span>
+                            {deadline.item_type && <span>{itemLabel(deadline.item_type)}</span>}
+                            {deadline.weight_percent != null && <span className={`deadline-weight${deadline.weight_percent >= 15 ? " heavy" : ""}`}>{deadline.weight_percent}% of grade</span>}
+                          </p>
+                        </div>
+                        <div className="deadline-meta">
+                          <strong>{urgency.label}</strong>
+                          <span>{due.toLocaleTimeString("en-CA", { hour: "numeric", minute: "2-digit" })}{deadline.remaining_minutes != null ? ` · ${formatMinutes(deadline.remaining_minutes)} left` : ""}</span>
+                        </div>
+                        <Pencil className="deadline-edit-icon" size={15} aria-hidden="true" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          )) : (
+            <div className="semester-empty">
+              <CalendarRange size={28} aria-hidden="true" />
+              <h2>{!deadlines.length ? "Your semester starts here." : courseId !== "all" ? "No dates match this view." : "No upcoming dates."}</h2>
+              <p>{!deadlines.length ? "Add an important date, or import a course outline to bring in its deadlines." : courseId !== "all" ? "Try another course, or view all semester dates." : "Your saved dates are in the past. You can still review and edit them."}</p>
+              {deadlines.length ? <button className="secondary-button" type="button" onClick={resetFilters}>View all dates</button> : <Link className="secondary-button" href="/courses">Review courses <ArrowRight size={16} aria-hidden="true" /></Link>}
             </div>
           )}
         </section>
-        <aside className={`risk-card ${health.className}`}>
-          <div className="risk-card-icon">{attentionWeek ? <AlertTriangle size={20} /> : <CheckCircle2 size={20} />}</div>
-          <p className="eyebrow">{data.incomplete_data ? "Needs input" : attentionWeek ? "Look ahead" : "Capacity check"}</p>
-          <h2>{riskTitle(data, attentionWeek)}</h2>
-          <p>{riskExplanation(data, attentionWeek)}</p>
-          {attentionWeek && <small className="risk-calculation">{formatMinutes(attentionWeek.demand_minutes)} demand · {formatMinutes(attentionWeek.capacity_minutes)} capacity</small>}
-        </aside>
       </div>
 
-      <DeadlineEditor
-        courses={courses.data ?? []}
-        deadline={editing?.deadline ?? null}
-        open={editing !== null}
-        onClose={() => setEditing(null)}
-        onSaved={async () => {
-          await planning.reload();
-        }}
-      />
+      <DeadlineEditor courses={courses.data ?? []} deadline={editing?.deadline ?? null} open={editing !== null} onClose={() => setEditing(null)} onSaved={async () => { await planning.reload(); }} />
     </main>
   );
 }
 
 function SemesterState({ loading = false, message, onRetry }: { loading?: boolean; message: string; onRetry?: () => Promise<void> }) {
-  return <main className="page-shell planner-state">{loading && <LoaderCircle className="spin" size={26} />}<h1>{message}</h1><p>{loading ? "DoNext is comparing task estimates with real availability." : "Your saved data is unchanged."}</p>{onRetry && <button className="primary-button" type="button" onClick={onRetry}>Try again</button>}</main>;
-}
-
-function semesterHealth(data: SemesterPlanning) {
-  if (data.incomplete_data) return { label: "Needs input", detail: "Some capacity or dates are unknown", className: "unknown", icon: <AlertTriangle size={14} /> };
-  if (data.weeks.some((week) => week.risk === "high")) return { label: "At risk", detail: "At least one week exceeds capacity", className: "risk", icon: <AlertTriangle size={14} /> };
-  if (data.weeks.some((week) => week.risk === "medium")) return { label: "Watch", detail: "At least one week is above 75%", className: "watch", icon: <AlertTriangle size={14} /> };
-  return { label: "Good", detail: "No calculated weekly overload", className: "good", icon: <CheckCircle2 size={14} /> };
-}
-
-function semesterSummary(data: SemesterPlanning, health: string) {
-  if (data.incomplete_data) return "The current forecast uses only confirmed availability, estimates, and deadlines.";
-  if (health === "At risk") return "At least one week has more estimated work than usable focus capacity.";
-  if (health === "Watch") return "The semester is feasible from current inputs, with a week approaching capacity.";
-  return "Current task estimates fit within the usable capacity you configured.";
-}
-
-function riskTitle(data: SemesterPlanning, week: SemesterPlanning["weeks"][number] | null) {
-  if (data.incomplete_data) return "Complete the capacity picture";
-  if (!week) return "No weekly overload detected";
-  return `Week ${week.week_number} ${week.risk === "high" ? "exceeds" : "approaches"} capacity`;
-}
-
-function riskExplanation(data: SemesterPlanning, week: SemesterPlanning["weeks"][number] | null) {
-  if (data.incomplete_data) return "Undated work or missing availability prevents DoNext from making a complete semester claim.";
-  if (!week) return "Every dated task currently fits within that week’s calculated usable focus time.";
-  return week.risk === "high"
-    ? "Remaining task estimates due that week are greater than the focus time available after commitments and buffer."
-    : "Remaining task estimates use more than three quarters of that week’s focus capacity.";
-}
-
-function barHeight(load: number | null) {
-  if (load == null) return 4;
-  return Math.max(Math.min(load / 1.2, 100), 4);
-}
-
-function weekTooltip(week: SemesterPlanning["weeks"][number]) {
-  if (week.load_percent == null) return `Week ${week.week_number}: capacity unavailable`;
-  return `Week ${week.week_number}: ${week.load_percent}% load, ${formatMinutes(week.demand_minutes)} remaining work`;
+  return <main className="page-shell planner-state">{loading && <LoaderCircle className="spin" size={26} />}<h1>{message}</h1><p>{loading ? "Gathering your saved deadlines and milestones." : "Your saved dates are unchanged."}</p>{onRetry && <button className="primary-button" type="button" onClick={onRetry}>Try again</button>}</main>;
 }
 
 function groupDeadlines(deadlines: SemesterDeadline[]) {
-  const groups: { key: string; month: string; year: string | null; items: SemesterDeadline[] }[] = [];
-  let previousYear: string | null = null;
+  const groups: { key: string; month: string; year: number; items: SemesterDeadline[] }[] = [];
   for (const deadline of deadlines) {
-    const key = deadline.due_at.slice(0, 7);
+    const due = new Date(deadline.due_at);
+    const key = `${due.getFullYear()}-${String(due.getMonth() + 1).padStart(2, "0")}`;
     const last = groups[groups.length - 1];
-    if (last?.key === key) {
-      last.items.push(deadline);
-      continue;
-    }
-    const year = deadline.due_at.slice(0, 4);
-    groups.push({ key, month: datePart(deadline.due_at, "month"), year: year === previousYear ? null : year, items: [deadline] });
-    previousYear = year;
+    if (last?.key === key) last.items.push(deadline);
+    else groups.push({ key, month: due.toLocaleDateString("en-CA", { month: "long" }), year: due.getFullYear(), items: [deadline] });
   }
   return groups;
 }
 
-function deadlineUrgency(dueAt: string) {
-  const days = daysUntil(dueAt);
-  if (days < 0) return { tone: "past", label: days === -1 ? "Yesterday" : `${Math.abs(days)} days ago` };
+function deadlineUrgency(due: Date, now: number) {
+  const today = new Date(now);
+  const days = Math.round((Date.UTC(due.getFullYear(), due.getMonth(), due.getDate()) - Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())) / 86400000);
+  if (due.getTime() < now) return { tone: "past", label: days === 0 ? "Earlier today" : days === -1 ? "Yesterday" : `${Math.abs(days)} days ago` };
   if (days === 0) return { tone: "now", label: "Today" };
   if (days === 1) return { tone: "now", label: "Tomorrow" };
-  if (days <= 7) return { tone: "soon", label: `In ${days} days` };
-  if (days <= 13) return { tone: "near", label: `In ${days} days` };
-  return { tone: days <= 28 ? "near" : "later", label: `In ${Math.round(days / 7)} weeks` };
+  return { tone: days <= 7 ? "soon" : "later", label: days <= 13 ? `In ${days} days` : `In ${Math.round(days / 7)} weeks` };
 }
 
-function daysUntil(dueAt: string) {
-  const now = new Date();
-  const due = Date.parse(`${dueAt.slice(0, 10)}T00:00:00Z`);
-  return Math.round((due - Date.UTC(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
-}
-
-const dateParts: Record<"day" | "month" | "weekday", Intl.DateTimeFormatOptions> = {
-  day: { day: "numeric", timeZone: "UTC" },
-  month: { month: "long", timeZone: "UTC" },
-  weekday: { weekday: "short", timeZone: "UTC" },
-};
-
-function datePart(value: string, part: "day" | "month" | "weekday") {
-  return new Intl.DateTimeFormat("en-CA", dateParts[part]).format(new Date(`${value.slice(0, 10)}T12:00:00Z`));
+function itemLabel(value: string) {
+  return value === "final_exam" ? "Final exam" : value.charAt(0).toUpperCase() + value.slice(1).replaceAll("_", " ");
 }
 
 function formatMinutes(minutes: number) {
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
+  return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
 }

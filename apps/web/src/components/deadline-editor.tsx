@@ -159,7 +159,7 @@ export function DeadlineEditor({
       title={deadline ? "Edit this date" : "Add an important date"}
       description={deadline
         ? "Changes here move the deadline and resize the work behind it."
-        : "Dated course work counts toward the semester workload as soon as it is saved."}
+        : "Keep a deadline or milestone in your semester. Add an effort estimate when you know it."}
       onClose={close}
     >
       <form className="onboarding-form deadline-form" key={formKey} onSubmit={submit} onChange={() => setError(null)}>
