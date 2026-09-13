@@ -136,6 +136,7 @@ The API test suite uses an isolated in-memory SQLite database. PostgreSQL remain
 Phase 1 architecture and security decisions are documented in [`docs/architecture/phase-1.md`](docs/architecture/phase-1.md).
 The live manual-planning milestone is specified in [`docs/architecture/phase-2.md`](docs/architecture/phase-2.md).
 The current deterministic proposal implementation is documented in [`docs/architecture/phase-3.md`](docs/architecture/phase-3.md).
+The planned daily completion loop and Today redesign are specified in [`docs/architecture/phase-4.md`](docs/architecture/phase-4.md).
 
 ## Author
 
