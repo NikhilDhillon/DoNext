@@ -35,12 +35,20 @@ from donext.schemas import (
     SemesterPlanningRead,
     SemesterRead,
     SemesterRisk,
+    SemesterWeekDemandRead,
     SemesterWeekRead,
     sleep_window_minutes,
 )
 
 WEEKDAYS = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 Interval = tuple[datetime, datetime]
+# Work is paced, not done the week it is due, so the semester chart spreads a task backwards
+# from its deadline. The lead it gets is the number of weeks it would take at a sustainable
+# effort on one piece of work: a two hour problem set stays in its deadline week, a twenty
+# hour project reaches back across the month before it.
+SUSTAINABLE_WEEKLY_TASK_MINUTES = 300
+# Every day keeps an hour back so a plan that slips has somewhere to slip to.
+ROLLOVER_BUFFER_MINUTES = 60
 
 
 @dataclass(frozen=True)
@@ -70,6 +78,31 @@ def academic_effort_default(item_type: AcademicItemType) -> tuple[int | None, Es
     if item_type in {AcademicItemType.midterm, AcademicItemType.final_exam}:
         return 480, EstimateOrigin.pending_exam
     return None, EstimateOrigin.system_default
+
+
+def usable_focus_capacity(
+    open_minutes: int,
+    preferences: UserPreference,
+    *,
+    remove_focus_cap: bool = False,
+    release_buffer: bool = False,
+) -> tuple[int, int]:
+    """Turn a day's open minutes into the focus time a plan may actually book.
+
+    Returns the usable minutes and the minutes held back. Both the semester forecast and the
+    scheduler go through here: a week forecast against capacity the scheduler would refuse
+    to book reads as comfortable right up until the plan comes back half empty.
+    """
+
+    focus_limited = (
+        open_minutes
+        if remove_focus_cap
+        else min(open_minutes, preferences.maximum_daily_focus_minutes)
+    )
+    protected = 0 if release_buffer else min(ROLLOVER_BUFFER_MINUTES, focus_limited)
+    usable = max(focus_limited - protected, 0)
+    # Capacity is spent in five minute pieces, so capacity is counted in them too.
+    return usable - usable % 5, protected
 
 
 def aware(value: datetime) -> datetime:
@@ -352,10 +385,26 @@ def build_planning_view(
             )
             if clipped:
                 focus_intervals.append(clipped)
-        open_intervals = subtract_intervals(available, commitment_intervals)
+        # Sleep is not capacity even when the availability window runs past bedtime. This is
+        # kept out of commitment_intervals so rest never reports as a commitment.
+        sleep_start_date = (
+            current_date + timedelta(days=1)
+            if preferences.default_sleep_time == time.min
+            else current_date
+        )
+        rest_intervals: list[Interval] = [
+            (
+                bounds[0],
+                datetime.combine(current_date, preferences.default_wake_time, tzinfo=timezone),
+            ),
+            (
+                datetime.combine(sleep_start_date, preferences.default_sleep_time, tzinfo=timezone),
+                bounds[1],
+            ),
+        ]
+        open_intervals = subtract_intervals(available, commitment_intervals + rest_intervals)
         open_minutes = interval_minutes(open_intervals)
-        protected_minutes = min(60, open_minutes)
-        usable_minutes = max(open_minutes - protected_minutes, 0)
+        usable_minutes, protected_minutes = usable_focus_capacity(open_minutes, preferences)
         planned_minutes = interval_minutes(merge_intervals(focus_intervals))
         days.append(
             PlanningDayRead(
@@ -430,6 +479,54 @@ def build_planning_view(
         next_entry_id=next_entry.id if next_entry else None,
         warnings=list(dict.fromkeys(warnings)),
     )
+
+
+def weekly_task_demand(
+    tasks: list[Task],
+    week_starts: list[date],
+    timezone: ZoneInfo,
+    today: date,
+) -> dict[date, list[tuple[Task, int]]]:
+    """Spread each task's remaining minutes across the weeks it can still be worked in.
+
+    Charging every minute to the deadline week turns the workload chart into a list of due
+    dates. Work is instead paced backwards from the deadline over the lead time its size
+    calls for, clipped to the weeks that are still ahead of the student.
+
+    Returns the tasks needing work in each week and the minutes each one needs there, so the
+    chart can show a week's total and say which work makes it up.
+    """
+
+    demand: dict[date, list[tuple[Task, int]]] = {week_start: [] for week_start in week_starts}
+    if not week_starts:
+        return demand
+    last_index = len(week_starts) - 1
+
+    def week_index(day: date) -> int:
+        offset = (day - week_starts[0]).days // 7
+        return min(max(offset, 0), last_index)
+
+    for task in tasks:
+        if task.deadline_at is None or task.remaining_minutes <= 0:
+            continue
+        deadline_index = week_index(aware(task.deadline_at).astimezone(timezone).date())
+        # Nothing can be worked in a week that has already gone by, and work held back by an
+        # earliest start cannot begin before it.
+        opens_on = max(week_starts[0], today)
+        if task.earliest_start_at is not None:
+            opens_on = max(opens_on, aware(task.earliest_start_at).astimezone(timezone).date())
+        lead_weeks = -(-task.remaining_minutes // SUSTAINABLE_WEEKLY_TASK_MINUTES)
+        start_index = max(week_index(opens_on), deadline_index - lead_weeks + 1)
+        # Overdue work has no window left, so it lands whole on the week in hand.
+        end_index = max(deadline_index, start_index)
+        span = end_index - start_index + 1
+        even, remainder = divmod(task.remaining_minutes, span)
+        for position, index in enumerate(range(start_index, end_index + 1)):
+            # The odd minutes go to the weeks nearest the deadline, where the pressure is.
+            minutes = even + (1 if position >= span - remainder else 0)
+            if minutes:
+                demand[week_starts[index]].append((task, minutes))
+    return demand
 
 
 def build_semester_view(db: Session, user: User, semester: Semester) -> SemesterPlanningRead:
@@ -509,22 +606,35 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
     deadlines.sort(key=lambda item: item.due_at)
 
     has_availability = any(day.capacity.available_minutes > 0 for day in planner.days)
+    today = datetime.now(UTC).astimezone(timezone)
+    week_starts = [
+        semester.start_date + timedelta(days=offset)
+        for offset in range(0, (end_exclusive - semester.start_date).days, 7)
+    ]
+    demand_by_week = weekly_task_demand(semester_tasks, week_starts, timezone, today.date())
     weeks: list[SemesterWeekRead] = []
-    for index, week_start in enumerate(
-        (
-            semester.start_date + timedelta(days=offset)
-            for offset in range(0, (end_exclusive - semester.start_date).days, 7)
-        ),
-        start=1,
-    ):
+    for index, week_start in enumerate(week_starts, start=1):
         week_end = min(week_start + timedelta(days=6), semester.end_date)
         week_days = [day for day in planner.days if week_start <= day.date <= week_end]
-        demand = sum(
-            task.remaining_minutes
-            for task in semester_tasks
-            if task.deadline_at
-            and week_start <= aware(task.deadline_at).astimezone(timezone).date() <= week_end
-        )
+        shares = sorted(demand_by_week[week_start], key=lambda share: (-share[1], share[0].name))
+        demand = sum(minutes for _task, minutes in shares)
+        sources = [
+            SemesterWeekDemandRead(
+                task_id=task.id,
+                name=task.name,
+                course_code=course_codes.get(task.course_id) if task.course_id else None,
+                minutes=minutes,
+                remaining_minutes=task.remaining_minutes,
+                due_at=aware(task.deadline_at).astimezone(timezone),
+                due_this_week=(
+                    week_start <= aware(task.deadline_at).astimezone(timezone).date() <= week_end
+                ),
+                estimate_origin=task.estimate_origin,
+            )
+            for task, minutes in shares
+            # Every share comes from a task with a deadline; this keeps the type checker sure.
+            if task.deadline_at is not None
+        ]
         capacity = sum(day.capacity.usable_focus_minutes for day in week_days)
         commitments = sum(day.capacity.commitment_minutes for day in week_days)
         scheduled = sum(day.capacity.planned_focus_minutes for day in week_days)
@@ -532,7 +642,11 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
         risk: SemesterRisk
         if not has_availability:
             risk = "unknown"
-        elif load_percent is None or load_percent > 100:
+        elif load_percent is None:
+            # A week with no usable focus time only carries risk if work is due in it.
+            # Reading breaks and holidays have no capacity and nothing to spend it on.
+            risk = "high" if demand else "low"
+        elif load_percent > 100:
             risk = "high"
         elif load_percent > 75:
             risk = "medium"
@@ -549,12 +663,12 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
                 scheduled_minutes=scheduled,
                 load_percent=load_percent,
                 risk=risk,
+                demand_sources=sources,
             )
         )
 
     total_demand = sum(task.remaining_minutes for task in semester_tasks)
     total_capacity = sum(week.capacity_minutes for week in weeks)
-    today = datetime.now(UTC).astimezone(timezone)
     upcoming = sum(1 for deadline in deadlines if deadline.due_at >= today)
     return SemesterPlanningRead(
         semester=SemesterRead.model_validate(semester),

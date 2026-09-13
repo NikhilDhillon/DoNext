@@ -41,6 +41,7 @@ from donext.models import (
     UserPreference,
 )
 from donext.planning import (
+    ROLLOVER_BUFFER_MINUTES,
     EventOccurrence,
     Interval,
     academic_effort_default,
@@ -50,6 +51,7 @@ from donext.planning import (
     interval_minutes,
     resolve_timezone,
     subtract_intervals,
+    usable_focus_capacity,
 )
 from donext.routers.schedules import validate_links, validate_times
 from donext.routers.semesters import owned_semester
@@ -88,7 +90,6 @@ router = APIRouter(tags=["schedule proposals"])
 logger = logging.getLogger(__name__)
 PRIORITY_RANK = {"optional": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 ENERGY_RANK = {"low": 1, "medium": 2, "high": 3}
-ROLLOVER_BUFFER_MINUTES = 60
 COMPLETE_TIMEOUT_WARNING = "Everything fits. Regenerate for a different arrangement."
 PARTIAL_TIMEOUT_WARNING = (
     "Some work did not fit \u2014 see unresolved items below. "
@@ -1678,16 +1679,12 @@ def _scheduling_windows(
         )
         open_intervals = subtract_intervals(available, exclusions)
         open_minutes = interval_minutes(open_intervals)
-        focus_limited_minutes = (
-            open_minutes
-            if remove_focus_cap
-            else min(open_minutes, preferences.maximum_daily_focus_minutes)
+        usable, protected_free = usable_focus_capacity(
+            open_minutes,
+            preferences,
+            remove_focus_cap=remove_focus_cap,
+            release_buffer=release_buffer,
         )
-        protected_free = (
-            0 if release_buffer else min(ROLLOVER_BUFFER_MINUTES, focus_limited_minutes)
-        )
-        usable = max(focus_limited_minutes - protected_free, 0)
-        usable -= usable % 5
         # A released buffer is opened, not dissolved: it becomes a reserve that only overdue
         # work and assignments due within 48 hours may spend, so ordinary work stays inside
         # the capacity it would have had without the release.
