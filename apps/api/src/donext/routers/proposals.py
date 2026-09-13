@@ -13,7 +13,9 @@ from fastapi import APIRouter
 from sqlalchemy import Table, func, select
 from sqlalchemy.orm import selectinload
 
+from donext import clock
 from donext.academic_impact import calculate_weights
+from donext.completion import logged_minutes
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
@@ -100,7 +102,7 @@ PARTIAL_TIMEOUT_WARNING = (
 def _planning_now() -> datetime:
     """Return the single generation instant; kept injectable for deterministic tests."""
 
-    return datetime.now(UTC)
+    return clock.now()
 
 
 @dataclass(frozen=True)
@@ -2525,18 +2527,35 @@ def _scheduling_items(
             )
         )
     )
-    preserved_minutes: dict[uuid.UUID, int] = {}
+    past_preserved_minutes: dict[uuid.UUID, int] = {}
+    future_preserved_minutes: dict[uuid.UUID, int] = {}
     preserved_goal_minutes_by_date: dict[tuple[uuid.UUID, date], int] = {}
     for block in preserved:
         minutes = round((block.end_at - block.start_at).total_seconds() / 60)
         if block.task_id:
-            preserved_minutes[block.task_id] = preserved_minutes.get(block.task_id, 0) + minutes
+            bucket = (
+                past_preserved_minutes
+                if aware(block.start_at) <= planning_now
+                else future_preserved_minutes
+            )
+            bucket[block.task_id] = bucket.get(block.task_id, 0) + minutes
         if block.goal_id:
             local_date = aware(block.start_at).astimezone(timezone).date()
             key = (block.goal_id, local_date)
             preserved_goal_minutes_by_date[key] = (
                 preserved_goal_minutes_by_date.get(key, 0) + minutes
             )
+    # A past accepted block already counts as done - that subtraction is the implicit
+    # completion model this replaces - but crediting it in full once logging exists would
+    # subtract the same minutes twice and delete the work. Credit only what logging has not
+    # already covered.
+    preserved_minutes: dict[uuid.UUID, int] = {
+        task_id: (
+            future_preserved_minutes.get(task_id, 0)
+            + max(past_preserved_minutes.get(task_id, 0) - logged_minutes(db, task_id), 0)
+        )
+        for task_id in {*past_preserved_minutes, *future_preserved_minutes}
+    }
     items: list[SchedulingItem] = []
     links: dict[str, tuple[uuid.UUID | None, uuid.UUID | None, str]] = {}
     warnings: list[str] = []

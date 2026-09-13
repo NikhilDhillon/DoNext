@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from sqlalchemy import delete, select, update
 
 from donext.academic_impact import calculate_academic_impacts
+from donext.completion import minutes_done, release_future_accepted_time
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
 from donext.models import (
@@ -20,9 +21,6 @@ from donext.models import (
     GradingSchemeComponent,
     MeetingKind,
     Priority,
-    ScheduledBlock,
-    ScheduleStatus,
-    ScheduleVersion,
     Task,
     WeightOrigin,
 )
@@ -601,8 +599,10 @@ def update_academic_item(
         task.deadline_at = item.due_at
         task.required = not item.extra_credit
         if estimated_minutes is not None:
-            # Work already done stays done: only what is left to do is resized.
-            done = max(task.estimated_minutes - task.remaining_minutes, 0)
+            # Work already done stays done: only what is left to do is resized. minutes_done
+            # reads logged sessions once they exist, and falls back to the legacy
+            # estimated-minus-remaining figure for a task that predates them.
+            done = minutes_done(db, task)
             task.estimated_minutes = estimated_minutes
             task.remaining_minutes = max(estimated_minutes - done, 0)
             task.estimate_origin = EstimateOrigin.student_provided
@@ -745,7 +745,7 @@ def activate_academic_item(
         )
     minutes = payload.minutes if payload.decision == "student" else fallback_minutes
     assert minutes is not None
-    completed_minutes = max(task.estimated_minutes - task.remaining_minutes, 0)
+    completed_minutes = minutes_done(db, task)
     task.estimated_minutes = minutes
     task.remaining_minutes = max(minutes - completed_minutes, 0)
     # A stated figure and a named fallback are different claims, and the plan says which it used.
@@ -761,41 +761,6 @@ def activate_academic_item(
     return task
 
 
-def _release_accepted_time(db: DbSession, user_id: uuid.UUID, task: Task) -> tuple[int, int]:
-    """Hand back the accepted-schedule time work was holding, and say how much that was.
-
-    Deactivating has to undo what activating did, so the blocks activation put on the calendar
-    go with it rather than sitting there as time reserved for work the student just said is not
-    out. Time that has already begun is left alone: the student may have spent it, and a record
-    of what happened is not the plan's to rewrite. Drafts are left alone: changing an activation
-    makes an open draft stale, so it is regenerated before it can be accepted anyway.
-    """
-
-    now = datetime.now(UTC)
-    blocks = list(
-        db.scalars(
-            select(ScheduledBlock)
-            .join(ScheduleVersion, ScheduleVersion.id == ScheduledBlock.schedule_version_id)
-            .where(
-                ScheduledBlock.user_id == user_id,
-                ScheduledBlock.task_id == task.id,
-                ScheduleVersion.status == ScheduleStatus.accepted,
-            )
-        )
-    )
-    released_minutes = 0
-    released_blocks = 0
-    for block in blocks:
-        if aware(block.start_at) <= now:
-            continue
-        released_minutes += round(
-            (aware(block.end_at) - aware(block.start_at)).total_seconds() / 60
-        )
-        released_blocks += 1
-        db.delete(block)
-    return released_blocks, released_minutes
-
-
 @router.delete("/academic-items/{item_id}/activation", response_model=AcademicDeactivationRead)
 def deactivate_academic_item(
     item_id: uuid.UUID,
@@ -807,7 +772,7 @@ def deactivate_academic_item(
     task = _activation_task(db, current_user.id, item)
     # The estimate survives deactivation so re-activating does not ask the same question twice.
     task.activated_at = None
-    released_blocks, released_minutes = _release_accepted_time(db, current_user.id, task)
+    released_blocks, released_minutes = release_future_accepted_time(db, current_user.id, task)
     db.commit()
     db.refresh(task)
     return AcademicDeactivationRead(

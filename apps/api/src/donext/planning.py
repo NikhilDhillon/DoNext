@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from donext import clock
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
@@ -466,7 +467,7 @@ def build_planning_view(
             task.name,
         )
     )
-    now = datetime.now(UTC)
+    now = clock.now()
     next_entry = next((entry for entry in entries if entry.end_at.astimezone(UTC) > now), None)
     return PlanningViewRead(
         start_date=start_date,
@@ -606,7 +607,7 @@ def build_semester_view(db: Session, user: User, semester: Semester) -> Semester
     deadlines.sort(key=lambda item: item.due_at)
 
     has_availability = any(day.capacity.available_minutes > 0 for day in planner.days)
-    today = datetime.now(UTC).astimezone(timezone)
+    today = clock.now().astimezone(timezone)
     week_starts = [
         semester.start_date + timedelta(days=offset)
         for offset in range(0, (end_exclusive - semester.start_date).days, 7)

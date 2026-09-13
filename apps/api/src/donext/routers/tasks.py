@@ -5,9 +5,20 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from sqlalchemy import select
 
+from donext import clock
+from donext.completion import apply_completion_state
 from donext.dependencies import CurrentUser, DbSession
 from donext.errors import ApiError
-from donext.models import AcademicItem, Task, TaskStatus, User, WeightOrigin
+from donext.models import (
+    AcademicItem,
+    Task,
+    TaskStatus,
+    User,
+    WeightOrigin,
+    WorkLogSource,
+    WorkOutcome,
+    WorkSession,
+)
 from donext.planning import aware, resolve_timezone
 from donext.routers.courses import owned_course
 from donext.routers.semesters import owned_semester
@@ -174,9 +185,24 @@ def delete_task(task_id: uuid.UUID, db: DbSession, current_user: CurrentUser) ->
 
 @router.post("/{task_id}/complete", response_model=TaskRead)
 def complete_task(task_id: uuid.UUID, db: DbSession, current_user: CurrentUser) -> Task:
+    """One `finished` session for whatever was left, recomputed the same way any check-in is."""
     task = owned_task(db, current_user.id, task_id)
-    task.status = TaskStatus.completed
-    task.remaining_minutes = 0
+    local_date = clock.now().astimezone(resolve_timezone(current_user.timezone)).date()
+    db.add(
+        WorkSession(
+            user_id=current_user.id,
+            task_id=task.id,
+            local_date=local_date,
+            # A session logs one sitting, capped at a day; the outcome, not this figure, is what
+            # makes the task completed, so a task with more than 1440 minutes left still zeroes
+            # out below.
+            minutes=min(task.remaining_minutes, 1440),
+            outcome=WorkOutcome.finished,
+            source=WorkLogSource.quick_confirm,
+        )
+    )
+    db.flush()
+    apply_completion_state(db, task)
     db.commit()
     db.refresh(task)
     return task
