@@ -241,6 +241,12 @@ export type ActivationPrompt = {
   estimate_is_fallback: boolean;
 };
 
+export type AcademicDeactivation = {
+  task: PlanningTask;
+  released_blocks: number;
+  released_minutes: number;
+};
+
 export type DirectPlacement = {
   placed: boolean;
   blocks: ScheduleBlock[];
@@ -343,6 +349,16 @@ export type SemesterPlanning = {
     scheduled_minutes: number;
     load_percent: number | null;
     risk: "low" | "medium" | "high" | "unknown";
+    demand_sources: {
+      task_id: string;
+      name: string;
+      course_code: string | null;
+      minutes: number;
+      remaining_minutes: number;
+      due_at: string;
+      due_this_week: boolean;
+      estimate_origin: "pending_exam" | "system_default" | "student_provided" | "manual";
+    }[];
   }[];
   deadlines: SemesterDeadline[];
 };

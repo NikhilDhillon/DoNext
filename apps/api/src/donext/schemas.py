@@ -463,6 +463,18 @@ class AcademicActivationUpdate(ApiModel):
         return self
 
 
+class AcademicDeactivationRead(ApiModel):
+    """What taking an activation back did: the task as it stands, and the time handed back.
+
+    Deactivating is an undo, so it reports the calendar time it released rather than leaving
+    the student to compare the plan before and after.
+    """
+
+    task: TaskRead
+    released_blocks: int = 0
+    released_minutes: int = 0
+
+
 class ActivationPromptRead(ApiModel):
     """Course work with a deadline in view, and whether the student has activated it yet.
 
@@ -958,6 +970,24 @@ class PlanningViewRead(ApiModel):
 SemesterRisk = Literal["low", "medium", "high", "unknown"]
 
 
+class SemesterWeekDemandRead(ApiModel):
+    """One task's share of a single week's demand.
+
+    Work is paced backwards from its deadline, so a week's load is usually driven partly by
+    work due later. Without this the panel could only list the week's own due dates, which
+    would explain the wrong thing.
+    """
+
+    task_id: uuid.UUID
+    name: str
+    course_code: str | None
+    minutes: int
+    remaining_minutes: int
+    due_at: datetime
+    due_this_week: bool
+    estimate_origin: EstimateOrigin
+
+
 class SemesterWeekRead(ApiModel):
     week_number: int
     start_date: date
@@ -968,6 +998,7 @@ class SemesterWeekRead(ApiModel):
     scheduled_minutes: int
     load_percent: int | None
     risk: SemesterRisk
+    demand_sources: list[SemesterWeekDemandRead] = []
 
 
 class SemesterDeadlineRead(ApiModel):
