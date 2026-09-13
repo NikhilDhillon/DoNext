@@ -156,8 +156,8 @@ def test_activation_places_work_and_deactivation_removes_it(client: TestClient) 
     removed = client.delete(f"/api/v1/academic-items/{item['id']}/activation")
     assert removed.status_code == 200
     # The estimate survives so re-activating does not ask the same question twice.
-    assert removed.json()["estimated_minutes"] == 120
-    assert removed.json()["activated_at"] is None
+    assert removed.json()["task"]["estimated_minutes"] == 120
+    assert removed.json()["task"]["activated_at"] is None
 
     deactivated = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
     assert not [block for block in deactivated["blocks"] if block["task_id"] == item["task_id"]]
@@ -257,6 +257,51 @@ def test_activated_work_lands_directly_when_it_costs_the_plan_nothing(
     # Undo is a single action against the blocks the placement reports.
     for block in body["blocks"]:
         assert client.delete(f"/api/v1/schedule-blocks/{block['id']}").status_code == 204
+
+
+def test_taking_an_activation_back_releases_the_time_it_took(client: TestClient) -> None:
+    """Saying work is not out after all takes its time back off the accepted plan."""
+
+    # A student on UTC keeps stored block times and the release clock in one frame: the test
+    # database drops the offset, so a local-time plan would be compared against a shifted now.
+    register(client, timezone="UTC")
+    semester = create_semester(client)
+    replace_weekday_availability(client)
+    course = create_course(client, semester["id"], "CSC 349A")
+    create_item(client, course["id"], "assignment", "Problem set 1", "2026-09-10T23:59:00+00:00")
+    proposal = client.post(f"/api/v1/semesters/{semester['id']}/schedule/proposals").json()
+    assert client.post(f"/api/v1/schedule-proposals/{proposal['id']}/accept").status_code == 200
+    settled = {
+        block["id"]
+        for block in client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()["blocks"]
+    }
+
+    fresh = create_item(
+        client,
+        course["id"],
+        "quiz",
+        "Pop quiz",
+        "2026-09-11T23:59:00+00:00",
+        activate=False,
+    )
+    activate_item(client, fresh, 60)
+    placement = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/direct-placement",
+        json={"task_id": fresh["task_id"]},
+    ).json()
+    assert placement["placed"] is True
+
+    removed = client.delete(f"/api/v1/academic-items/{fresh['id']}/activation")
+    assert removed.status_code == 200, removed.text
+    body = removed.json()
+    # The undo reports what it gave back rather than leaving the student to compare calendars.
+    assert body["released_blocks"] == len(placement["blocks"])
+    assert body["released_minutes"] == 60
+
+    schedule = client.get(f"/api/v1/semesters/{semester['id']}/schedule").json()
+    assert not [block for block in schedule["blocks"] if block["task_id"] == fresh["task_id"]]
+    # Only the work taken back moved: the plan the student already agreed to still stands.
+    assert {block["id"] for block in schedule["blocks"]} == settled
 
 
 def test_activated_work_that_does_not_fit_waits_for_a_reviewed_proposal(

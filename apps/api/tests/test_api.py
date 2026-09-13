@@ -9,14 +9,18 @@ from donext.database import Base
 from donext.models import AuthSession, PasswordResetToken
 
 
-def register(client: TestClient, email: str = "nikhil@example.com") -> dict[str, str]:
+def register(
+    client: TestClient,
+    email: str = "nikhil@example.com",
+    timezone: str = "America/Vancouver",
+) -> dict[str, str]:
     response = client.post(
         "/api/v1/auth/register",
         json={
             "email": email,
             "password": "a-secure-local-password",
             "name": "Nikhil Dhillon",
-            "timezone": "America/Vancouver",
+            "timezone": timezone,
         },
     )
     assert response.status_code == 201

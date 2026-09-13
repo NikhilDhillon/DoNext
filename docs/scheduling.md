@@ -125,8 +125,11 @@ Items reach the known state from a parsed course outline or from direct student 
 the activated state only through an explicit student action.
 
 The student may deactivate an item entered in error or withdrawn by the course. It returns to the
-known state, its blocks leave the next plan, and its estimate is retained in case it is activated
-again.
+known state and its estimate is retained in case it is activated again. Deactivation is an undo of
+activation, so the time the work holds is handed back with it: its blocks are removed from the
+accepted schedule, and the response says how much time that released. Blocks that have already
+started are left alone, because the student may have spent that time and the record of what happened
+is not the plan's to rewrite.
 
 ### Intake
 

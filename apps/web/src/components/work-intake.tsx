@@ -5,7 +5,13 @@ import { useMemo, useState } from "react";
 
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { ActivationPrompt, Course, DirectPlacement, Semester } from "@/lib/types";
+import type {
+  AcademicDeactivation,
+  ActivationPrompt,
+  Course,
+  DirectPlacement,
+  Semester,
+} from "@/lib/types";
 
 type WorkIntakeProps = {
   semester: Semester;
@@ -44,6 +50,8 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
   );
 
   async function refresh() {
+    // Answering here changes the plan, so every surface reading it hears about it, not just this page.
+    window.dispatchEvent(new Event("donext:planning-updated"));
     await Promise.all([queue.reload(), onChanged()]);
   }
 
@@ -104,11 +112,15 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
     setError(null);
     setOutcome(null);
     try {
-      await apiRequest(`/academic-items/${prompt.academic_item_id}/activation`, {
-        method: "DELETE",
-      });
+      const released = await apiRequest<AcademicDeactivation>(
+        `/academic-items/${prompt.academic_item_id}/activation`,
+        { method: "DELETE" },
+      );
       setOutcome(
-        `${prompt.name} is back to a known deadline. Regenerate your plan to release the time it holds.`,
+        released.released_blocks
+          ? `${prompt.name} is back to a known deadline. ` +
+            `${formatMinutes(released.released_minutes)} came off your schedule.`
+          : `${prompt.name} is back to a known deadline. It was holding no time on your schedule.`,
       );
       await refresh();
     } catch (deactivationError) {
