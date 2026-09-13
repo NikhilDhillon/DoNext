@@ -162,6 +162,18 @@ class AcademicGradeStatus(StrEnum):
     missed = "missed"
 
 
+class WorkOutcome(StrEnum):
+    finished = "finished"
+    still_going = "still_going"
+    not_started = "not_started"
+
+
+class WorkLogSource(StrEnum):
+    timer = "timer"
+    quick_confirm = "quick_confirm"
+    manual = "manual"
+
+
 class UuidTimestampMixin:
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     created_at: Mapped[datetime] = mapped_column(
@@ -697,3 +709,66 @@ class ScheduledBlock(UuidTimestampMixin, Base):
     stability_weight: Mapped[float] = mapped_column(Float, default=1.0)
     reason_code: Mapped[str | None] = mapped_column(String(64))
     reason_details: Mapped[dict[str, object] | None] = mapped_column(JSON)
+
+
+class WorkSession(UuidTimestampMixin, Base):
+    __tablename__ = "work_sessions"
+    __table_args__ = (
+        CheckConstraint("minutes BETWEEN 0 AND 1440", name="ck_work_session_minutes"),
+        CheckConstraint(
+            "outcome <> 'not_started' OR minutes = 0",
+            name="ck_work_session_not_started_zero",
+        ),
+        CheckConstraint(
+            "ended_at IS NULL OR started_at IS NULL OR ended_at > started_at",
+            name="ck_work_session_times",
+        ),
+        CheckConstraint(
+            "(task_id IS NOT NULL AND goal_id IS NULL) OR "
+            "(task_id IS NULL AND goal_id IS NOT NULL)",
+            name="ck_work_session_one_target",
+        ),
+        UniqueConstraint("user_id", "block_fingerprint", name="uq_work_session_fingerprint"),
+        Index("ix_work_sessions_user_date", "user_id", "local_date"),
+        Index("ix_work_sessions_task_date", "task_id", "local_date"),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    goal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("goals.id", ondelete="CASCADE"), index=True
+    )
+    local_date: Mapped[date] = mapped_column(Date)
+    minutes: Mapped[int] = mapped_column(Integer)
+    outcome: Mapped[WorkOutcome] = mapped_column(Enum(WorkOutcome, native_enum=False))
+    source: Mapped[WorkLogSource] = mapped_column(
+        Enum(WorkLogSource, native_enum=False), default=WorkLogSource.manual
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scheduled_block_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduled_blocks.id", ondelete="SET NULL"), index=True
+    )
+    # sha256 over (task_id or goal_id, start_at_utc, end_at_utc). Provenance and the
+    # idempotency key: a block's row identifier does not survive regeneration, but this does.
+    block_fingerprint: Mapped[str | None] = mapped_column(String(64))
+
+
+class WorkTimer(UuidTimestampMixin, Base):
+    __tablename__ = "work_timers"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), unique=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    scheduled_block_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("scheduled_blocks.id", ondelete="SET NULL"), index=True
+    )
+    block_fingerprint: Mapped[str | None] = mapped_column(String(64))
