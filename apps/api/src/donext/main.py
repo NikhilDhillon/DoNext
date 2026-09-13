@@ -9,6 +9,7 @@ from donext.routers import (
     auth,
     availability,
     block_placement,
+    completion,
     courses,
     documents,
     events,
@@ -74,6 +75,7 @@ app.include_router(schedules.router, prefix=api_prefix)
 app.include_router(block_placement.router, prefix=api_prefix)
 app.include_router(proposals.router, prefix=api_prefix)
 app.include_router(planning.router, prefix=api_prefix)
+app.include_router(completion.router, prefix=api_prefix)
 
 
 @app.get("/health", tags=["system"])

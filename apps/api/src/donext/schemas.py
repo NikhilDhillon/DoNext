@@ -23,6 +23,8 @@ from donext.models import (
     SemesterStatus,
     TaskStatus,
     WeightOrigin,
+    WorkLogSource,
+    WorkOutcome,
 )
 
 
@@ -1075,3 +1077,79 @@ class OutlineExtractionRead(ApiModel):
     grading_evidence: list[str] = Field(default_factory=list)
     meetings: list[OutlineMeetingProposal]
     warnings: list[str]
+
+
+class WorkSessionBase(ApiModel):
+    task_id: uuid.UUID | None = None
+    goal_id: uuid.UUID | None = None
+    local_date: date
+    minutes: int = Field(ge=0, le=1440)
+    outcome: WorkOutcome
+    source: WorkLogSource = WorkLogSource.manual
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    scheduled_block_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_work_session(self) -> "WorkSessionBase":
+        if (self.task_id is None) == (self.goal_id is None):
+            raise ValueError("a work session links to exactly one of task_id or goal_id")
+        if self.outcome == WorkOutcome.not_started and self.minutes != 0:
+            raise ValueError("an unanswered block cannot carry logged minutes")
+        if self.started_at and self.ended_at and self.ended_at <= self.started_at:
+            raise ValueError("ended_at must follow started_at")
+        return self
+
+
+class WorkSessionCreate(WorkSessionBase):
+    pass
+
+
+class WorkSessionUpdate(ApiModel):
+    minutes: int | None = Field(default=None, ge=0, le=1440)
+    outcome: WorkOutcome | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_work_session_update(self) -> "WorkSessionUpdate":
+        if self.outcome == WorkOutcome.not_started and self.minutes not in (None, 0):
+            raise ValueError("an unanswered block cannot carry logged minutes")
+        if self.started_at and self.ended_at and self.ended_at <= self.started_at:
+            raise ValueError("ended_at must follow started_at")
+        return self
+
+
+class WorkSessionRead(WorkSessionBase):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    block_fingerprint: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkTimerStart(ApiModel):
+    task_id: uuid.UUID
+    scheduled_block_id: uuid.UUID | None = None
+
+
+class WorkTimerRead(ApiModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    task_id: uuid.UUID
+    started_at: datetime
+    scheduled_block_id: uuid.UUID | None = None
+    block_fingerprint: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkTimerStop(ApiModel):
+    """Stopping is answering: `finished` closes the work out, anything else leaves it open.
+
+    `minutes` overrides the measured elapsed time - the correction a one-tap surface needs when
+    the clock ran longer than the work actually did.
+    """
+
+    outcome: WorkOutcome = WorkOutcome.still_going
+    minutes: int | None = Field(default=None, ge=0, le=1440)
