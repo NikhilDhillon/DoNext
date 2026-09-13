@@ -925,6 +925,12 @@ class PlanningEntryRead(ApiModel):
     locked: bool
     recurring: bool
     editable: bool
+    block_fingerprint: str | None = None
+    planned_minutes: int = 0
+    logged_minutes: int = 0
+    check_in_outcome: WorkOutcome | None = None
+    work_session_id: uuid.UUID | None = None
+    timer_running: bool = False
 
 
 class PlanningTaskRead(ApiModel):
@@ -940,6 +946,10 @@ class PlanningTaskRead(ApiModel):
     # Set only for work tied to a graded item, so the calendar can tell an exam's due date from
     # an ordinary assignment's without a second request.
     item_type: AcademicItemType | None = None
+    estimated_minutes: int = 0
+    # Lifetime actual effort, independent of the requested planning date range.
+    logged_minutes: int = 0
+    estimate_exceeded: bool = False
 
 
 class PlanningCapacityRead(ApiModel):
@@ -967,6 +977,13 @@ class PlanningViewRead(ApiModel):
     unscheduled_tasks: list[PlanningTaskRead]
     next_entry_id: str | None
     warnings: list[str]
+    completed_tasks: list[PlanningTaskRead] = Field(default_factory=list)
+    # Range totals follow stored session local dates, including ad-hoc and goal work.
+    logged_minutes: int = 0
+    unanswered_blocks: int = 0
+    # Outstanding minutes per task with an ended focus block starting in this local range.
+    rollover_minutes: int = 0
+    active_timer: "WorkTimerRead | None" = None
 
 
 SemesterRisk = Literal["low", "medium", "high", "unknown"]

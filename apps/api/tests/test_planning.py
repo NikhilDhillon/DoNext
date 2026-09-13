@@ -52,8 +52,11 @@ def test_midnight_end_time_means_end_of_selected_day(client: TestClient) -> None
 
 
 def test_day_plan_combines_real_blocks_events_capacity_and_unscheduled_work(
-    client: TestClient,
+    client: TestClient, monkeypatch
 ) -> None:
+    from donext import clock
+
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 8, 15, tzinfo=UTC))
     register(client)
     semester = create_semester(client)
     replace_weekday_availability(client)
@@ -575,3 +578,316 @@ def test_week_demand_sources_name_the_work_that_loads_a_week(client: TestClient)
     for week in loaded:
         assert sum(source["minutes"] for source in week["demand_sources"]) == week["demand_minutes"]
     assert loaded[-1]["demand_sources"][0]["due_this_week"] is True
+
+
+def planning_task(client: TestClient, name: str = "Report", minutes: int = 120) -> dict:
+    response = client.post(
+        "/api/v1/tasks",
+        json={
+            "name": name,
+            "estimated_minutes": minutes,
+            "preferred_session_minutes": 25,
+            "deadline_at": "2026-09-30T23:59:00-07:00",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def planning_block(client: TestClient, semester_id: str, task_id: str, hour: int = 9) -> dict:
+    response = client.post(
+        f"/api/v1/semesters/{semester_id}/schedule/blocks",
+        json={
+            "title": "Report session",
+            "task_id": task_id,
+            "start_at": f"2026-09-13T{hour + 7:02}:00:00Z",
+            "end_at": f"2026-09-13T{hour + 7:02}:50:00Z",
+            "block_type": "focus",
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def planning_session(client: TestClient, task_id: str, **fields: object) -> dict:
+    response = client.post(
+        "/api/v1/work-sessions",
+        json={
+            "task_id": task_id,
+            "local_date": "2026-09-13",
+            "minutes": 30,
+            "outcome": "still_going",
+            **fields,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_completed_work_stays_visible_only_on_its_completion_day(
+    client: TestClient, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    semester = create_semester(client)
+    task = planning_task(client)
+    block = planning_block(client, semester["id"], task["id"])
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    session = planning_session(
+        client, task["id"], scheduled_block_id=block["id"], outcome="finished", minutes=20
+    )
+    planning_session(client, task["id"], outcome="not_started", minutes=0)
+    plan = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert [task["id"] for task in plan["completed_tasks"]] == [task["id"]]
+    completed = plan["completed_tasks"][0]
+    assert completed["status"] == "completed"
+    assert completed["estimated_minutes"] == 120
+    assert completed["remaining_minutes"] == 0
+    assert completed["logged_minutes"] == 20
+    assert completed["estimate_exceeded"] is False
+    assert plan["deadlines"] == plan["unscheduled_tasks"] == []
+    entry = plan["entries"][0]
+    assert entry["task_status"] == "completed"
+    assert entry["check_in_outcome"] == "finished"
+    assert entry["work_session_id"] == session["id"]
+    assert entry["planned_minutes"] == 50
+    assert entry["logged_minutes"] == plan["logged_minutes"] == 20
+    assert plan["unanswered_blocks"] == plan["rollover_minutes"] == 0
+    assert client.get("/api/v1/planning/day?date=2026-09-14").json()["completed_tasks"] == []
+    assert len(client.get("/api/v1/planning/week?start=2026-09-07").json()["completed_tasks"]) == 1
+    assert client.delete(f"/api/v1/work-sessions/{session['id']}").status_code == 204
+    undone = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert undone["completed_tasks"] == []
+    assert undone["entries"][0]["task_status"] == "pending"
+    assert undone["unanswered_blocks"] == 1
+
+
+def test_day_check_ins_distinguish_unanswered_untouched_and_partial_work(
+    client: TestClient, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    semester = create_semester(client)
+    task = planning_task(client)
+    blocks = [planning_block(client, semester["id"], task["id"], hour) for hour in (9, 10, 11, 15)]
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    planning_session(client, task["id"], scheduled_block_id=blocks[0]["id"])
+    planning_session(
+        client, task["id"], scheduled_block_id=blocks[1]["id"], outcome="not_started", minutes=0
+    )
+    plan = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert [entry["check_in_outcome"] for entry in plan["entries"]] == [
+        "still_going",
+        "not_started",
+        None,
+        None,
+    ]
+    assert plan["unanswered_blocks"] == 1  # The future block needs no close-out answer yet.
+    assert plan["rollover_minutes"] == 90  # Count the task once, not once per past block.
+    assert plan["logged_minutes"] == 30
+    assert plan["deadlines"][0]["logged_minutes"] == 30
+    assert plan["deadlines"][0]["remaining_minutes"] == 90
+    assert plan["active_timer"] is None
+
+
+def test_overrun_progress_uses_all_actual_minutes_and_stays_schedulable(
+    client: TestClient, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    task = planning_task(client, minutes=60)
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    planning_session(client, task["id"], local_date="2026-09-12", minutes=40)
+    planning_session(client, task["id"], minutes=35)
+    plan = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    progress = plan["unscheduled_tasks"][0]
+    assert progress["status"] == "in_progress"
+    assert progress["estimate_exceeded"] is True
+    assert progress["estimated_minutes"] == 60
+    assert progress["logged_minutes"] == 75
+    assert progress["remaining_minutes"] == 25
+    assert plan["logged_minutes"] == 35
+    assert client.get("/api/v1/planning/week?start=2026-09-07").json()["logged_minutes"] == 75
+
+
+def test_session_and_timer_match_copied_blocks_by_fingerprint(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from uuid import UUID
+
+    from sqlalchemy import select
+
+    from donext import clock
+    from donext.models import ScheduledBlock, ScheduleStatus, ScheduleVersion
+
+    register(client)
+    semester = create_semester(client)
+    task = planning_task(client)
+    first = planning_block(client, semester["id"], task["id"])
+    second = planning_block(client, semester["id"], task["id"], 11)
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    session = planning_session(client, task["id"], scheduled_block_id=first["id"])
+    started = client.post(
+        "/api/v1/work-timer", json={"task_id": task["id"], "scheduled_block_id": second["id"]}
+    )
+    assert started.status_code == 201
+    original = db_session.get(ScheduledBlock, UUID(first["id"]))
+    version = db_session.get(ScheduleVersion, original.schedule_version_id)
+    version.status = ScheduleStatus.superseded
+    replacement = ScheduleVersion(
+        user_id=version.user_id,
+        semester_id=version.semester_id,
+        version_number=version.version_number + 1,
+        reason="Regenerated plan",
+        status=ScheduleStatus.accepted,
+    )
+    db_session.add(replacement)
+    db_session.flush()
+    for old in db_session.scalars(
+        select(ScheduledBlock).where(ScheduledBlock.schedule_version_id == version.id)
+    ):
+        copied = ScheduledBlock(
+            user_id=old.user_id,
+            schedule_version_id=replacement.id,
+            task_id=old.task_id,
+            title=old.title,
+            start_at=old.start_at,
+            end_at=old.end_at,
+            block_type=old.block_type,
+        )
+        db_session.add(copied)
+    db_session.commit()
+    plan = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert plan["entries"][0]["source_id"] != first["id"]
+    assert plan["entries"][0]["block_fingerprint"] == session["block_fingerprint"]
+    assert plan["entries"][0]["work_session_id"] == session["id"]
+    assert plan["entries"][0]["logged_minutes"] == 30
+    assert plan["entries"][0]["timer_running"] is False
+    assert plan["entries"][1]["timer_running"] is True
+    assert plan["active_timer"]["id"] == started.json()["id"]
+    assert plan["logged_minutes"] == 30  # A running timer is intent, not logged work.
+    assert client.delete("/api/v1/work-timer").status_code == 204
+    after = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert after["active_timer"] is None
+    assert not any(entry["timer_running"] for entry in after["entries"])
+
+
+def test_default_planning_dates_and_totals_use_the_students_local_day(
+    client: TestClient, db_session, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    task = planning_task(client)
+    # Still September 13 in Vancouver, although the server's UTC date is September 14.
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 14, 2, tzinfo=UTC))
+    planning_session(client, task["id"], minutes=20, local_date="2026-09-12")
+    planning_session(client, task["id"], minutes=30)
+    # Historical dates remain stored facts even after the student changes their timezone.
+    from sqlalchemy import select
+
+    from donext.models import User
+
+    user = db_session.scalar(select(User))
+    user.timezone = "Asia/Kolkata"
+    db_session.commit()
+    assert client.get("/api/v1/planning/day?date=2026-09-13").json()["logged_minutes"] == 30
+    user.timezone = "America/Vancouver"
+    db_session.commit()
+    plan = client.get("/api/v1/planning/day").json()
+    assert plan["start_date"] == plan["end_date"] == "2026-09-13"
+    assert plan["logged_minutes"] == 30
+    assert client.get("/api/v1/planning/week").json()["start_date"] == "2026-09-07"
+
+
+def test_goal_check_ins_and_fixed_events_keep_distinct_completion_behavior(
+    client: TestClient, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    semester = create_semester(client)
+    goal = client.post(
+        "/api/v1/goals",
+        json={
+            "name": "Gym",
+            "semester_id": semester["id"],
+            "category": "personal",
+            "start_date": semester["start_date"],
+        },
+    ).json()
+    block_response = client.post(
+        f"/api/v1/semesters/{semester['id']}/schedule/blocks",
+        json={
+            "title": "Gym",
+            "goal_id": goal["id"],
+            "block_type": "goal",
+            "start_at": "2026-09-13T16:00:00Z",
+            "end_at": "2026-09-13T17:00:00Z",
+        },
+    )
+    assert block_response.status_code == 201
+    event_response = client.post(
+        "/api/v1/events",
+        json={
+            "title": "Shift",
+            "semester_id": semester["id"],
+            "category": "work",
+            "start_at": "2026-09-13T18:00:00Z",
+            "end_at": "2026-09-13T19:00:00Z",
+        },
+    )
+    assert event_response.status_code == 201
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    before = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert before["unanswered_blocks"] == 1  # Only the goal needs an answer.
+    logged = client.post(
+        "/api/v1/work-sessions",
+        json={
+            "goal_id": goal["id"],
+            "scheduled_block_id": block_response.json()["id"],
+            "local_date": "2026-09-13",
+            "minutes": 45,
+            "outcome": "finished",
+        },
+    )
+    assert logged.status_code == 201
+    after = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert after["entries"][0]["check_in_outcome"] == "finished"
+    assert after["entries"][0]["work_session_id"] == logged.json()["id"]
+    assert after["entries"][1]["block_fingerprint"] is None
+    assert after["entries"][1]["check_in_outcome"] is None
+    assert after["entries"][1]["work_session_id"] is None
+    assert after["logged_minutes"] == 45
+    assert after["unanswered_blocks"] == after["rollover_minutes"] == 0
+    assert after["completed_tasks"] == []
+
+
+def test_planning_completion_state_is_scoped_to_the_signed_in_user(
+    client: TestClient, monkeypatch
+) -> None:
+    from donext import clock
+
+    register(client)
+    task = planning_task(client)
+    monkeypatch.setattr(clock, "now", lambda: datetime(2026, 9, 13, 20, tzinfo=UTC))
+    planning_session(client, task["id"], outcome="finished")
+    assert client.post("/api/v1/work-timer", json={"task_id": task["id"]}).status_code == 201
+    assert client.post("/api/v1/auth/logout").status_code == 200
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={
+            "email": "other-student@example.com",
+            "password": "a-secure-local-password",
+            "name": "Other student",
+            "timezone": "America/Vancouver",
+        },
+    )
+    assert registered.status_code == 201
+    plan = client.get("/api/v1/planning/day?date=2026-09-13").json()
+    assert plan["entries"] == plan["completed_tasks"] == plan["deadlines"] == []
+    assert plan["logged_minutes"] == plan["unanswered_blocks"] == plan["rollover_minutes"] == 0
+    assert plan["active_timer"] is None

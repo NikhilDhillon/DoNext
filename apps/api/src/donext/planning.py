@@ -25,6 +25,9 @@ from donext.models import (
     TaskStatus,
     User,
     UserPreference,
+    WorkOutcome,
+    WorkSession,
+    WorkTimer,
 )
 from donext.schemas import (
     PlanningCapacityRead,
@@ -38,6 +41,7 @@ from donext.schemas import (
     SemesterRisk,
     SemesterWeekDemandRead,
     SemesterWeekRead,
+    WorkTimerRead,
     sleep_window_minutes,
 )
 
@@ -298,6 +302,10 @@ def planner_entries(
 def build_planning_view(
     db: Session, user: User, start_date: date, end_date: date
 ) -> PlanningViewRead:
+    # Completion uses planning's timezone helpers; defer this import to avoid a module cycle.
+    from donext.completion import block_fingerprint
+
+    now = clock.now()
     timezone = resolve_timezone(user.timezone)
     range_start, _ = day_bounds(start_date, timezone)
     _, range_end = day_bounds(end_date - timedelta(days=1), timezone)
@@ -316,16 +324,30 @@ def build_planning_view(
             .order_by(ScheduledBlock.start_at)
         )
     )
-    all_tasks = list(
+    all_tasks = list(db.scalars(select(Task).where(Task.user_id == user.id)))
+    tasks = {task.id: task for task in all_tasks}
+    sessions = list(
         db.scalars(
-            select(Task).where(
-                Task.user_id == user.id,
-                Task.status.in_((TaskStatus.pending, TaskStatus.in_progress)),
-                Task.remaining_minutes > 0,
-            )
+            select(WorkSession)
+            .where(WorkSession.user_id == user.id)
+            .order_by(WorkSession.local_date, WorkSession.created_at)
         )
     )
-    tasks = {task.id: task for task in all_tasks}
+    sessions_by_fingerprint = {
+        session.block_fingerprint: session
+        for session in sessions
+        if session.block_fingerprint is not None
+    }
+    logged_by_task: dict[uuid.UUID, int] = {}
+    deciding_by_task: dict[uuid.UUID, WorkSession] = {}
+    for session in sessions:
+        if session.task_id is not None:
+            logged_by_task[session.task_id] = (
+                logged_by_task.get(session.task_id, 0) + session.minutes
+            )
+            if session.outcome != WorkOutcome.not_started:
+                deciding_by_task[session.task_id] = session
+    timer = db.scalar(select(WorkTimer).where(WorkTimer.user_id == user.id))
     courses = list(db.scalars(select(Course).join(Semester).where(Semester.user_id == user.id)))
     course_codes = {course.id: course.code for course in courses}
     goals = list(db.scalars(select(Goal).where(Goal.user_id == user.id)))
@@ -342,6 +364,33 @@ def build_planning_view(
         )
     }
     entries = planner_entries(occurrences, blocks, tasks, course_codes, timezone)
+    unanswered_blocks = 0
+    roll_task_ids: set[uuid.UUID] = set()
+    for entry in entries:
+        entry.planned_minutes = interval_minutes([(entry.start_at, entry.end_at)])
+        anchor_id = entry.task_id or entry.goal_id
+        if entry.kind != "scheduled_block" or anchor_id is None:
+            continue
+        entry.block_fingerprint = block_fingerprint(anchor_id, entry.start_at, entry.end_at)
+        block_session = sessions_by_fingerprint.get(entry.block_fingerprint)
+        if block_session is not None:
+            entry.logged_minutes = block_session.minutes
+            entry.check_in_outcome = block_session.outcome
+            entry.work_session_id = block_session.id
+        entry.timer_running = (
+            timer is not None and timer.block_fingerprint == entry.block_fingerprint
+        )
+        if entry.end_at.astimezone(UTC) <= now:
+            if block_session is None:
+                unanswered_blocks += 1
+            # Rollover is a task's outstanding work, counted once even if it had several
+            # blocks. Cross-midnight blocks belong to the local day on which they started.
+            if (
+                entry.task_id is not None
+                and entry.block_type == "focus"
+                and start_date <= entry.start_at.date() < end_date
+            ):
+                roll_task_ids.add(entry.task_id)
     windows = list(
         db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == user.id))
     )
@@ -454,11 +503,32 @@ def build_planning_view(
                 if task.academic_item_id
                 else None
             ),
+            estimated_minutes=task.estimated_minutes,
+            logged_minutes=logged_by_task.get(task.id, 0),
+            estimate_exceeded=(
+                logged_by_task.get(task.id, 0) >= task.estimated_minutes
+                and task.status != TaskStatus.completed
+            ),
         )
         for task in all_tasks
     ]
-    deadlines = [task for task in planning_tasks if task.deadline_at is not None]
-    unscheduled = [task for task in planning_tasks if task.id not in scheduled_task_ids]
+    active_tasks = [
+        task
+        for task in planning_tasks
+        if task.status in {TaskStatus.pending, TaskStatus.in_progress}
+        and task.remaining_minutes > 0
+    ]
+    completed_tasks = [
+        task
+        for task in planning_tasks
+        if task.status == TaskStatus.completed
+        and (deciding := deciding_by_task.get(task.id)) is not None
+        and deciding.outcome == WorkOutcome.finished
+        and start_date <= deciding.local_date < end_date
+    ]
+    completed_tasks.sort(key=lambda task: task.name)
+    deadlines = [task for task in active_tasks if task.deadline_at is not None]
+    unscheduled = [task for task in active_tasks if task.id not in scheduled_task_ids]
     deadlines.sort(key=lambda task: (task.deadline_at, task.name))
     unscheduled.sort(
         key=lambda task: (
@@ -467,7 +537,6 @@ def build_planning_view(
             task.name,
         )
     )
-    now = clock.now()
     next_entry = next((entry for entry in entries if entry.end_at.astimezone(UTC) > now), None)
     return PlanningViewRead(
         start_date=start_date,
@@ -479,6 +548,15 @@ def build_planning_view(
         unscheduled_tasks=unscheduled,
         next_entry_id=next_entry.id if next_entry else None,
         warnings=list(dict.fromkeys(warnings)),
+        completed_tasks=completed_tasks,
+        logged_minutes=sum(
+            session.minutes for session in sessions if start_date <= session.local_date < end_date
+        ),
+        unanswered_blocks=unanswered_blocks,
+        rollover_minutes=sum(
+            task.remaining_minutes for task in active_tasks if task.id in roll_task_ids
+        ),
+        active_timer=WorkTimerRead.model_validate(timer) if timer is not None else None,
     )
 
 

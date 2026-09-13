@@ -1,9 +1,10 @@
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Query
 
+from donext import clock
 from donext.dependencies import CurrentUser, DbSession
 from donext.planning import build_planning_view, build_semester_view, resolve_timezone
 from donext.routers.semesters import owned_semester
@@ -19,7 +20,7 @@ def get_day_plan(
     target_date: Annotated[date | None, Query(alias="date")] = None,
 ) -> PlanningViewRead:
     if target_date is None:
-        target_date = datetime.now(UTC).astimezone(resolve_timezone(current_user.timezone)).date()
+        target_date = clock.now().astimezone(resolve_timezone(current_user.timezone)).date()
     return build_planning_view(db, current_user, target_date, target_date + timedelta(days=1))
 
 
@@ -30,7 +31,7 @@ def get_week_plan(
     start: Annotated[date | None, Query()] = None,
 ) -> PlanningViewRead:
     if start is None:
-        today = datetime.now(UTC).astimezone(resolve_timezone(current_user.timezone)).date()
+        today = clock.now().astimezone(resolve_timezone(current_user.timezone)).date()
         start = today - timedelta(days=today.weekday())
     return build_planning_view(db, current_user, start, start + timedelta(days=7))
 

@@ -4,6 +4,21 @@ Author: Nikhil Dhillon
 
 Status: Implementation plan
 
+Phase 2 implemented on 2026-09-13: day and week planning responses expose block check-ins,
+the active timer, actual logged minutes, estimate overruns, unanswered past blocks, and outstanding
+minutes for tasks with past focus blocks. Completed tasks remain in a separate list for the stored
+local date of their deciding finished session; they do not return to deadlines or unscheduled work.
+Block state matches by fingerprint across schedule copies, and capacity fields remain unchanged.
+The default day and week endpoints now use the shared clock. Seven planning regression tests were
+added, and the existing next-entry test now fixes its clock rather than depending on today's date.
+
+Validation: all 40 planning/completion tests pass, as do web lint/typecheck, API lint/typecheck,
+and the production web build (with network access for the existing Geist Google font).
+The full API run has 178 passing tests and 14 failures, all present in the captured baseline
+(which had 15 failures before fixing the planning test's clock). The quality gate remains blocked
+by those pre-existing proposal and student-scheduling failures; the older two-failure count below
+is not the current baseline.
+
 ## Document boundary
 
 This document plans work that is not yet implemented. The canonical product policy remains
