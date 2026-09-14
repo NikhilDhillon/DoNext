@@ -2,7 +2,7 @@
 
 Author: Nikhil Dhillon
 
-Status: Phase 4 implemented; Phase 5 pending
+Status: All phases implemented
 
 Phase 2 implemented on 2026-09-13: day and week planning responses expose block check-ins,
 the active timer, actual logged minutes, estimate overruns, unanswered past blocks, and outstanding
@@ -46,7 +46,21 @@ separately. Fixed events retain context without attendance controls.
 The desktop 1280px and mobile 390px browser passes are recorded in `design-qa.md`. Web lint,
 typecheck, and production build pass; all 46 focused completion, rollover, and planning tests pass.
 The full gate still stops at the same 13 API failures reproduced from an untouched HEAD snapshot
-(185 pass). Phase 5 learned estimates remain unimplemented.
+(185 pass).
+
+Phase 5 implemented on 2026-09-14: activation now snapshots the estimate, origin, course, and item
+type in `effort_observations`; completion fills the measured result and excludes fallbacks, missing
+time, and completions without a finished check-in. Suggestions use three or more valid observations,
+prefer course-and-type evidence, degrade to item type across courses, trim one high and low ratio at
+six samples, and only offer a larger five-minute-rounded estimate. The activation queue explains
+the evidence, the course calibration endpoint exposes it read-only, accepting the offered default
+uses the learned value, and a typed value remains exact.
+
+Seven focused learning tests cover the statistic, grouping, boundaries, exclusions, queue,
+calibration endpoint, and both activation choices. Together with completion, rollover, and planning,
+all 53 focused tests pass. The PostgreSQL migration was applied and inspected at `f9a3d6021c74`.
+The full gate now has 192 passing tests and the same 13 baseline failures. Web lint/typecheck and the
+production build pass; the 1280px and 390px live intake checks are recorded in `design-qa.md`.
 
 ## Document boundary
 

@@ -495,6 +495,19 @@ class ActivationPromptRead(ApiModel):
     urgent: bool
     activated: bool = False
     estimate_is_fallback: bool = True
+    suggested_minutes: int | None = None
+    suggestion_basis: Literal["course_and_type", "item_type"] | None = None
+    suggestion_sample_size: int = 0
+    suggestion_explanation: str | None = None
+
+
+class EffortCalibrationRead(ApiModel):
+    item_type: AcademicItemType
+    base_minutes: int
+    suggested_minutes: int
+    suggestion_basis: Literal["course_and_type", "item_type"]
+    suggestion_sample_size: int
+    suggestion_explanation: str
 
 
 AcademicImpactTier = Literal["critical", "high", "normal", "low"]

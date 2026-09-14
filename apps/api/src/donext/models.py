@@ -576,6 +576,47 @@ class Task(UuidTimestampMixin, Base):
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class EffortObservation(UuidTimestampMixin, Base):
+    """The estimate accepted at activation and the eventual measured outcome."""
+
+    __tablename__ = "effort_observations"
+    __table_args__ = (
+        CheckConstraint("estimated_minutes > 0", name="ck_effort_observation_estimated"),
+        CheckConstraint(
+            "actual_minutes IS NULL OR actual_minutes >= 0",
+            name="ck_effort_observation_actual",
+        ),
+        CheckConstraint(
+            "excluded_reason IS NULL OR excluded_reason IN "
+            "('fallback_estimate', 'no_time_logged', 'not_checked_in')",
+            name="ck_effort_observation_excluded_reason",
+        ),
+        UniqueConstraint("task_id", name="uq_effort_observations_task_id"),
+        Index(
+            "ix_effort_observations_user_course_type",
+            "user_id",
+            "course_id",
+            "item_type",
+        ),
+    )
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    course_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("courses.id", ondelete="SET NULL"), index=True
+    )
+    item_type: Mapped[AcademicItemType] = mapped_column(Enum(AcademicItemType, native_enum=False))
+    estimated_minutes: Mapped[int] = mapped_column(Integer)
+    estimate_origin: Mapped[EstimateOrigin] = mapped_column(Enum(EstimateOrigin, native_enum=False))
+    actual_minutes: Mapped[int | None] = mapped_column(Integer)
+    completed_on: Mapped[date | None] = mapped_column(Date)
+    excluded_reason: Mapped[str | None] = mapped_column(String(32))
+
+
 class FixedEvent(UuidTimestampMixin, Base):
     __tablename__ = "fixed_events"
     __table_args__ = (

@@ -6,8 +6,9 @@ from fastapi import APIRouter, Query
 from sqlalchemy import select
 
 from donext import clock
-from donext.completion import apply_completion_state
+from donext.completion import apply_completion_state, logged_minutes
 from donext.dependencies import CurrentUser, DbSession
+from donext.effort_learning import update_effort_completion
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
@@ -171,6 +172,13 @@ def update_task(
     )
     for field, value in values.items():
         setattr(task, field, value)
+    if "status" in values:
+        update_effort_completion(
+            db,
+            task,
+            actual_minutes=logged_minutes(db, task.id),
+            checked_in=False,
+        )
     db.commit()
     db.refresh(task)
     return task

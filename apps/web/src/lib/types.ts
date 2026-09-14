@@ -239,6 +239,10 @@ export type ActivationPrompt = {
   urgent: boolean;
   activated: boolean;
   estimate_is_fallback: boolean;
+  suggested_minutes: number | null;
+  suggestion_basis: "course_and_type" | "item_type" | null;
+  suggestion_sample_size: number;
+  suggestion_explanation: string | null;
 };
 
 export type AcademicDeactivation = {

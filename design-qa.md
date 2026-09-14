@@ -47,6 +47,37 @@ final result: passed
 
 ---
 
+# Design QA: Learned effort intake
+
+## Evidence
+
+- Desktop: 1280 x 720 CSS viewport in the Codex in-app browser.
+- Mobile: 390 x 844 CSS viewport, confirmed with `window.innerWidth` and `window.innerHeight`.
+- State: a disposable local account with three completed assignments estimated at one hour and
+  finished in two hours, one waiting assignment, and one assignment activated with a typed value.
+
+## Findings and interaction checks
+
+- The waiting assignment showed a 5-hour action beside the unchanged 2h 30m fallback and explained
+  that the suggestion came from three completed items of the same type in the course.
+- Entering 0.75 hours changed the action to `It is out`; activation retained exactly 45 minutes and
+  labelled it as the student's estimate. Leaving the field blank applied the offered 5 hours.
+- The first desktop pass exposed compressed evidence copy inside the narrow attention panel. The row
+  now gives the evidence its full width and places the hours field and action beneath it.
+- At 390 pixels the evidence, field, action, accepted typed estimate, and active-unplaced state remain
+  readable in one column. Document width equals viewport width, with no horizontal overflow.
+- The learned-estimate action is 44 pixels high on mobile. The browser console had no warnings or
+  errors. The temporary viewport override and QA tab were cleared after the pass.
+
+## Validation limits
+
+The browser pass used the assignment-specific course grouping. Cross-course degradation, trimming,
+outlier rejection, and exclusion reasons are covered by the focused API tests.
+
+final result: passed
+
+---
+
 # Design QA: reset-to-default draft action
 
 ## Evidence

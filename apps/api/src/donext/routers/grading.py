@@ -9,6 +9,7 @@ from sqlalchemy import delete, select, update
 from donext.academic_impact import calculate_academic_impacts
 from donext.completion import minutes_done, release_future_accepted_time
 from donext.dependencies import CurrentUser, DbSession
+from donext.effort_learning import learned_effort_suggestion, record_effort_activation
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
@@ -684,6 +685,9 @@ def create_academic_item(
         activated_at=datetime.now(UTC) if payload.activate else None,
     )
     db.add(task)
+    db.flush()
+    if payload.activate:
+        record_effort_activation(db, task, item)
     db.commit()
     db.refresh(item)
     return AcademicItemRead(
@@ -743,7 +747,20 @@ def activate_academic_item(
             f"{item.item_type.value} work has no fallback estimate; give the hours instead.",
             422,
         )
-    minutes = payload.minutes if payload.decision == "student" else fallback_minutes
+    suggestion = (
+        learned_effort_suggestion(
+            db, current_user.id, item.course_id, item.item_type, fallback_minutes
+        )
+        if payload.decision == "use_default" and fallback_minutes is not None
+        else None
+    )
+    minutes = (
+        payload.minutes
+        if payload.decision == "student"
+        else suggestion.minutes
+        if suggestion is not None
+        else fallback_minutes
+    )
     assert minutes is not None
     completed_minutes = minutes_done(db, task)
     task.estimated_minutes = minutes
@@ -756,6 +773,7 @@ def activate_academic_item(
     )
     if task.activated_at is None:
         task.activated_at = datetime.now(UTC)
+    record_effort_activation(db, task, item)
     db.commit()
     db.refresh(task)
     return task

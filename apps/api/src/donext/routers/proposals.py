@@ -17,6 +17,7 @@ from donext import clock
 from donext.academic_impact import calculate_weights
 from donext.completion import block_fingerprint, logged_minutes
 from donext.dependencies import CurrentUser, DbSession
+from donext.effort_learning import effort_observations, suggest_effort
 from donext.errors import ApiError
 from donext.models import (
     AcademicItem,
@@ -382,6 +383,7 @@ def activation_queue(
     if not tasks:
         return []
     task_by_item = {task.academic_item_id: task for task in tasks}
+    observations = effort_observations(db, current_user.id)
 
     availability = list(
         db.scalars(select(AvailabilityWindow).where(AvailabilityWindow.user_id == current_user.id))
@@ -418,8 +420,20 @@ def activation_queue(
             continue
         activated = task.activated_at is not None
         fallback_minutes, _origin = academic_effort_default(item.item_type)
-        expected_minutes = (
+        suggestion = (
+            suggest_effort(observations, item.course_id, item.item_type, fallback_minutes)
+            if not activated and fallback_minutes is not None
+            else None
+        )
+        displayed_minutes = (
             task.remaining_minutes if activated else (fallback_minutes or task.estimated_minutes)
+        )
+        expected_minutes = (
+            task.remaining_minutes
+            if activated
+            else suggestion.minutes
+            if suggestion is not None
+            else (fallback_minutes or task.estimated_minutes)
         )
         capacity_before_due = sum(
             minutes
@@ -434,13 +448,17 @@ def activation_queue(
                 name=item.name,
                 item_type=item.item_type,
                 due_at=due_at,
-                fallback_minutes=expected_minutes,
+                fallback_minutes=displayed_minutes,
                 capacity_before_due_minutes=capacity_before_due,
                 # Only unanswered work can be running out of room; activated work already holds
                 # whatever time the plan gave it.
                 urgent=not activated and capacity_before_due < expected_minutes,
                 activated=activated,
                 estimate_is_fallback=task.estimate_origin != EstimateOrigin.student_provided,
+                suggested_minutes=suggestion.minutes if suggestion else None,
+                suggestion_basis=suggestion.basis if suggestion else None,
+                suggestion_sample_size=suggestion.sample_size if suggestion else 0,
+                suggestion_explanation=suggestion.explanation if suggestion else None,
             )
         )
     prompts.sort(

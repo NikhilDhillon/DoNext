@@ -4,10 +4,12 @@ from fastapi import APIRouter
 from sqlalchemy import select
 
 from donext.dependencies import CurrentUser, DbSession
+from donext.effort_learning import effort_observations, suggest_effort
 from donext.errors import ApiError
-from donext.models import Course, CourseDeliveryMode, Semester
+from donext.models import AcademicItemType, Course, CourseDeliveryMode, Semester
+from donext.planning import academic_effort_default
 from donext.routers.semesters import owned_semester
-from donext.schemas import CourseCreate, CourseRead, CourseUpdate
+from donext.schemas import CourseCreate, CourseRead, CourseUpdate, EffortCalibrationRead
 
 router = APIRouter(tags=["courses"])
 
@@ -53,6 +55,38 @@ def create_course(
 @router.get("/courses/{course_id}", response_model=CourseRead)
 def get_course(course_id: uuid.UUID, db: DbSession, current_user: CurrentUser) -> Course:
     return owned_course(db, current_user.id, course_id)
+
+
+@router.get(
+    "/courses/{course_id}/effort-calibration",
+    response_model=list[EffortCalibrationRead],
+)
+def effort_calibration(
+    course_id: uuid.UUID, db: DbSession, current_user: CurrentUser
+) -> list[EffortCalibrationRead]:
+    """Explain the larger estimates DoNext can currently suggest for this course."""
+
+    course = owned_course(db, current_user.id, course_id)
+    observations = effort_observations(db, current_user.id)
+    calibrations: list[EffortCalibrationRead] = []
+    for item_type in AcademicItemType:
+        base_minutes, _origin = academic_effort_default(item_type)
+        if base_minutes is None:
+            continue
+        suggestion = suggest_effort(observations, course.id, item_type, base_minutes)
+        if suggestion is None:
+            continue
+        calibrations.append(
+            EffortCalibrationRead(
+                item_type=item_type,
+                base_minutes=base_minutes,
+                suggested_minutes=suggestion.minutes,
+                suggestion_basis=suggestion.basis,
+                suggestion_sample_size=suggestion.sample_size,
+                suggestion_explanation=suggestion.explanation,
+            )
+        )
+    return calibrations
 
 
 @router.patch("/courses/{course_id}", response_model=CourseRead)

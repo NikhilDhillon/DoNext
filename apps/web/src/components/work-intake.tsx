@@ -289,12 +289,15 @@ function ActivationRow({
           focus time left before then
           {prompt.urgent ? ` · less than the ${formatMinutes(prompt.fallback_minutes)} this usually takes` : ""}
         </small>
+        {prompt.suggestion_explanation ? (
+          <small className="effort-basis">{prompt.suggestion_explanation}</small>
+        ) : null}
       </div>
       <label className="intake-hours">
         <span className="sr-only">Hours for {prompt.name}</span>
         <input
           inputMode="decimal"
-          placeholder={(prompt.fallback_minutes / 60).toFixed(1)}
+          placeholder={formatHours(prompt.suggested_minutes ?? prompt.fallback_minutes)}
           value={hours}
           onChange={(event) => setHours(event.target.value)}
         />
@@ -307,7 +310,9 @@ function ActivationRow({
         onClick={() => void onActivate(hours)}
       >
         {busy ? <LoaderCircle className="spin" size={15} /> : <CalendarPlus size={15} />}
-        It is out
+        {hours.trim() || !prompt.suggested_minutes
+          ? "It is out"
+          : `Use ${formatMinutes(prompt.suggested_minutes)}`}
       </button>
     </li>
   );
@@ -441,6 +446,10 @@ function formatMinutes(minutes: number) {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   return rest ? `${hours}h ${rest}m` : `${hours}h`;
+}
+
+function formatHours(minutes: number) {
+  return String(Number((minutes / 60).toFixed(2)));
 }
 
 function formatDate(value: string) {

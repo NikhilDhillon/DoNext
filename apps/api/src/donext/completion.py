@@ -14,6 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from donext import clock
+from donext.effort_learning import update_effort_completion
 from donext.models import (
     ScheduledBlock,
     ScheduleStatus,
@@ -110,6 +111,14 @@ def apply_completion_state(db: Session, task: Task) -> None:
         # percentage markup.
         locked.remaining_minutes = locked.preferred_session_minutes
         locked.status = TaskStatus.in_progress
+
+    update_effort_completion(
+        db,
+        locked,
+        actual_minutes=logged,
+        checked_in=finished,
+        completed_on=deciding[-1].local_date if deciding else None,
+    )
 
 
 def release_future_accepted_time(db: Session, user_id: uuid.UUID, task: Task) -> tuple[int, int]:
