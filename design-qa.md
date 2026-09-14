@@ -385,3 +385,29 @@ final result: passed
 The constrained-capacity draft branch and goal accounting are covered by the focused API tests; this browser pass exercised add-only rollover. No screen-reader audit or full accessibility conformance claim is made.
 
 final result: passed
+
+---
+
+# Design QA: binary commitment completion
+
+## Evidence
+
+- Source: the supplied Today screenshot showing checkable Gym, Leetcode, and Job Applications rows alongside fixed classes.
+- Desktop: 1280 x 720 CSS viewport in the Codex in-app browser.
+- Mobile: 390 x 844 CSS viewport, confirmed through `window.innerWidth` and `window.innerHeight` after applying the viewport override.
+- State: a disposable local account with one goal-linked Gym commitment and one task-linked Assignment preparation block.
+
+## Findings
+
+- Gym completed with one click and reopened with one click. Neither action opened the time dialog.
+- Completing Gym changed its row to `Commitment · completed` and the daily summary to `1 of 2 done · 0m logged`, so its scheduled hour was not presented as measured academic work.
+- Assignment preparation opened the existing check-in dialog with its planned hour prefilled and editable.
+- The close-out panel uses the same per-entry interaction and labels the bulk action `Mark all as planned`.
+- At 390px the document width matched the viewport with no horizontal overflow. The commitment completion target measured 44 x 44 CSS pixels.
+- The desktop and mobile checks produced no browser console warnings or errors. The temporary viewport override and QA tab were cleared.
+
+## Validation limits
+
+This pass covered one goal-linked commitment and one task-linked academic block. Fixed events remain covered by the earlier Today completion-loop QA.
+
+final result: passed

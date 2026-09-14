@@ -38,10 +38,12 @@ for the existing Geist Google font.
 Phase 4 implemented on 2026-09-14: Today now presents a timer hero, honest daily progress,
 checkable task and goal blocks, a past-block close-out list, accumulating academic effort, and
 collapsed intake that opens automatically for urgent deadlines. Check-ins can be corrected and
-undone; timer stop allows measured time to be corrected before save. Rollover uses the Phase 3
-endpoint, exposes a single-action undo for added blocks, and directs trade-offs to a reviewable
-Week draft. Unactivated deadlines are excluded from progress and active unplaced work is listed
-separately. Fixed events retain context without attendance controls.
+undone; task-linked academic work asks for actual time, while goal-linked commitments complete or
+reopen with one click and do not add their planned duration to measured academic time. Timer stop
+allows measured time to be corrected before save. Rollover uses the Phase 3 endpoint, exposes a
+single-action undo for added blocks, and directs trade-offs to a reviewable Week draft. Unactivated
+deadlines are excluded from progress and active unplaced work is listed separately. Fixed events
+retain context without attendance controls.
 
 The desktop 1280px and mobile 390px browser passes are recorded in `design-qa.md`. Web lint,
 typecheck, and production build pass; all 46 focused completion, rollover, and planning tests pass.
@@ -234,22 +236,23 @@ pixels on touch:
 (`apps/api/src/donext/models.py:682-690`), and only the first two have anything to record against:
 
 - **`task_id`** produces a full work session. Academic effort, the case this plan is about.
-- **`goal_id`** produces a session as well, but it advances `Goal.current_progress`, which already
-  exists (`models.py:448`) and already renders as the `.goal-orb` conic ring in
-  `commitments-panel`. Ticking a gym block should move that ring. `work_sessions` therefore allows
-  `task_id` exclusive-or `goal_id`, and goal sessions skip the remaining-minutes accounting
-  entirely.
+- **`goal_id`** produces a finished session at the planned duration without asking for measured
+  time. It advances `Goal.current_progress`, which already exists (`models.py:448`) and already
+  renders as the `.goal-orb` conic ring in `commitments-panel`. Ticking a gym block should move that
+  ring. `work_sessions` therefore allows `task_id` exclusive-or `goal_id`; goal sessions skip both
+  the remaining-minutes accounting and the daily logged-time total.
 - **`fixed_event_id`** — a shift or a lecture — is **not tickable**. DoNext does not track
   attendance and should not imply that it does. These rows dim once past and remain as context.
 
-Tapping the check opens a confirm popover offering `Finished it`, `Still going`, and
+Tapping a task check opens a confirm popover offering `Finished it`, `Still going`, and
 `Didn't get to it`, with a prefilled hours field reusing the `.intake-hours` markup. One tap plus
-Enter is the common path. Rows stay editable, with the pencil moving into an overflow so the check
-control owns the primary slot.
+Enter is the common task path. Tapping a goal check toggles complete or incomplete immediately.
+Rows stay editable, with the pencil moving into an overflow so the check control owns the primary
+slot.
 
 **5. Close out today.** When past blocks are unanswered, "Right now" is replaced in the evening, or
-joined earlier in the day, by a compact reconcile list: every unanswered past block with the same
-three-way answer and a prefilled duration, plus `Log all as planned` for the honest common case.
+joined earlier in the day, by a compact reconcile list: every unanswered past block with its
+task-time or binary-completion behavior, plus `Mark all as planned` for the honest common case.
 Ticking through the day is aspirational; the evening pass is what actually closes the loop.
 
 **6. Work in progress.** Per activated academic item, a `.progress-track` bar of logged against

@@ -66,7 +66,13 @@ export function NowCard({
   const elapsed = timer ? Math.max(Math.floor((now - new Date(timer.started_at).getTime()) / 1000), 0) : 0;
   const tickable = entries.filter((entry) => entry.task_id || entry.goal_id);
   const done = tickable.filter((entry) => entry.check_in_outcome === "finished").length;
-  const planned = Math.max(capacity?.planned_focus_minutes ?? 0, 1);
+  const planned = Math.max(
+    entries.reduce(
+      (minutes, entry) => minutes + (entry.task_id ? entry.planned_minutes : 0),
+      0,
+    ),
+    1,
+  );
   const workedPercent = Math.min(Math.round((loggedMinutes / planned) * 100), 100);
 
   return (

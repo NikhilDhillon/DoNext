@@ -861,7 +861,9 @@ def test_goal_check_ins_and_fixed_events_keep_distinct_completion_behavior(
     assert after["entries"][1]["block_fingerprint"] is None
     assert after["entries"][1]["check_in_outcome"] is None
     assert after["entries"][1]["work_session_id"] is None
-    assert after["logged_minutes"] == 45
+    # Completing a commitment is binary; its scheduled duration advances the goal but does not
+    # claim that the student measured 45 minutes of academic work.
+    assert after["logged_minutes"] == 0
     assert after["unanswered_blocks"] == after["rollover_minutes"] == 0
     assert after["completed_tasks"] == []
 

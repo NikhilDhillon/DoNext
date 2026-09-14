@@ -198,14 +198,16 @@ export function TodayPlanner() {
               scheduled_block_id: entry.source_id,
               local_date: data.start_date,
               minutes: entry.planned_minutes,
-              outcome: "still_going",
+              outcome: entry.task_id ? "still_going" : "finished",
               source: "quick_confirm",
             }),
           }),
         ),
       );
       if (entries.some((entry) => entry.task_id)) await rollover();
-      setActionNotice("Past blocks were logged as planned. Adjust any row if reality was different.");
+      setActionNotice(
+        "Past blocks were marked as planned. Adjust academic work if the time was different.",
+      );
       await refreshAll();
     } catch (error) {
       setActionError(errorMessage(error, "DoNext could not close out those blocks."));
@@ -250,9 +252,28 @@ export function TodayPlanner() {
     if (!entry.work_session_id) return;
     await runAction(async () => {
       await apiRequest(`/work-sessions/${entry.work_session_id}`, { method: "DELETE" });
-      setActionNotice(`${entry.title} is unanswered again.`);
+      setActionNotice(entry.goal_id
+        ? `${entry.title} marked incomplete.`
+        : `${entry.title} is unanswered again.`);
       await refreshAll();
     }, "DoNext could not undo that check-in.");
+  }
+
+  function checkIn(entry: PlanningEntry) {
+    if (entry.timer_running) {
+      openTimerCheckIn(entry);
+      return;
+    }
+    if (entry.task_id) {
+      openCheckIn(entry);
+      return;
+    }
+    if (!entry.goal_id) return;
+    if (entry.check_in_outcome === "finished") {
+      void undoSession(entry);
+      return;
+    }
+    void saveSession(entry, "finished", entry.planned_minutes);
   }
 
   async function runAction(action: () => Promise<void>, fallback: string) {
@@ -314,19 +335,17 @@ export function TodayPlanner() {
         busy={busy}
         entries={data.entries}
         timezone={data.timezone}
-        onLog={openCheckIn}
+        onLog={checkIn}
         onLogAll={logAll}
       />
 
       <DayChecklist
+        busy={busy}
         entries={data.entries}
         nextEntryId={data.next_entry_id}
         timezone={data.timezone}
         onAdd={() => openNew()}
-        onCheckIn={(entry) => {
-          if (entry.timer_running) openTimerCheckIn(entry);
-          else openCheckIn(entry);
-        }}
+        onCheckIn={checkIn}
         onEdit={openEntry}
       />
 

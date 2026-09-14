@@ -550,7 +550,9 @@ def build_planning_view(
         warnings=list(dict.fromkeys(warnings)),
         completed_tasks=completed_tasks,
         logged_minutes=sum(
-            session.minutes for session in sessions if start_date <= session.local_date < end_date
+            session.minutes
+            for session in sessions
+            if session.task_id is not None and start_date <= session.local_date < end_date
         ),
         unanswered_blocks=unanswered_blocks,
         rollover_minutes=sum(

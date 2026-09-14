@@ -6,6 +6,7 @@ import { agendaSummary, capitalize, formatMinutes, formatTime, isPast, isTickabl
 import type { PlanningEntry } from "@/lib/types";
 
 export function DayChecklist({
+  busy,
   entries,
   timezone,
   nextEntryId,
@@ -13,6 +14,7 @@ export function DayChecklist({
   onEdit,
   onAdd,
 }: {
+  busy: boolean;
   entries: PlanningEntry[];
   timezone: string;
   nextEntryId: string | null;
@@ -30,6 +32,7 @@ export function DayChecklist({
         <div className="checklist-rows">
           {entries.map((entry) => (
             <ChecklistRow
+              busy={busy}
               entry={entry}
               key={entry.id}
               next={entry.id === nextEntryId}
@@ -47,12 +50,14 @@ export function DayChecklist({
 }
 
 function ChecklistRow({
+  busy,
   entry,
   timezone,
   next,
   onCheckIn,
   onEdit,
 }: {
+  busy: boolean;
   entry: PlanningEntry;
   timezone: string;
   next: boolean;
@@ -67,8 +72,9 @@ function ChecklistRow({
       <div className="checklist-control">
         {tickable ? (
           <button
-            aria-label={`${stateLabel(state)} ${entry.title}`}
+            aria-label={stateLabel(entry, state)}
             className={`check-button ${past && !entry.check_in_outcome ? "needs-answer" : ""}`}
+            disabled={busy}
             type="button"
             onClick={onCheckIn}
           >
@@ -102,12 +108,17 @@ function checkState(entry: PlanningEntry) {
   return "upcoming";
 }
 
-function stateLabel(state: string) {
-  if (state === "running") return "Stop timer for";
-  if (state === "finished") return "Edit finished check-in for";
-  if (state === "partial") return "Edit partial check-in for";
-  if (state === "not-started") return "Edit missed check-in for";
-  return "Check in for";
+function stateLabel(entry: PlanningEntry, state: string) {
+  if (entry.goal_id) {
+    return state === "finished"
+      ? `Mark ${entry.title} incomplete`
+      : `Mark ${entry.title} complete`;
+  }
+  if (state === "running") return `Stop timer for ${entry.title}`;
+  if (state === "finished") return `Edit finished check-in for ${entry.title}`;
+  if (state === "partial") return `Edit partial check-in for ${entry.title}`;
+  if (state === "not-started") return `Edit missed check-in for ${entry.title}`;
+  return `Check in for ${entry.title}`;
 }
 
 function stateIcon(state: string) {
@@ -121,6 +132,9 @@ function stateIcon(state: string) {
 function entryDetail(entry: PlanningEntry, state: string) {
   const context = entry.course_code || entry.location || capitalize(entry.category);
   const cadence = entry.recurring ? "Weekly" : entry.locked ? "Fixed" : "Scheduled";
+  if (entry.goal_id && state === "finished") return `${context} · completed`;
+  if (entry.goal_id && state === "partial") return `${context} · completion not confirmed`;
+  if (entry.goal_id && state === "not-started") return `${context} · not completed`;
   if (state === "running") return `${context} · timer running`;
   if (state === "finished") return `${context} · finished · ${formatMinutes(entry.logged_minutes)} logged`;
   if (state === "partial") return `${context} · ${formatMinutes(entry.logged_minutes)} logged · still going`;

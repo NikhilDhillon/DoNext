@@ -28,13 +28,13 @@ export function CloseOutPanel({
         <span><ClockAlert size={19} /></span>
         <div><p className="eyebrow">Close out today</p><h2 id="close-out-title">What happened in these blocks?</h2></div>
         <button className="secondary-button" disabled={busy} type="button" onClick={() => void onLogAll(unanswered)}>
-          {busy ? <LoaderCircle className="spin" size={16} /> : <CheckCheck size={16} />} Log all as planned
+          {busy ? <LoaderCircle className="spin" size={16} /> : <CheckCheck size={16} />} Mark all as planned
         </button>
       </header>
       <ul>
         {unanswered.map((entry) => (
           <li key={entry.id}>
-            <button type="button" onClick={() => onLog(entry)}>
+            <button disabled={busy} type="button" onClick={() => onLog(entry)}>
               <span>{formatTime(entry.start_at, timezone)}</span>
               <strong>{entry.title}</strong>
               <small>{formatMinutes(entry.planned_minutes)} planned</small>
