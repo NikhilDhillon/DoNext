@@ -1,32 +1,44 @@
 "use client";
 
-import {
-  ArrowRight,
-  BatteryMedium,
-  Check,
-  ChevronRight,
-  Clock3,
-  Coffee,
-  LoaderCircle,
-  Pencil,
-  Plus,
-  Sparkles,
-} from "lucide-react";
+import { ArrowRight, Clock3, LoaderCircle, Plus, Sparkles, Undo2 } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { ScheduleBlockEditor } from "@/components/schedule-block-editor";
-import { WorkIntake } from "@/components/work-intake";
+import { AttentionPanel } from "@/components/today/attention-panel";
+import { CloseOutPanel } from "@/components/today/close-out-panel";
+import { DayChecklist } from "@/components/today/day-checklist";
+import { LogSessionDialog } from "@/components/today/log-session-dialog";
+import { NowCard } from "@/components/today/now-card";
+import { ProgressPanel } from "@/components/today/progress-panel";
 import { useApiResource } from "@/hooks/use-api-resource";
 import { apiRequest, ApiRequestError } from "@/lib/api";
-import type { PlannerTask, PlanningEntry, PlanningView, Schedule, ScheduleProposal, Semester, User } from "@/lib/types";
+import { dayPart, formatFullDate, headerSummary, highestPriorityTask, timerCheckEntry } from "@/lib/today";
+import type {
+  ActivationPrompt,
+  PlannerTask,
+  PlanningEntry,
+  PlanningView,
+  RolloverResult,
+  Schedule,
+  ScheduleBlock,
+  ScheduleProposal,
+  Semester,
+  User,
+  WorkOutcome,
+  WorkSession,
+  WorkTimer,
+} from "@/lib/types";
 
 export function TodayPlanner() {
   const user = useApiResource<User>("/auth/me");
   const semesters = useApiResource<Semester[]>("/semesters");
   const plan = useApiResource<PlanningView>("/planning/day");
   const currentSemester = useMemo(
-    () => semesters.data?.find((semester) => semester.status === "active") ?? semesters.data?.[0] ?? null,
+    () =>
+      semesters.data?.find((semester) => semester.status === "active") ??
+      semesters.data?.[0] ??
+      null,
     [semesters.data],
   );
   const proposal = useApiResource<ScheduleProposal>(
@@ -35,26 +47,44 @@ export function TodayPlanner() {
   const accepted = useApiResource<Schedule | null>(
     currentSemester ? `/semesters/${currentSemester.id}/schedule` : null,
   );
+  const activationQueue = useApiResource<ActivationPrompt[]>(
+    currentSemester ? `/semesters/${currentSemester.id}/activation-queue` : null,
+  );
   const [editorOpen, setEditorOpen] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<PlanningEntry | null>(null);
   const [suggestedTask, setSuggestedTask] = useState<PlannerTask | null>(null);
-  const [completingTask, setCompletingTask] = useState<string | null>(null);
+  const [checkEntry, setCheckEntry] = useState<PlanningEntry | null>(null);
+  const [timerCheckMinutes, setTimerCheckMinutes] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [rolloverBlocks, setRolloverBlocks] = useState<ScheduleBlock[]>([]);
 
   const loading = user.loading || semesters.loading || plan.loading;
   if (loading && !plan.data) return <PlannerLoading label="Building today from your real plan" />;
   if (plan.error || user.error || semesters.error) {
-    return <PlannerError message={plan.error || user.error || semesters.error || "DoNext could not load today."} onRetry={plan.reload} />;
+    return (
+      <PlannerError
+        message={plan.error || user.error || semesters.error || "DoNext could not load today."}
+        onRetry={plan.reload}
+      />
+    );
   }
   if (!plan.data) return <PlannerLoading label="Loading today" />;
 
   const data = plan.data;
   const capacity = data.days[0]?.capacity;
-  const nextEntry = data.entries.find((entry) => entry.id === data.next_entry_id) ?? null;
-  const allocatedPercent = capacity?.usable_focus_minutes
-    ? Math.round(capacity.planned_focus_minutes / capacity.usable_focus_minutes * 100)
-    : 0;
+  const waitingPrompts = (activationQueue.data ?? []).filter((prompt) => !prompt.activated);
+  const waitingTaskIds = new Set(waitingPrompts.map((prompt) => prompt.task_id));
   const firstName = user.data?.name.split(" ")[0] || "there";
+  const allPlanningTasks = Array.from(
+    new Map(
+      [...data.deadlines, ...data.unscheduled_tasks, ...data.completed_tasks].map((task) => [
+        task.id,
+        task,
+      ]),
+    ).values(),
+  );
 
   function openNew(task: PlannerTask | null = null) {
     setSelectedEntry(null);
@@ -69,17 +99,172 @@ export function TodayPlanner() {
     setEditorOpen(true);
   }
 
-  async function completeTask(taskId: string) {
-    setCompletingTask(taskId);
+  function openCheckIn(entry: PlanningEntry) {
     setActionError(null);
+    setTimerCheckMinutes(null);
+    setCheckEntry(entry);
+  }
+
+  function openTimerCheckIn(entry?: PlanningEntry) {
+    const timer = data.active_timer;
+    if (!timer) return;
+    setActionError(null);
+    const activeEntry = entry ?? timerCheckEntry(timer, data.entries, allPlanningTasks);
+    setTimerCheckMinutes(Math.max(Math.round((Date.now() - new Date(timer.started_at).getTime()) / 60000), 0));
+    setCheckEntry(activeEntry);
+  }
+
+  async function refreshAll() {
+    window.dispatchEvent(new Event("donext:planning-updated"));
+    await Promise.all([
+      plan.reload(),
+      proposal.reload(),
+      accepted.reload(),
+      activationQueue.reload(),
+    ]);
+  }
+
+  async function rollover() {
+    if (!currentSemester) return null;
     try {
-      await apiRequest(`/tasks/${taskId}/complete`, { method: "POST" });
-      window.dispatchEvent(new Event("donext:planning-updated"));
-      await plan.reload();
+      const result = await apiRequest<RolloverResult>(
+        `/semesters/${currentSemester.id}/schedule/rollover`,
+        { method: "POST", body: JSON.stringify({ local_date: data.start_date }) },
+      );
+      if (result.outcome === "placed") {
+        setRolloverBlocks(result.blocks);
+        setActionNotice(result.reason);
+      } else if (result.outcome === "draft_created") {
+        setActionNotice("The remaining work needs a trade-off. A draft is ready for review.");
+      }
+      return result;
     } catch (error) {
-      setActionError(error instanceof ApiRequestError ? error.message : "DoNext could not complete that task.");
+      setActionError(`Your check-in was saved. ${errorMessage(error, "The remaining work could not be placed. Open Week to review it.")}`);
+      return null;
+    }
+  }
+
+  async function undoRollover() {
+    await runAction(async () => {
+      await Promise.all(rolloverBlocks.map(async (block) => {
+        try { await apiRequest(`/schedule-blocks/${block.id}`, { method: "DELETE" }); }
+        catch (error) { if (!(error instanceof ApiRequestError && error.status === 404)) throw error; }
+      }));
+      setRolloverBlocks([]);
+      setActionNotice("The added rollover time was removed. Your check-ins are still saved.");
+      await refreshAll();
+    }, "DoNext could not remove all the added time. Open Week to review it.");
+  }
+
+  async function saveSession(entry: PlanningEntry, outcome: WorkOutcome, minutes: number) {
+    setBusy(true);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await apiRequest<WorkSession>("/work-sessions", {
+        method: "POST",
+        body: JSON.stringify({
+          task_id: entry.task_id,
+          goal_id: entry.goal_id,
+          scheduled_block_id: entry.source_id,
+          local_date: data.start_date,
+          minutes,
+          outcome,
+          source: "quick_confirm",
+        }),
+      });
+      if (entry.task_id) await rollover();
+      setCheckEntry(null);
+      await refreshAll();
+    } catch (error) {
+      setActionError(errorMessage(error, "DoNext could not save that check-in."));
     } finally {
-      setCompletingTask(null);
+      setBusy(false);
+    }
+  }
+
+  async function logAll(entries: PlanningEntry[]) {
+    setBusy(true);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await Promise.all(
+        entries.map((entry) =>
+          apiRequest<WorkSession>("/work-sessions", {
+            method: "POST",
+            body: JSON.stringify({
+              task_id: entry.task_id,
+              goal_id: entry.goal_id,
+              scheduled_block_id: entry.source_id,
+              local_date: data.start_date,
+              minutes: entry.planned_minutes,
+              outcome: "still_going",
+              source: "quick_confirm",
+            }),
+          }),
+        ),
+      );
+      if (entries.some((entry) => entry.task_id)) await rollover();
+      setActionNotice("Past blocks were logged as planned. Adjust any row if reality was different.");
+      await refreshAll();
+    } catch (error) {
+      setActionError(errorMessage(error, "DoNext could not close out those blocks."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startTimer(entry: PlanningEntry) {
+    if (!entry.task_id) return;
+    await runAction(async () => {
+      await apiRequest<WorkTimer>("/work-timer", {
+        method: "POST",
+        body: JSON.stringify({ task_id: entry.task_id, scheduled_block_id: entry.source_id }),
+      });
+      await plan.reload();
+    }, "DoNext could not start the timer.");
+  }
+
+  async function stopTimer(outcome: WorkOutcome, minutes?: number) {
+    await runAction(async () => {
+      await apiRequest<WorkSession>("/work-timer/stop", {
+        method: "POST",
+        body: JSON.stringify({ outcome, minutes }),
+      });
+      await rollover();
+      setCheckEntry(null);
+      setTimerCheckMinutes(null);
+      await refreshAll();
+    }, "DoNext could not stop the timer.");
+  }
+
+  async function discardTimer() {
+    await runAction(async () => {
+      await apiRequest("/work-timer", { method: "DELETE" });
+      setActionNotice("Timer discarded. No time was logged.");
+      await plan.reload();
+    }, "DoNext could not discard the timer.");
+  }
+
+  async function undoSession(entry: PlanningEntry) {
+    if (!entry.work_session_id) return;
+    await runAction(async () => {
+      await apiRequest(`/work-sessions/${entry.work_session_id}`, { method: "DELETE" });
+      setActionNotice(`${entry.title} is unanswered again.`);
+      await refreshAll();
+    }, "DoNext could not undo that check-in.");
+  }
+
+  async function runAction(action: () => Promise<void>, fallback: string) {
+    setBusy(true);
+    setActionError(null);
+    setActionNotice(null);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(errorMessage(error, fallback));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -89,159 +274,118 @@ export function TodayPlanner() {
         <div>
           <p className="eyebrow">{formatFullDate(data.start_date)}</p>
           <h1>Good {dayPart(data.timezone)}, {firstName}.</h1>
-          <p>{todaySummary(data.entries.length, capacity?.remaining_focus_minutes ?? 0)}</p>
+          <p>{headerSummary(data, waitingPrompts.length)}</p>
         </div>
         <div className="heading-actions">
           <Link className="secondary-button" href="/week"><Clock3 size={18} /> View week</Link>
           <button className="primary-button" disabled={!currentSemester} type="button" onClick={() => openNew()}>
-            <Plus size={17} /> Add time block
+            <Plus size={17} /> Add block
           </button>
         </div>
       </header>
 
       {proposal.data ? (
-        <Link className="proposal-pending-banner" href="/week"><Sparkles size={17} /><span><strong>A 14-day draft is waiting for review.</strong><small>Today still reflects your accepted schedule.</small></span><ArrowRight size={17} /></Link>
+        <Link className="proposal-pending-banner" href="/week">
+          <Sparkles size={17} /><span><strong>A draft is waiting for review.</strong><small>Today still reflects your accepted schedule.</small></span><ArrowRight size={17} />
+        </Link>
       ) : null}
 
-      {currentSemester && accepted.data && !proposal.data ? (
-        <WorkIntake
-          semester={currentSemester}
-          onChanged={async () => {
-            await Promise.all([plan.reload(), proposal.reload(), accepted.reload()]);
-          }}
+      <NowCard
+        busy={busy}
+        capacity={capacity}
+        deadline={highestPriorityTask(data.unscheduled_tasks.length ? data.unscheduled_tasks : data.deadlines)}
+        entries={data.entries}
+        loggedMinutes={data.logged_minutes}
+        timer={data.active_timer}
+        timerTitle={data.active_timer ? allPlanningTasks.find((task) => task.id === data.active_timer?.task_id)?.name : undefined}
+        timezone={data.timezone}
+        warnings={data.warnings}
+        unbookedDeadlines={waitingPrompts.length}
+        onDiscard={discardTimer}
+        onDone={() => stopTimer("finished")}
+        onStart={startTimer}
+        onStop={() => { openTimerCheckIn(); return Promise.resolve(); }}
+      />
+
+      {actionError ? <p className="planner-alert error today-alert" role="alert">{actionError}</p> : null}
+      {actionNotice || rolloverBlocks.length ? <div className="planner-alert info today-alert" role="status"><Sparkles size={15} /><span>{actionNotice || "Remaining work was added without moving your accepted plan."}</span>{rolloverBlocks.length ? <button disabled={busy} type="button" onClick={() => void undoRollover()}><Undo2 size={14} /> Undo added time</button> : null}</div> : null}
+
+      <CloseOutPanel
+        busy={busy}
+        entries={data.entries}
+        timezone={data.timezone}
+        onLog={openCheckIn}
+        onLogAll={logAll}
+      />
+
+      <DayChecklist
+        entries={data.entries}
+        nextEntryId={data.next_entry_id}
+        timezone={data.timezone}
+        onAdd={() => openNew()}
+        onCheckIn={(entry) => {
+          if (entry.timer_running) openTimerCheckIn(entry);
+          else openCheckIn(entry);
+        }}
+        onEdit={openEntry}
+      />
+
+      <div className="today-lower-grid">
+        <ProgressPanel
+          tasks={[...data.deadlines.filter((task) => !waitingTaskIds.has(task.id)), ...data.completed_tasks]}
+          timezone={data.timezone}
+          onPlan={openNew}
         />
-      ) : null}
-
-      <section className="day-overview" aria-label="Day overview">
-        <div className="capacity-card">
-          <div className="capacity-topline">
-            <span className={`status-pill ${allocatedPercent <= 100 ? "calm" : "strained"}`}>
-              <span /> {capacityStatus(capacity?.remaining_focus_minutes ?? 0, allocatedPercent)}
-            </span>
-            <span className="muted-label">{allocatedPercent}% of usable focus time planned</span>
-          </div>
-          <div className="capacity-copy">
-            <div><strong>{formatMinutes(capacity?.planned_focus_minutes ?? 0)}</strong><span>planned focus</span></div>
-            <div><strong>{formatMinutes(capacity?.remaining_focus_minutes ?? 0)}</strong><span>open focus capacity</span></div>
-            <div><strong>{formatMinutes(capacity?.derived_preferred_sleep_minutes ?? 0)}</strong><span>derived sleep</span></div>
-          </div>
-          <CapacityTrack capacity={capacity} />
-          <div className="capacity-legend">
-            <span><i className="focus-dot" /> Focus</span>
-            <span><i className="life-dot" /> Commitments</span>
-            <span><i className="buffer-dot" /> Protected free time</span>
-          </div>
-        </div>
-
-        {nextEntry ? (
-          <div className="next-card">
-            <div className="next-card-icon"><Sparkles size={21} /></div>
-            <div>
-              <p>Do next</p>
-              <h2>{nextEntry.title}</h2>
-              <span>{formatEntryWindow(nextEntry, data.timezone)}{nextEntry.location ? ` · ${nextEntry.location}` : ""}</span>
-            </div>
-            {nextEntry.editable ? (
-              <button aria-label={`Edit ${nextEntry.title}`} type="button" onClick={() => openEntry(nextEntry)}><Pencil size={18} /></button>
-            ) : (
-              <Link aria-label="View this week" href="/week"><ArrowRight size={20} /></Link>
-            )}
-          </div>
+        {currentSemester ? (
+          <AttentionPanel
+            prompts={activationQueue.data ?? []}
+            semester={currentSemester}
+            unscheduledTasks={data.unscheduled_tasks.filter((task) => !waitingTaskIds.has(task.id))}
+            onChanged={refreshAll}
+            onPlan={openNew}
+          />
         ) : (
-          <div className="next-card next-card-empty">
-            <div className="next-card-icon"><Sparkles size={21} /></div>
-            <div><p>Open next</p><h2>No upcoming block</h2><span>Choose what deserves a place in your day.</span></div>
-            <button aria-label="Add a time block" disabled={!currentSemester} type="button" onClick={() => openNew()}><Plus size={20} /></button>
-          </div>
+          <section className="attention-panel empty"><p className="planner-quiet">Accept a schedule to connect new work to today.</p></section>
         )}
-      </section>
-
-      {actionError && <p className="planner-alert error" role="alert">{actionError}</p>}
-
-      <div className="today-grid">
-        <section className="agenda-panel">
-          <div className="section-heading">
-            <div><h2>Today’s plan</h2><p>{agendaSummary(data.entries)}</p></div>
-            <button className="text-button" disabled={!currentSemester} type="button" onClick={() => openNew()}>Add block</button>
-          </div>
-          {data.entries.length ? (
-            <div className="agenda-list">
-              {data.entries.map((entry, index) => (
-                <article className="agenda-row" key={entry.id}>
-                  <div className="agenda-time"><strong>{formatTime(entry.start_at, data.timezone)}</strong><span>{formatMeridiem(entry.start_at, data.timezone)}</span></div>
-                  <div className="agenda-line" aria-hidden="true"><span className={entryDot(entry)} />{index < data.entries.length - 1 && <i />}</div>
-                  <div className="agenda-content">
-                    <div>
-                      {entry.id === data.next_entry_id && <span className="up-next-label">Up next</span>}
-                      <h3>{entry.title}</h3>
-                      <p>{entryDetail(entry)}</p>
-                    </div>
-                    <span className="duration"><Clock3 size={14} /> {entryDuration(entry)}</span>
-                    {entry.editable ? (
-                      <button aria-label={`Edit ${entry.title}`} type="button" onClick={() => openEntry(entry)}><Pencil size={18} /></button>
-                    ) : <span />}
-                  </div>
-                </article>
-              ))}
-            </div>
-          ) : (
-            <div className="planner-empty"><Clock3 size={24} /><h3>Your day is open.</h3><p>Add a block or schedule one of your unfinished tasks.</p><button className="secondary-button" disabled={!currentSemester} type="button" onClick={() => openNew()}><Plus size={16} /> Plan time</button></div>
-          )}
-        </section>
-
-        <aside className="today-aside">
-          <section className="focus-card">
-            <div className="section-heading compact"><div><p className="eyebrow">Unscheduled work</p><h2>Give these a place</h2></div><BatteryMedium size={22} /></div>
-            {data.unscheduled_tasks.length ? (
-              <ul className="priority-list">
-                {data.unscheduled_tasks.slice(0, 4).map((task) => (
-                  <li key={task.id}>
-                    <button className="check-ring task-complete-button" disabled={completingTask === task.id} aria-label={`Complete ${task.name}`} type="button" onClick={() => completeTask(task.id)}>
-                      {completingTask === task.id ? <LoaderCircle className="spin" size={13} /> : <Check size={13} />}
-                    </button>
-                    <button className="priority-task-copy" type="button" onClick={() => openNew(task)}>
-                      <strong>{task.name}</strong><small>{taskDetail(task, data.timezone)}</small>
-                    </button>
-                    <button className="priority-task-open" aria-label={`Schedule ${task.name}`} type="button" onClick={() => openNew(task)}><ChevronRight size={17} /></button>
-                  </li>
-                ))}
-              </ul>
-            ) : <p className="planner-quiet">Every unfinished task already has time in the accepted plan.</p>}
-          </section>
-
-          <section className="insight-card">
-            <div className="insight-icon"><Coffee size={20} /></div>
-            <div>
-              <p className="eyebrow">{data.warnings.length ? "Needs input" : "Protected on purpose"}</p>
-              <h3>{data.warnings.length ? "Capacity is not complete yet" : `${formatMinutes(capacity?.protected_free_minutes ?? 0)} stays unallocated`}</h3>
-              <p>{data.warnings[0] ?? "Your configured buffer remains outside planned focus time."}</p>
-            </div>
-          </section>
-        </aside>
       </div>
 
-      {currentSemester && (
+      {data.entries.some((entry) => entry.work_session_id) ? (
+        <div className="today-undo-strip" aria-label="Recent check-ins">
+          <span>Need to correct reality?</span>
+          {data.entries.filter((entry) => entry.work_session_id).map((entry) => (
+            <button disabled={busy} key={entry.id} type="button" onClick={() => void undoSession(entry)}>
+              <Undo2 size={14} /> Undo {entry.title}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      <LogSessionDialog
+        key={checkEntry ? `${checkEntry.id}:${checkEntry.work_session_id ?? "new"}:${timerCheckMinutes ?? "session"}` : "closed"}
+        entry={checkEntry}
+        open={Boolean(checkEntry)}
+        saving={busy}
+        saveError={actionError}
+        initialMinutes={timerCheckMinutes ?? undefined}
+        timer={timerCheckMinutes !== null}
+        onClose={() => setCheckEntry(null)}
+        onSave={(outcome, minutes) => timerCheckMinutes !== null ? stopTimer(outcome, minutes) : saveSession(checkEntry!, outcome, minutes)}
+      />
+
+      {currentSemester ? (
         <ScheduleBlockEditor
+          date={data.start_date}
+          entry={selectedEntry}
           open={editorOpen}
           semesterId={currentSemester.id}
-          date={data.start_date}
-          tasks={data.unscheduled_tasks}
-          entry={selectedEntry}
           suggestedTask={suggestedTask}
+          tasks={allPlanningTasks}
           onClose={() => setEditorOpen(false)}
-          onSaved={plan.reload}
+          onSaved={refreshAll}
         />
-      )}
+      ) : null}
     </main>
   );
-}
-
-function CapacityTrack({ capacity }: { capacity: PlanningView["days"][number]["capacity"] | undefined }) {
-  const total = Math.max(capacity?.available_minutes ?? 0, 1);
-  const focus = Math.min((capacity?.planned_focus_minutes ?? 0) / total * 100, 100);
-  const commitments = Math.min((capacity?.commitment_minutes ?? 0) / total * 100, 100 - focus);
-  const protectedTime = Math.min((capacity?.protected_free_minutes ?? 0) / total * 100, 100 - focus - commitments);
-  return <div className="capacity-track" aria-label={`${Math.round(focus)} percent of available time planned for focus`}><span className="capacity-focus" style={{ width: `${focus}%` }} /><span className="capacity-life" style={{ width: `${commitments}%` }} /><span className="capacity-buffer" style={{ width: `${protectedTime}%` }} /></div>;
 }
 
 function PlannerLoading({ label }: { label: string }) {
@@ -252,75 +396,6 @@ function PlannerError({ message, onRetry }: { message: string; onRetry: () => Pr
   return <main className="page-shell planner-state error"><h1>Today could not load.</h1><p>{message}</p><button className="primary-button" type="button" onClick={onRetry}>Try again</button></main>;
 }
 
-function formatMinutes(minutes: number) {
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  const remainder = minutes % 60;
-  return remainder ? `${hours}h ${remainder}m` : `${hours}h`;
-}
-
-function formatFullDate(value: string) {
-  return new Intl.DateTimeFormat("en-CA", { weekday: "long", month: "long", day: "numeric", timeZone: "UTC" }).format(new Date(`${value}T12:00:00Z`));
-}
-
-function formatTime(value: string, timezone: string) {
-  return new Intl.DateTimeFormat("en-CA", { hour: "numeric", hour12: true, timeZone: timezone }).format(new Date(value)).replace(/\s?[ap]\.m\./i, "");
-}
-
-function formatMeridiem(value: string, timezone: string) {
-  return new Intl.DateTimeFormat("en-CA", { hour: "numeric", hour12: true, timeZone: timezone }).formatToParts(new Date(value)).find((part) => part.type === "dayPeriod")?.value.toUpperCase().replaceAll(".", "") ?? "";
-}
-
-function formatEntryWindow(entry: PlanningEntry, timezone: string) {
-  const formatter = new Intl.DateTimeFormat("en-CA", { hour: "numeric", minute: "2-digit", timeZone: timezone });
-  return `${formatter.format(new Date(entry.start_at))}–${formatter.format(new Date(entry.end_at))}`;
-}
-
-function dayPart(timezone: string) {
-  const hour = Number(new Intl.DateTimeFormat("en-CA", { hour: "numeric", hourCycle: "h23", timeZone: timezone }).format(new Date()));
-  return hour < 12 ? "morning" : hour < 17 ? "afternoon" : "evening";
-}
-
-function capacityStatus(remaining: number, allocated: number) {
-  if (allocated > 100) return "Over capacity";
-  if (remaining >= 120) return "Room to breathe";
-  if (remaining > 0) return "Focused day";
-  return "Fully allocated";
-}
-
-function todaySummary(entries: number, remaining: number) {
-  if (!entries) return "Nothing is assumed—your day is ready for you to shape.";
-  return `${entries} ${entries === 1 ? "item" : "items"} planned with ${formatMinutes(remaining)} of usable focus capacity still open.`;
-}
-
-function agendaSummary(entries: PlanningEntry[]) {
-  const commitments = entries.filter((entry) => entry.kind === "fixed_event" || entry.block_type === "commitment").length;
-  const focus = entries.filter((entry) => entry.block_type === "focus" || entry.block_type === "goal").length;
-  return `${commitments} ${commitments === 1 ? "commitment" : "commitments"} · ${focus} ${focus === 1 ? "focus block" : "focus blocks"}`;
-}
-
-function entryDot(entry: PlanningEntry) {
-  if (entry.kind === "fixed_event") return "course";
-  if (entry.block_type === "goal" || entry.block_type === "personal") return "goal";
-  return "focus";
-}
-
-function entryDetail(entry: PlanningEntry) {
-  const context = entry.course_code || entry.location || capitalize(entry.category);
-  return `${context}${entry.recurring ? " · Weekly" : entry.locked ? " · Fixed" : " · Manual"}`;
-}
-
-function entryDuration(entry: PlanningEntry) {
-  return formatMinutes(Math.round((new Date(entry.end_at).getTime() - new Date(entry.start_at).getTime()) / 60_000));
-}
-
-function taskDetail(task: PlannerTask, timezone: string) {
-  const context = task.course_code || task.goal_name || capitalize(task.intensity);
-  if (!task.deadline_at) return `${context} · ${formatMinutes(task.remaining_minutes)} remaining`;
-  const due = new Intl.DateTimeFormat("en-CA", { month: "short", day: "numeric", timeZone: timezone }).format(new Date(task.deadline_at));
-  return `${context} · ${formatMinutes(task.remaining_minutes)} · Due ${due}`;
-}
-
-function capitalize(value: string) {
-  return value.charAt(0).toUpperCase() + value.slice(1).replaceAll("_", " ");
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof ApiRequestError ? error.message : fallback;
 }

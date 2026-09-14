@@ -280,6 +280,12 @@ export type PlanningEntry = {
   locked: boolean;
   recurring: boolean;
   editable: boolean;
+  block_fingerprint: string | null;
+  planned_minutes: number;
+  logged_minutes: number;
+  check_in_outcome: WorkOutcome | null;
+  work_session_id: string | null;
+  timer_running: boolean;
 };
 
 export type PlannerTask = {
@@ -294,6 +300,49 @@ export type PlannerTask = {
   goal_name: string | null;
   // Set only for work tied to a graded item, so a deadline can be told apart from an exam's.
   item_type: AcademicItem["item_type"] | null;
+  estimated_minutes: number;
+  logged_minutes: number;
+  estimate_exceeded: boolean;
+};
+
+export type WorkOutcome = "finished" | "still_going" | "not_started";
+
+export type WorkSession = {
+  id: string;
+  user_id: string;
+  task_id: string | null;
+  goal_id: string | null;
+  local_date: string;
+  minutes: number;
+  outcome: WorkOutcome;
+  source: "timer" | "quick_confirm" | "manual";
+  started_at: string | null;
+  ended_at: string | null;
+  scheduled_block_id: string | null;
+  block_fingerprint: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkTimer = {
+  id: string;
+  user_id: string;
+  task_id: string;
+  started_at: string;
+  scheduled_block_id: string | null;
+  block_fingerprint: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type RolloverResult = {
+  outcome: "nothing_to_roll" | "placed" | "draft_required" | "draft_created";
+  rolled_minutes: number;
+  blocks: ScheduleBlock[];
+  proposal: ScheduleProposal | null;
+  unanswered_blocks: number;
+  released_minutes: number;
+  reason: string;
 };
 
 export type PlanningCapacity = {
@@ -316,6 +365,11 @@ export type PlanningView = {
   unscheduled_tasks: PlannerTask[];
   next_entry_id: string | null;
   warnings: string[];
+  completed_tasks: PlannerTask[];
+  logged_minutes: number;
+  unanswered_blocks: number;
+  rollover_minutes: number;
+  active_timer: WorkTimer | null;
 };
 
 export type SemesterDeadline = {

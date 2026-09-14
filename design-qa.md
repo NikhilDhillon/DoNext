@@ -316,3 +316,41 @@ final result: passed
 5. The final desktop, 3-day, Day and 390px passes showed no remaining P0, P1 or P2 issues.
 
 final result: passed
+
+---
+
+# Design QA: Today completion loop
+
+## Evidence
+
+- Visual target: the region layout and checklist states in `docs/architecture/phase-4.md`, using the existing DoNext paper, ink, semantic colours, typography, and Lucide icons.
+- Desktop: 1280 x 800 CSS viewport in the Codex in-app browser.
+- Mobile: 390 x 844 CSS viewport, confirmed through `window.innerWidth` and `window.innerHeight` after applying the viewport override.
+- State: a synthetic local Phase 4 QA account with three academic tasks, a goal block, a past lecture, nonurgent intake, and an urgent deadline. Captures were rendered inline by the browser; no filesystem image paths were returned.
+
+## Findings and comparison history
+
+- P0: none.
+- P1: none remaining. Timer stop initially saved immediately; it now opens a measured-time confirmation before saving. Unactivated deadlines initially duplicated the progress list; they are now kept in intake.
+- P2: none remaining. The dialog initially focused its close button; it now focuses the time field so Enter saves the common path. Checklist, edit, close-out, undo, timer, and session controls now clear 44px on touch.
+- P3: the counter stacks beneath the hero at narrower desktop widths, then the progress and intake panels stack on mobile. This preserves reading order without squeezing the checklist.
+
+## Fidelity and interaction checks
+
+- The dark Right now hero, daily counter, full-width checklist, progress panel, and demoted intake follow the specification's hierarchy. Existing design tokens are reused; no image assets or new palette were introduced.
+- Desktop document width was 1280px and mobile document width was 390px, matching their viewports with no horizontal overflow.
+- Checklist state is named in visible text and accessible control labels, with distinct icons for partial, complete, running, and unanswered work. Fixed lectures have no attendance control and dim after ending.
+- Starting a timer produced a live elapsed readout. Stop & log opened a confirmation; entering 0.2 hours and pressing Enter saved 12 minutes, reduced remaining report work from 120 to 108 minutes, and moved daily and task progress.
+- Rollover reported add-only placement and exposed Undo added time. One click removed its added blocks while preserving the check-in.
+- Logging 60 minutes against a 30-minute problem-set estimate kept the task visible with 30 minutes remaining and the explicit Estimate passed label; the estimate remained 30 minutes.
+- Finishing the quiz with 20 actual minutes retained its checklist row and Done progress row. Undo Quiz focus restored it to pending, zero logged minutes, and 60 remaining minutes, and returned it to close-out.
+- Nonurgent intake started collapsed and expanded in place. A fresh load with Urgent capstone exposed its rows automatically without the collapsed expansion button.
+- The native dialog is labelled and described, traps focus, focuses the hours field, and supports Enter submission. Close-out and undo actions are native keyboard-reachable buttons.
+- The timer uses `aria-live="polite"`. The existing global reduced-motion media rule overrides the progress transition and spinner animation; this was inspected in CSS rather than emulated in the browser.
+- A fresh browser tab and the subsequent mobile interactions produced no console warnings or errors. Temporary viewport overrides and QA tabs were cleared.
+
+## Validation limits
+
+The constrained-capacity draft branch and goal accounting are covered by the focused API tests; this browser pass exercised add-only rollover. No screen-reader audit or full accessibility conformance claim is made.
+
+final result: passed

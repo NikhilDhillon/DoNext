@@ -1241,6 +1241,12 @@ function blockEntry(block: ScheduleBlock): PlanningEntry {
     locked: block.locked,
     recurring: false,
     editable: true,
+    block_fingerprint: null,
+    planned_minutes: Math.round((new Date(block.end_at).getTime() - new Date(block.start_at).getTime()) / 60000),
+    logged_minutes: 0,
+    check_in_outcome: null,
+    work_session_id: null,
+    timer_running: false,
   };
 }
 

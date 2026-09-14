@@ -2,7 +2,7 @@
 
 Author: Nikhil Dhillon
 
-Status: Implementation plan
+Status: Phase 4 implemented; Phase 5 pending
 
 Phase 2 implemented on 2026-09-13: day and week planning responses expose block check-ins,
 the active timer, actual logged minutes, estimate overruns, unanswered past blocks, and outstanding
@@ -35,9 +35,22 @@ the direct-placement regression guard was made independent of the wall clock and
 lint/typecheck and API lint/typecheck pass. The production web build also passes with network access
 for the existing Geist Google font.
 
+Phase 4 implemented on 2026-09-14: Today now presents a timer hero, honest daily progress,
+checkable task and goal blocks, a past-block close-out list, accumulating academic effort, and
+collapsed intake that opens automatically for urgent deadlines. Check-ins can be corrected and
+undone; timer stop allows measured time to be corrected before save. Rollover uses the Phase 3
+endpoint, exposes a single-action undo for added blocks, and directs trade-offs to a reviewable
+Week draft. Unactivated deadlines are excluded from progress and active unplaced work is listed
+separately. Fixed events retain context without attendance controls.
+
+The desktop 1280px and mobile 390px browser passes are recorded in `design-qa.md`. Web lint,
+typecheck, and production build pass; all 46 focused completion, rollover, and planning tests pass.
+The full gate still stops at the same 13 API failures reproduced from an untouched HEAD snapshot
+(185 pass). Phase 5 learned estimates remain unimplemented.
+
 ## Document boundary
 
-This document plans work that is not yet implemented. The canonical product policy remains
+This document records implemented phases and plans the remaining work. The canonical product policy remains
 [`../scheduling.md`](../scheduling.md), and [`phase-3.md`](phase-3.md) records what the repository
 currently does. Phase 0 below moves the rules stated here into `scheduling.md`, after which that
 document governs and this one becomes a build order.

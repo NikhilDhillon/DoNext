@@ -16,6 +16,7 @@ import type {
 type WorkIntakeProps = {
   semester: Semester;
   onChanged: () => Promise<void> | void;
+  collapsed?: boolean;
 };
 
 type NewWorkKind = "assignment" | "quiz" | "midterm" | "final_exam" | "project";
@@ -33,13 +34,14 @@ const KIND_LABELS: Record<NewWorkKind, string> = {
  * where they say so: activate a deadline DoNext already knows about, or enter something the
  * course outline never contained. Nothing here blocks plan generation.
  */
-export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
+export function WorkIntake({ semester, onChanged, collapsed = false }: WorkIntakeProps) {
   const queue = useApiResource<ActivationPrompt[]>(`/semesters/${semester.id}/activation-queue`);
   const courses = useApiResource<Course[]>(`/semesters/${semester.id}/courses`);
   const [busyItem, setBusyItem] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   const prompts = useMemo(() => queue.data ?? [], [queue.data]);
   const waiting = useMemo(() => prompts.filter((prompt) => !prompt.activated), [prompts]);
@@ -48,6 +50,7 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
     () => waiting.filter((prompt) => prompt.urgent).length,
     [waiting],
   );
+  const showDetails = !collapsed || expanded || composing || urgentCount > 0;
 
   async function refresh() {
     // Answering here changes the plan, so every surface reading it hears about it, not just this page.
@@ -136,7 +139,7 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
 
   return (
     <section className="intake-card" aria-label="Work intake">
-      <header className="intake-header">
+      {showDetails ? <header className="intake-header">
         <div>
           <p className="eyebrow">What just landed</p>
           <h2>Tell DoNext what you have been given.</h2>
@@ -145,6 +148,7 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
           className="secondary-button"
           type="button"
           onClick={() => {
+            setExpanded(true);
             setComposing((open) => !open);
             setError(null);
             setOutcome(null);
@@ -153,7 +157,7 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
           {composing ? <X size={16} /> : <Plus size={16} />}
           {composing ? "Close" : "Add work"}
         </button>
-      </header>
+      </header> : null}
 
       {composing ? (
         <NewWorkForm
@@ -179,7 +183,17 @@ export function WorkIntake({ semester, onChanged }: WorkIntakeProps) {
         </p>
       ) : null}
 
-      {queue.loading && !queue.data ? (
+      {!showDetails ? (
+        <div className="intake-collapsed">
+          <p>
+            {waiting.length ? `${waiting.length} ${waiting.length === 1 ? "deadline is" : "deadlines are"} in view with no time booked.` : "Every known deadline in the next two weeks has an answer."}
+          </p>
+          <span>{waiting.slice(0, 3).map((prompt) => formatDate(prompt.due_at)).join(" · ")}</span>
+          <button className="secondary-button" type="button" onClick={() => setExpanded(true)}>
+            {waiting.length ? "Tell DoNext what’s out" : "Add work"}
+          </button>
+        </div>
+      ) : queue.loading && !queue.data ? (
         <p className="planner-quiet">
           <LoaderCircle className="spin" size={15} /> Checking what is waiting
         </p>
